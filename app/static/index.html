@@ -996,7 +996,7 @@ function popPupils(){ for(const e of [SP.L,SP.R]){ e.w.kick(10); e.h.kick(10); }
 // sparks: each one drifts on its own through a smooth, ever-changing current around him (no fixed rings),
 // held loosely at his edge, passing in front of and behind him
 // (local) the cloud of sparks is his context: a few in a fresh chat, denser as it fills
-const ORB_MIN=3, ORB_MAX=170, ORB_BASE=20;
+const ORB_MIN=2, ORB_MAX=70, ORB_BASE=20, CTX_FLOOR=25000;   // a brand-new chat already holds ~23k of setup
 const ORBS=[]; (()=>{ for(let i=0;i<ORB_MAX;i++){
   const el=document.createElementNS(NS,'line'), th=Math.random()*Math.PI*2, ph=Math.acos(2*Math.random()-1), R0=94+Math.random()*30;
   const rnd=()=>.25+Math.random()*.55, ang=()=>Math.random()*6.28;
@@ -1217,7 +1217,7 @@ function frame(ts){ faceRaf=0;
   swoosh=clamp(swoosh+(menuOn?1:-1)*dt/.45,0,1);
   const sw2=swoosh<.5?4*swoosh**3:1-Math.pow(-2*swoosh+2,3)/2;
   const flowA=26+spd*16, swirlK=.25+spd*.22;
-  const cp=clamp((info.context&&info.context.pct)||0,0,1), nVis=lerp(ORB_MIN,ORB_MAX,Math.pow(cp,1.15));
+  const cx=info.context||{}, cp=clamp(((cx.used||0)-CTX_FLOOR)/Math.max(1,(cx.max||1)-CTX_FLOOR),0,1), nVis=lerp(ORB_MIN,ORB_MAX,Math.pow(cp,1.6));
   for(let i=0;i<ORBS.length;i++){ const o=ORBS[i], P0=o.p;
     const vis=i<ORB_BASE?Math.max(clamp(nVis-i,0,1),sw2):clamp(nVis-i,0,1)*(1-sw2);   // the menu swoosh uses the first twenty; the rest fade
     if(vis<=0){ if(o.hid!==true){ o.el.setAttribute('opacity','0'); o.hid=true; } continue; }
