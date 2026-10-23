@@ -26,9 +26,9 @@ button{font:inherit;color:inherit}
 body.hover #stage{transform:scale(.17)}
 #stage{transition:transform .65s cubic-bezier(.34,1.3,.5,1)}
 body.bar #stage,body.unfold #stage{transition:transform .36s cubic-bezier(.3,1.25,.5,1)}   /* into / out of the notch: quick */
-body.snap #stage,body.snap #barPill,body.snap #body>circle,body.snap #body>ellipse,body.snap #orbBack,body.snap #orbFront,body.snap #ctxFog,
+body.snap #stage,body.snap #barPill,body.snap #body>circle,body.snap #body>ellipse,body.snap #orbBack,body.snap #orbFront,
 body.snap #haloW,body.snap #shadow,body.snap #accBack,body.snap #accFront{transition:none!important}  /* grabbed mid-morph */
-body.hover #orbBack,body.hover #orbFront,body.hover #ctxFog,body.hover #workW,body.hover #haloW,body.hover #vring,body.hover #raysW,body.hover #fx,body.hover #fxBack,
+body.hover #orbBack,body.hover #orbFront,body.hover #workW,body.hover #haloW,body.hover #vring,body.hover #raysW,body.hover #fx,body.hover #fxBack,
 body.hover #think,body.hover #anger,body.hover #sweat,body.hover #zz,body.hover #qmark,body.hover #tears,body.hover #cap,body.hover #chip,body.hover #atts{display:none}
 body.hover #shadow{display:none}
 /* top bar: the very same eyes (#face is untouched), his ball folded away, merged into a screen edge as a notch, the
@@ -69,9 +69,9 @@ body.bar.e-right #stage{transform:translate(136px,68px) scale(.46)}
 /* the morph is liquid (melt()): while his eyes glide up, his ball flows into the screen edge like a drop of liquid
    glass — the edge swells toward it, a neck forms, the ball is drawn in and absorbed — and back out a drop swells out
    of the notch, its neck stretches thin and snaps, and it wobbles round. The real ball parts are hidden meanwhile. */
-body.bar #body>circle,body.bar #body>ellipse,body.bar #orbBack,body.bar #orbFront,body.bar #ctxFog,body.bar #workW,body.bar #haloW,body.bar #raysW,
+body.bar #body>circle,body.bar #body>ellipse,body.bar #orbBack,body.bar #orbFront,body.bar #workW,body.bar #haloW,body.bar #raysW,
 body.bar #vring,body.bar #shadow,body.bar #accBack,body.bar #accFront,body.bar #liveTag,
-body.goohide #body>circle,body.goohide #body>ellipse,body.goohide #orbBack,body.goohide #orbFront,body.goohide #ctxFog,body.goohide #haloW,
+body.goohide #body>circle,body.goohide #body>ellipse,body.goohide #orbBack,body.goohide #orbFront,body.goohide #haloW,
 body.goohide #shadow,body.goohide #accBack,body.goohide #accFront{opacity:0;transition:none}
 body.unfold #body>circle,body.unfold #body>ellipse,body.unfold #shadow,body.unfold #accBack,body.unfold #accFront{transition:opacity .12s linear}
 body.unfold #orbBack,body.unfold #orbFront,body.unfold #haloW{transition:opacity .25s linear .08s}
@@ -486,9 +486,6 @@ body.hover #miniTip{display:none}
 <div id="stage">
   <svg id="guy" viewBox="-150 -150 300 300">
     <defs>
-      <radialGradient id="ctxFogG" cx="0" cy="0" r="150" gradientUnits="userSpaceOnUse">
-        <stop offset="0" stop-color="#c8ccd4" stop-opacity=".85"/><stop offset=".55" stop-color="#c8ccd4" stop-opacity=".6"/><stop offset="1" stop-color="#c8ccd4" stop-opacity="0"/>
-      </radialGradient>
       <radialGradient id="halo" cx="0" cy="0" r="150" gradientUnits="userSpaceOnUse">
         <stop offset=".46" class="hs" stop-opacity=".0"/><stop offset=".5" class="hs" stop-opacity=".55"/>
         <stop offset=".6" class="hs" stop-opacity=".2"/><stop offset=".8" class="hs" stop-opacity=".05"/><stop offset="1" class="hs" stop-opacity="0"/>
@@ -539,7 +536,6 @@ body.hover #miniTip{display:none}
         <path id="sweat" opacity="0" fill="#cfe8ff" d="M0-8C4-2 6 2 6 5A6 6 0 0 1-6 5C-6 2-4-2 0-8Z"/>
       </g>
       <g id="orbFront" class="orb" filter="url(#glow)"></g>
-      <circle id="ctxFog" r="150" fill="url(#ctxFogG)" opacity="0" pointer-events="none"/>
       <g id="miniFront"></g>
       <g id="fx"></g>
     </g>
@@ -972,7 +968,7 @@ const toD=pts=>'M'+pts.map(p=>p[0].toFixed(2)+' '+p[1].toFixed(2)).join('L')+'Z'
    He stays put: no bobbing or hopping — all the life is in the eyes, a gentle sway and a little squish. */
 const NS='http://www.w3.org/2000/svg';
 const E={}; ['cam','body','eL','eR','pL','pR','cpL','cpR','hlL','hlR','zz','qmark','shadow','rays','raysW','fx','fxBack','think','anger','sweat',
-  'halo','haloW','vring','workW','orbBack','orbFront','tears','ctxFog'].forEach(k=>E[k]=document.getElementById(k));
+  'halo','haloW','vring','workW','orbBack','orbFront','tears'].forEach(k=>E[k]=document.getElementById(k));
 const val=(v,i)=>Array.isArray(v)?v[i]:v;
 
 class Spring{   // f = natural frequency (Hz), z = damping ratio (1 = no overshoot)
@@ -999,7 +995,7 @@ function popPupils(){ for(const e of [SP.L,SP.R]){ e.w.kick(10); e.h.kick(10); }
 // orbiting sparks: two tilted rings of particles that pass in front of and behind the ball
 // sparks: each one drifts on its own through a smooth, ever-changing current around him (no fixed rings),
 // held loosely at his edge, passing in front of and behind him
-// (local) the cloud of sparks is his context: a few in a fresh chat, denser as it fills, a fog over him when it's time to clear
+// (local) the cloud of sparks is his context: a few in a fresh chat, denser as it fills
 const ORB_MIN=3, ORB_MAX=170, ORB_BASE=20;
 const ORBS=[]; (()=>{ for(let i=0;i<ORB_MAX;i++){
   const el=document.createElementNS(NS,'line'), th=Math.random()*Math.PI*2, ph=Math.acos(2*Math.random()-1), R0=94+Math.random()*30;
@@ -1222,7 +1218,6 @@ function frame(ts){ faceRaf=0;
   const sw2=swoosh<.5?4*swoosh**3:1-Math.pow(-2*swoosh+2,3)/2;
   const flowA=26+spd*16, swirlK=.25+spd*.22;
   const cp=clamp((info.context&&info.context.pct)||0,0,1), nVis=lerp(ORB_MIN,ORB_MAX,Math.pow(cp,1.15));
-  E.ctxFog.setAttribute('opacity',(clamp((cp-.55)/.4,0,1)*.75).toFixed(3));
   for(let i=0;i<ORBS.length;i++){ const o=ORBS[i], P0=o.p;
     const vis=i<ORB_BASE?Math.max(clamp(nVis-i,0,1),sw2):clamp(nVis-i,0,1)*(1-sw2);   // the menu swoosh uses the first twenty; the rest fade
     if(vis<=0){ if(o.hid!==true){ o.el.setAttribute('opacity','0'); o.hid=true; } continue; }
