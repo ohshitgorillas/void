@@ -1907,7 +1907,7 @@ function onEvent(ev){
 /* ================= mic (recorded by the server — no browser permissions involved) ================= */
 async function startRec(mode){
   if(rec||transcribing||(busy&&mode!=='approve')) return null;
-  if(mode!=='approve'){ if(followCur){ followQ.unshift(followCur); followCur=null; clearTimeout(followT); followT=setTimeout(followTry,600); } shush(); }   // (a helper's result you cut off: told again after)
+  if(mode!=='approve'){ followCur=null; shush(); }   // (a helper's result you cut off counts as heard: never told again)
   wake(); hideAsk(); menu(false);
   const r=rec={mode,stopping:false,opened:false,cancelled:false};
   if(mode!=='approve'){ capShow(); setYou(''); himSet(''); }       // (the cue comes when the mic is actually open)
