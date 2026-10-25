@@ -1638,11 +1638,11 @@ function miniFrame(ts,dt,dxp){
   gooSet(slime); beadGooSet(beadSlime,geo);
 }
 // his eyes on his helpers: a look at each new one as it buds (miniAdd), and every 6–15 s he follows one round its ring
-// for 1.5–3 s. Feeds the gaze target in frame(); never while he's listening, speaking or asking you something.
+// for 1.5–3 s. Feeds the gaze target in frame(); never while he's asleep, listening, speaking or asking you something.
 let hgaze=null, hgazeNext=0;
 function helperGaze(ts,m,away){
   if(!MINIS.size){ hgaze=null; return null; }
-  if(away||rec||follow||playing||m==='listening'||m==='pleading'||isTalk(m)){ hgaze=null; hgazeNext=Math.max(hgazeNext,ts+3000); return null; }
+  if(away||rec||follow||playing||m==='sleepy'||m==='listening'||m==='pleading'||isTalk(m)){ hgaze=null; hgazeNext=Math.max(hgazeNext,ts+3000); return null; }
   if(hgaze&&(ts>hgaze.until||!MINIS.has(hgaze.m.id)||hgaze.m.st==='merge')) hgaze=null;
   if(!hgaze&&ts>hgazeNext){ const c=[...MINIS.values()].filter(x=>x.st==='orbit');
     if(c.length) hgaze={m:c[Math.random()*c.length|0], until:ts+1500+Math.random()*1500};
