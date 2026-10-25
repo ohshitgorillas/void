@@ -185,6 +185,52 @@ class Echo(unittest.TestCase):
         self.assertEqual(self.burst("thank you for watching"), [])
         self.assertEqual(self.burst("okay"), [])
 
+    # noise in the follow-up window (what the log showed turning into requests)
+    def test_repeated_phrase_is_noise(self):
+        for junk in ("Oh my god, oh my god", "Go. Go. Go.", "", "   "):
+            self.after_speech(server.ECHO_TAIL + 0.6)
+            server.Wake.follow_from = 0.0
+            self.assertEqual(self.burst(junk), [], junk)
+        self.assertFalse(server.is_noise("please add milk to the shopping list"))
+        self.assertFalse(server.is_noise("very very good"))
+
+    def test_mic_gain_learns_only_from_your_requests(self):
+        learn = mock.Mock()
+        with mock.patch.object(server.MicAuto, "learn", learn):
+            self.after_speech(server.ECHO_TAIL + 0.6)
+            server.Wake.follow_from = 0.0
+            self.burst("")                                   # "heard 2.0s, 0 words"
+            self.burst("Go. Go. Go.")
+            learn.assert_not_called()
+            self.assertFollowUp(self.burst("please add milk to the shopping list"))
+            learn.assert_called_once()
+
+
+class Seg:
+    def __init__(self, text, avg_logprob=-0.3, no_speech_prob=0.1, compression_ratio=1.4):
+        self.text, self.avg_logprob, self.no_speech_prob, self.compression_ratio = (text, avg_logprob, no_speech_prob,
+                                                                                    compression_ratio)
+
+
+@unittest.skipIf(server is None, f"server.py doesn't import here: {IMPORT_ERR}")
+class Sure(unittest.TestCase):
+    """transcribe_pcm(sure=True), what the always-on mic uses: drops what Whisper itself isn't sure it heard."""
+
+    def run_on(self, segs, **kw):
+        model = mock.Mock()
+        model.transcribe.return_value = (iter(segs), None)
+        with mock.patch.object(server, "whisper", lambda: model):
+            return server.run_whisper(server.pcm_audio(PCM), **kw)
+
+    def test_unsure_segments_dropped(self):
+        segs = [Seg("Please add milk."), Seg("Oh my god.", avg_logprob=-1.4), Seg("Go go go go go.", compression_ratio=3.1),
+                Seg("Hmm.", avg_logprob=-0.8, no_speech_prob=0.9)]
+        self.assertEqual(self.run_on(segs, sure=True), "Please add milk.")
+
+    def test_push_to_talk_keeps_everything(self):
+        self.assertEqual(self.run_on([Seg("Please add milk."), Seg("to the list", avg_logprob=-1.4)]),
+                         "Please add milk. to the list")
+
 
 if __name__ == "__main__":
     unittest.main()
