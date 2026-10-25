@@ -3103,11 +3103,12 @@ const CP=(()=>{
   };
   VIEWS.MultiEdit=VIEWS.Edit; VIEWS.NotebookEdit=VIEWS.Edit; VIEWS.Glob=VIEWS.Grep; VIEWS.LS=VIEWS.Grep; VIEWS.WebFetch=VIEWS.WebSearch;
 
+  const NO_TERMINAL=new Set(['Agent','Task']);     // a helper shows as its own little Void, never in the terminal
   async function run(){ running=true;
     while(q.length){ const ev=q.shift(); try{ await (VIEWS[ev.name]||VIEWS.other)(ev); }catch(e){ console.log('[void] terminal',e); } }
     running=false; if(!busy||answering) hide(); }
   return {
-    tool(ev){ if(info.code_panel===false) return; answering=false; q.push(ev); if(!running) run(); },
+    tool(ev){ if(info.code_panel===false||NO_TERMINAL.has(ev.name)) return; answering=false; q.push(ev); if(!running) run(); },
     result(ev){ RES[ev.id]={text:ev.text||'',is_error:!!ev.is_error}; },
     answer(){ answering=true; if(!running) hide(); },
     done(){ answering=false; if(!running) hide(); },
