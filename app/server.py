@@ -1475,8 +1475,8 @@ class Wake:
 
     @classmethod
     def window_open(cls):
-        """The "just talk" window: after he's done, and not while Claude is still working on the answer."""
-        return not cls.speaking() and cls.follow_from <= time.monotonic() < cls.follow_until and not ST.lock.locked()
+        """The "just talk" window: after he's done (even while Claude is still working: the page holds it till then)."""
+        return not cls.speaking() and cls.follow_from <= time.monotonic() < cls.follow_until
 
     @classmethod
     def talking_until(cls, end):
@@ -1624,18 +1624,18 @@ class Wake:
     @classmethod
     def check(cls, pcm, started, text=None):
         # started after he finished talking, inside the follow-up window → it's a request, no "hey Void" needed
-        follow = not cls.speaking() and cls.follow_from <= started < cls.follow_until and not ST.lock.locked()
-        if not cls.speaking() and started < cls.speaking_until + ECHO_TAIL:    # began while he talked / in the echo: his voice
-            print("[void] ignored while talking", file=sys.stderr)
-            return
-        if not cls.speaking():                   # (while he talks the mic also hears him: don't tune to his voice)
+        # (Claude may still be working: the page keeps it and sends it once he's done)
+        follow = not cls.speaking() and cls.follow_from <= started < cls.follow_until
+        # began while he talked / in his echo: may be his voice (is_echo below) or you answering over him
+        over = cls.speaking() or started < cls.speaking_until + ECHO_TAIL
+        if not over:                             # (while he talks the mic also hears him: don't tune to his voice)
             MicAuto.learn(pcm)
         try:
             ss = speech_seconds(pcm)
             if ss < 0.25 or ss < len(pcm) / (RATE * 2) * 0.2:    # music or noise, not talking: don't let Whisper dream up words
                 return
             if text is None:
-                text = transcribe_pcm(pcm) if follow else transcribe_pcm(pcm, beam=1, hint="Hey Void.")
+                text = transcribe_pcm(pcm) if follow or over else transcribe_pcm(pcm, beam=1, hint="Hey Void.")
         except Exception as e:  # noqa: BLE001
             print(f"[void] wake word stt: {e}", file=sys.stderr)
             return
@@ -1646,16 +1646,27 @@ class Wake:
         if is_echo(text):
             print(f"[void] dropped echo of own speech: {text.strip()[:80]}", file=sys.stderr)
             return
-        if cls.speaking():
-            if STOP_RE.fullmatch((text or "").strip(" .,!?").lower()) or m:
-                BUS.pub(t="barge", listen=bool(m), text=(m.group(2).strip(" .,!?") if m else ""))
+        said = (text or "").strip(" .,!?")
+        if cls.speaking() and (STOP_RE.fullmatch(said.lower()) or m):
+            BUS.pub(t="barge", listen=bool(m), text=(m.group(2).strip(" .,!?") if m else ""))
+            cls.hush()
+            return
+        if over and not m:
+            # you talked over him (or right as he finished) and it isn't his echo: a barge-in, taken as a follow-up
+            if (len(said.split()) >= ECHO_MIN and said.lower() not in NOISE_WORDS
+                    and (CFG.get("barge_in") or CFG.get("follow_up"))):
+                print("[void] barge-in: heard you over him", file=sys.stderr)
+                if not Speaker.idle():
+                    Speaker.stop()               # (also hushes us)
                 cls.hush()
+                BUS.pub(t="wake", text=said, follow=True)
+            else:
+                print("[void] ignored while talking", file=sys.stderr)
             return
         if m:
             rest = m.group(2).strip(" .,!?")
             BUS.pub(t="wake", text=rest)
         elif follow:
-            said = (text or "").strip(" .,!?")
             if len(said.split()) >= 2 and said.lower() not in NOISE_WORDS:     # (a stray word isn't a request)
                 cls.follow_until = 0.0
                 BUS.pub(t="wake", text=said, follow=True)

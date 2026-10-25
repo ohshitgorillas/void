@@ -1,5 +1,6 @@
-"""Void must not hear his own voice as yours: a burst heard while he talks (or just after) is dropped, and so is
-any transcript that mostly repeats what he said in the last minute. Barge-in and push-to-talk still work.
+"""Void must not hear his own voice as yours: any transcript that mostly repeats what he said in the last minute is
+dropped. But you answering over him (or right as he finishes) is heard: he hushes and takes it as a follow-up.
+Stop words, barge-in and push-to-talk still work.
 
     python3 -m unittest discover -s tests
 """
@@ -85,15 +86,27 @@ class Echo(unittest.TestCase):
         server.Wake.talking_until(time.monotonic())
         self.assertGreaterEqual(server.Wake.follow_from, server.Wake.speaking_until + server.ECHO_TAIL)
 
-    def test_follow_up_in_tail_dropped(self):
-        self.after_speech(0.3)               # 0.3 s past the end of his speech: still his room echo
-        self.assertEqual(self.burst("please add milk to the shopping list", time.monotonic() - 0.5), [])
+    def assertFollowUp(self, ev, text="please add milk to the shopping list"):
+        self.assertEqual([(e.get("t"), e.get("text"), e.get("follow")) for e in ev], [("wake", text, True)])
 
-    def test_burst_started_before_tail_end_dropped(self):
+    def test_answer_in_tail_heard(self):         # you answered as he finished: not his echo, so it's yours
+        self.after_speech(0.3)
+        self.assertFollowUp(self.burst("please add milk to the shopping list", time.monotonic() - 0.5))
+
+    def test_answer_started_before_tail_end_heard(self):
         self.after_speech(1.6)
         started = server.Wake.speaking_until + server.ECHO_TAIL - 0.2
         server.Wake.follow_from = 0.0
-        self.assertEqual(self.burst("please add milk to the shopping list", started), [])
+        self.assertFollowUp(self.burst("please add milk to the shopping list", started))
+
+    def test_echo_in_tail_dropped(self):
+        self.after_speech(0.3)
+        server.note_spoken(REPLY)
+        self.assertEqual(self.burst("I moved the meeting to Thursday at three", time.monotonic() - 0.5), [])
+
+    def test_stray_word_in_tail_ignored(self):
+        self.after_speech(0.3)
+        self.assertEqual(self.burst("um", time.monotonic() - 0.5), [])
 
     def test_follow_up_after_tail_accepted(self):
         self.after_speech(server.ECHO_TAIL + 0.6)
@@ -101,6 +114,14 @@ class Echo(unittest.TestCase):
         ev = self.burst("please add milk to the shopping list")
         self.assertEqual([e.get("t") for e in ev], ["wake"])
         self.assertTrue(ev[0]["follow"])
+
+    def test_follow_up_while_claude_works_heard(self):      # the page holds it until his reply is done
+        self.after_speech(server.ECHO_TAIL + 0.6)
+        server.Wake.follow_from = 0.0
+        self.assertTrue(server.ST.lock.acquire(blocking=False))
+        self.addCleanup(server.ST.lock.release)
+        self.assertTrue(server.Wake.window_open())
+        self.assertFollowUp(self.burst("please add milk to the shopping list"))
 
     def test_follow_up_echo_dropped_after_tail(self):
         self.after_speech(server.ECHO_TAIL + 0.6)
@@ -131,9 +152,28 @@ class Echo(unittest.TestCase):
         server.Wake.talking_until(time.monotonic() + 5)
         self.assertEqual(self.burst("Hey Void, you can ask me anything about the calendar"), [])
 
-    def test_other_speech_while_talking_ignored(self):
+    def test_answer_while_talking_barges_in(self):
         server.Wake.talking_until(time.monotonic() + 5)
-        self.assertEqual(self.burst("please add milk to the shopping list"), [])
+        self.assertFollowUp(self.burst("please add milk to the shopping list"))
+        self.assertEqual(server.Wake.speaking_until, 0.0)          # hushed
+
+    def test_answer_while_talking_stops_native_voice(self):
+        server.Wake.talking_until(time.monotonic() + 5)
+        stop = mock.Mock()
+        with mock.patch.object(server.Speaker, "idle", classmethod(lambda cls: False)), \
+                mock.patch.object(server.Speaker, "stop", stop):
+            self.assertFollowUp(self.burst("please add milk to the shopping list"))
+        stop.assert_called_once()
+
+    def test_echo_while_talking_dropped(self):
+        server.note_spoken(REPLY)
+        server.Wake.talking_until(time.monotonic() + 5)
+        self.assertEqual(self.burst("I moved the meeting to Thursday at three"), [])
+
+    def test_noise_while_talking_ignored(self):
+        server.Wake.talking_until(time.monotonic() + 5)
+        self.assertEqual(self.burst("thank you for watching"), [])
+        self.assertEqual(self.burst("okay"), [])
 
 
 if __name__ == "__main__":
