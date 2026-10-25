@@ -2037,8 +2037,8 @@ $('#clipB').addEventListener('contextmenu',e=>{ e.preventDefault(); e.stopPropag
 const SCREEN_RE=/\b(my|the|this|on( the)?) screen\b|\bscreenshot\b|\bwhat am i looking at\b|\blook at (this|that|it)\b|\bsee (this|that)\b/i;
 const WHOLE_RE=/\b(whole|entire|full) screen\b|\ball (my )?(screens|monitors)\b/i;   // otherwise just the window you're using
 // live view: he sees your screen only while you've told him to — a fresh picture rides along with each thing you say
-const LIVE_ON=/^(?:hey\s+void[,\s]+)?(?:please\s+)?(?:(?:start|turn on|open)\s+)?(?:live view|live mode|watch(?:ing)? (?:my |the )?screen|keep an eye on (?:my |the )?screen|look live|see (?:my screen )?live)\b/i;
-const LIVE_OFF=/^(?:hey\s+void[,\s]+)?(?:please\s+)?(?:stop (?:watching|looking)(?: (?:at )?(?:my |the )?screen)?|(?:turn off|stop|close|end) (?:the )?live(?: view| mode)?|live(?: view)? off)\b/i;
+const LIVE_ON=/^(?:hey\W+void\W+)?(?:please\s+)?(?:(?:start|turn on|open)\s+)?(?:live view|live mode|watch(?:ing)? (?:my |the )?screen|keep an eye on (?:my |the )?screen|look live|see (?:my screen )?live)\b/i;
+const LIVE_OFF=/^(?:hey\W+void\W+)?(?:please\s+)?(?:stop (?:watching|looking)(?: (?:at )?(?:my |the )?screen)?|(?:turn off|stop|close|end) (?:the )?live(?: view| mode)?|live(?: view)? off)\b/i;
 let liveUntil=0, liveT=null;
 function setLive(on,why){
   clearTimeout(liveT); liveUntil=on?Date.now()+(info.live_minutes||10)*60000:0;
@@ -2108,17 +2108,17 @@ function approvalGone(id){ if(pendingAppr&&pendingAppr.id===id){ if(rec&&rec.mod
 apEl.addEventListener('click',e=>{ const b=e.target.closest('[data-ans]'); if(b) answer(b.dataset.ans); });
 
 /* ================= talk to claude code ================= */
-const MEM_ADD=/^(?:hey\s+void[,\s]+)?(?:please\s+)?(?:remember|don'?t forget|note down|make a note)\s*(?:that|this|:)?\s+(.{3,})$/i;
-const MEM_DEL=/^(?:hey\s+void[,\s]+)?(?:please\s+)?forget\s+(?:that|about|the)?\s*(.{3,})$/i;
-const CTX_TIDY=/^(?:(?:hey\s+)?void[,\s]+)?(?:please\s+)?(?:tidy up|clean up your memory|compact (?:your |the )?(?:memory|context|chat))\W*$/i;
-const MEM_SHOW=/^(?:hey\s+void[,\s]+)?what (?:do|did) you (?:remember|know about me)\b/i;
-const PROJ_ADD=/^(?:hey\s+void[,\s]+)?(?:remember|note)\s+(?:that\s+)?((?:my|the)\s+.+?)\s+(?:project\s+|folder\s+|repo\s+)?(?:is|lives)\s+(?:in|at)\s+(~?\/?[\w.\/-]+)\s*\.?$/i;
+const MEM_ADD=/^(?:hey\W+void\W+)?(?:please\s+)?(?:remember|don'?t forget|note down|make a note)\s*(?:that|this|:)?\s+(.{3,})$/i;
+const MEM_DEL=/^(?:hey\W+void\W+)?(?:please\s+)?forget\s+(?:that|about|the)?\s*(.{3,})$/i;
+const CTX_TIDY=/^(?:(?:hey\W+)?void\W+)?(?:(?:please|okay|ok|now)\W+)*(?:tidy[\s-]+(?:it |things |yourself )?up|clean up your memory|compact (?:your |the )?(?:memory|context|chat))(?:\W+(?:please|now|void))*\W*$/i;
+const MEM_SHOW=/^(?:hey\W+void\W+)?what (?:do|did) you (?:remember|know about me)\b/i;
+const PROJ_ADD=/^(?:hey\W+void\W+)?(?:remember|note)\s+(?:that\s+)?((?:my|the)\s+.+?)\s+(?:project\s+|folder\s+|repo\s+)?(?:is|lives)\s+(?:in|at)\s+(~?\/?[\w.\/-]+)\s*\.?$/i;
 const NICE=/\b(thank(s| you)|good job|well done|nice( one| work)?|love you|you'?re (the best|awesome|cute|great)|good boy|cutie)\b/i;
 async function send(text,opts={}){
   text=(text||'').trim(); if(!text&&!atts.length) return; wake();
   if(text.startsWith('/')) return slash(text);
   // memory: handled right here, instantly
-  let mm; const question=/\?\s*$/.test(text)||/^(?:hey\s+void[,\s]+)?(?:do|did|can|could) you\b|^remember (what|when|how|where|why|which|who|if|the time)\b/i.test(text);
+  let mm; const question=/\?\s*$/.test(text)||/^(?:hey\W+void\W+)?(?:do|did|can|could) you\b|^remember (what|when|how|where|why|which|who|if|the time)\b/i.test(text);
   if(!question && (mm=text.match(PROJ_ADD))){ const r=await (await post('/api/projects',{op:'add',name:mm[1],path:mm[2]})).json();
     if(!r.error){ info.projects=r.projects; capShow(); setYou(text); say(`Got it — say “switch to ${mm[1].replace(/^(my|the) /i,'')}” any time.`); poke('wink',1300); sfx('ok'); return; } }
   if(!question && (mm=text.match(MEM_ADD))){ const r=await (await post('/api/memory',{op:'add',text:mm[1].replace(/[.!]+$/,'')})).json();

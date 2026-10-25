@@ -7,6 +7,8 @@ set -eu
 CONTENTS="$(cd "$(dirname "$0")/.." && pwd)"
 PY="$CONTENTS/Resources/python/bin/python3"; APP="$CONTENTS/Resources/app"
 ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/void"; LOG="$ROOT/server.log"
+# installed with ./install.sh too? that copy is the one kept up to date — open it, never this bundle's older one beside it
+[ -x "$HOME/.local/bin/void" ] && [ -x "$ROOT/venv/bin/python" ] && [ -f "$ROOT/app/server.py" ] && exec "$HOME/.local/bin/void" "$@"
 export PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1    # nothing from ~/.local, nothing written into the signed bundle
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"   # Finder gives a bare PATH
 mkdir -p "$ROOT"
