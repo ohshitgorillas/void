@@ -1897,7 +1897,8 @@ function onEvent(ev){
     if(ev.follow&&hiddenNow) return;          // you sent him away: talking afterwards isn't for him (only "hey Void" is)
     if(hiddenNow) native('show');
     if(info.hover){ comeBack().then(()=>onEvent(ev)); return; }
-    if(ev.follow){ if(busy) return; wake(); send(ev.text,{follow:true}); return; }   // talked right after he answered: no "hey Void" needed
+    if(ev.follow){ wake(); if(busy){ shush(); heldQ.push(ev.text); heldTry(); return; }   // talked right after he answered: no "hey Void" needed
+      send(ev.text,{follow:true}); return; }   // (still working on the last one: kept, and sent once it's done)
     poke('surprised',500); wake(); sfx('wake');
     if(ev.text && ev.text.split(/\s+/).length>=2) send(ev.text); else if(!busy) startRec('auto'); else tick("one sec — I'm still on the last thing");
   }
@@ -2182,6 +2183,15 @@ async function send(text,opts={}){
     const m=task||big?'excited':['happy','wink','joy'][Math.random()*3|0];
     whenQuiet(()=>{ poke(m,m==='excited'?2600:1700); if(m==='excited'&&barEdge()) notchPulse('#3ddc84'); }); }
   refresh();
+}
+
+/* you answered while he was still working (talked over him, or between his sentences): kept, hushes him, and goes out
+   the moment this reply is done, as one follow-up if you said several things */
+const heldQ=[]; let heldT=null;
+function heldTry(){
+  clearTimeout(heldT); heldT=null; if(!heldQ.length) return;
+  if(busy){ heldT=setTimeout(heldTry,300); return; }
+  send(heldQ.splice(0).join(' '),{follow:true});
 }
 
 /* a helper's result, told unasked ("the search finished, here's what it found"). Never over you or over himself: it
