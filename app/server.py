@@ -1426,6 +1426,7 @@ FOLLOW_NOTE = ("(Voice note from Void: the mic picked this up a few seconds afte
                "else, reply with exactly [ignore] and nothing else, and use no tools. Otherwise just answer it normally.)\n\n")
 IGNORE = "[ignore]"
 ECHO_TAIL = 1.0          # s after he stops talking that the room still rings: a burst starting before then is his own voice
+ECHO_RUN = 2.0           # …unless it runs on this long past the ringing: then it's you, answering as he finished
 ECHO_KEEP, ECHO_RATIO, ECHO_MIN = 60, 0.55, 3    # remember what he said for 60 s · share of heard words matched · fewest words to judge
 ECHO_LIKE, ECHO_SKIP = 0.6, 0.25                 # how alike two words must be to count · cost of each of his words the burst skips
 SPOKEN = collections.deque(maxlen=200)           # (monotonic time, text) of what he said lately
@@ -1611,6 +1612,8 @@ class Wake:
                                 vad_last = now - (len(tail) / (RATE * 2) - e)
                             elif e is False:
                                 vad_last = now
+                        if not req and cls.ran_on(started, last_voice):
+                            req = True                    # you started answering as he finished: hear your turn out
                         if req:
                             done = (now - last_voice > TURN_QUIET or now - vad_last > TURN_VAD
                                     or len(seg) > RATE * 2 * TURN_MAX)
@@ -1626,7 +1629,7 @@ class Wake:
                         if done:
                             in_speech = False
                             if len(seg) > RATE * 2 * 0.35:
-                                cls.check(bytes(seg), started, None if req else said)
+                                cls.check(bytes(seg), started, None if req else said, ended=last_voice)
                             seg, req, said = bytearray(), False, None
                     else:
                         pre = (pre + fr)[-FRAME * 8:]
@@ -1653,12 +1656,22 @@ class Wake:
             return None
 
     @classmethod
-    def check(cls, pcm, started, text=None):
+    def ran_on(cls, started, ended):
+        """A burst that began while he talked (or in his echo) but went on well after he stopped: you answering him."""
+        tail = cls.speaking_until + ECHO_TAIL
+        return (not cls.speaking() and started < tail <= ended - ECHO_RUN
+                and cls.follow_until > cls.speaking_until)       # (and he's open to a follow-up)
+
+    @classmethod
+    def check(cls, pcm, started, text=None, ended=None):
+        ended = time.monotonic() if ended is None else ended     # (when you last made a sound)
         # started after he finished talking, inside the follow-up window → it's a request, no "hey Void" needed
         # (Claude may still be working: the page keeps it and sends it once he's done)
         follow = not cls.speaking() and cls.follow_from <= started < cls.follow_until
         # began while he talked / in his echo: may be his voice (is_echo below) or you answering over him
         over = cls.speaking() or started < cls.speaking_until + ECHO_TAIL
+        if over and cls.ran_on(started, ended):   # …but it ran on long after: your turn, as a follow-up
+            follow, over = True, False
         try:
             ss = speech_seconds(pcm)
             if ss < 0.25 or ss < len(pcm) / (RATE * 2) * 0.2:    # music or noise, not talking: don't let Whisper dream up words
@@ -1677,11 +1690,16 @@ class Wake:
             print(f"[void] dropped echo of own speech: {text.strip()[:80]}", file=sys.stderr)
             return
         said = (text or "").strip(" .,!?")
+
+        def log(what):                           # (what it heard, so the next missed turn shows in the log)
+            print(f"[void] {what}: {said[:80]}", file=sys.stderr)
         if is_noise(said):                       # nothing, filler, or one phrase looping: the room, not you
+            if said:
+                log("dropped as noise")
             return
         low = said.lower()
         if cls.speaking() and (m or STOP_RE.fullmatch(low) or STOP_IN_RE.search(low)):
-            print("[void] barge-in: you told him to stop", file=sys.stderr)
+            log("barge-in: you told him to stop")
             if not Speaker.idle():
                 Speaker.stop()                   # (also hushes us)
             BUS.pub(t="barge", listen=bool(m), text=(m.group(2).strip(" .,!?") if m else ""))
@@ -1689,17 +1707,23 @@ class Wake:
             return
         if over and not m:
             # anything else heard while he talks (or in his echo) is most likely his own voice, garbled: never a barge-in
-            print("[void] ignored while talking", file=sys.stderr)
+            log("ignored while talking")
             return
         if m:
             rest = m.group(2).strip(" .,!?")
+            log("wake word request")
             MicAuto.learn(pcm)                   # (only your requests tune the mic: not noise, not his voice)
             BUS.pub(t="wake", text=rest)
         elif follow:
             if len(said.split()) >= 2:           # (a stray word isn't a request)
+                log("follow-up request")
                 cls.follow_until = 0.0
                 MicAuto.learn(pcm)
                 BUS.pub(t="wake", text=said, follow=True)
+            else:
+                log("ignored stray word")
+        else:
+            log("ignored: no \"hey Void\"")
 
 
 def doctor():
