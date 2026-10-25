@@ -1415,6 +1415,8 @@ def list_mics():
 
 STOP_RE = re.compile(r"(?:ok(?:ay)?\W+|void\W+|hey\W+void\W+)?(?:stop|wait|shush|shh+|quiet|be quiet|shut up|hold on|hang on|"
                      r"enough|stop talking|that's enough|thanks?(?: you)?|got it)(?:\W+(?:void|please|now))?")
+# while he talks only these stop him, anywhere in what the mic caught (his own voice, however garbled, says none of them)
+STOP_IN_RE = re.compile(r"\b(?:stop|hold on|hang on|shut up|be quiet|shush|shh+|that's enough)\b")
 # sent ahead of a follow-up (said without "hey Void") so Claude can tell if it was even meant for him
 FOLLOW_NOTE = ("(Voice note from Void: the mic picked this up a few seconds after your last reply, without \"hey Void\". "
                "If it is clearly not meant for you, e.g. the user thinking out loud, talking to themselves or to someone "
@@ -1659,20 +1661,17 @@ class Wake:
         said = (text or "").strip(" .,!?")
         if is_noise(said):                       # nothing, filler, or one phrase looping: the room, not you
             return
-        if cls.speaking() and (STOP_RE.fullmatch(said.lower()) or m):
+        low = said.lower()
+        if cls.speaking() and (m or STOP_RE.fullmatch(low) or STOP_IN_RE.search(low)):
+            print("[void] barge-in: you told him to stop", file=sys.stderr)
+            if not Speaker.idle():
+                Speaker.stop()                   # (also hushes us)
             BUS.pub(t="barge", listen=bool(m), text=(m.group(2).strip(" .,!?") if m else ""))
             cls.hush()
             return
         if over and not m:
-            # you talked over him (or right as he finished) and it isn't his echo: a barge-in, taken as a follow-up
-            if len(said.split()) >= ECHO_MIN and (CFG.get("barge_in") or CFG.get("follow_up")):
-                print("[void] barge-in: heard you over him", file=sys.stderr)
-                if not Speaker.idle():
-                    Speaker.stop()               # (also hushes us)
-                cls.hush()
-                BUS.pub(t="wake", text=said, follow=True)
-            else:
-                print("[void] ignored while talking", file=sys.stderr)
+            # anything else heard while he talks (or in his echo) is most likely his own voice, garbled: never a barge-in
+            print("[void] ignored while talking", file=sys.stderr)
             return
         if m:
             rest = m.group(2).strip(" .,!?")

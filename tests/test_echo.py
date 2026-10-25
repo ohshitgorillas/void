@@ -1,6 +1,6 @@
 """Void must not hear his own voice as yours: any transcript that mostly repeats what he said in the last minute is
-dropped. But you answering over him (or right as he finishes) is heard: he hushes and takes it as a follow-up.
-Stop words, barge-in and push-to-talk still work.
+dropped. While he talks (and in his echo just after) only "stop" / "hey Void" and the like cut him off: anything else
+the mic catches then is taken for his own voice, however garbled, and dropped. Push-to-talk still works.
 
     python3 -m unittest discover -s tests
 """
@@ -99,15 +99,15 @@ class Echo(unittest.TestCase):
     def assertFollowUp(self, ev, text="please add milk to the shopping list"):
         self.assertEqual([(e.get("t"), e.get("text"), e.get("follow")) for e in ev], [("wake", text, True)])
 
-    def test_answer_in_tail_heard(self):         # you answered as he finished: not his echo, so it's yours
+    def test_words_in_tail_dropped(self):          # still his echo ringing: not a request
         self.after_speech(0.3)
-        self.assertFollowUp(self.burst("please add milk to the shopping list", time.monotonic() - 0.5))
+        self.assertEqual(self.burst("please add milk to the shopping list", time.monotonic() - 0.5), [])
 
-    def test_answer_started_before_tail_end_heard(self):
+    def test_words_started_before_tail_end_dropped(self):
         self.after_speech(1.6)
         started = server.Wake.speaking_until + server.ECHO_TAIL - 0.2
         server.Wake.follow_from = 0.0
-        self.assertFollowUp(self.burst("please add milk to the shopping list", started))
+        self.assertEqual(self.burst("please add milk to the shopping list", started), [])
 
     def test_echo_in_tail_dropped(self):
         self.after_speech(0.3)
@@ -162,18 +162,48 @@ class Echo(unittest.TestCase):
         server.Wake.talking_until(time.monotonic() + 5)
         self.assertEqual(self.burst("Hey Void, you can ask me anything about the calendar"), [])
 
-    def test_answer_while_talking_barges_in(self):
+    def test_stop_said_with_his_name_while_talking(self):
         server.Wake.talking_until(time.monotonic() + 5)
-        self.assertFollowUp(self.burst("please add milk to the shopping list"))
+        self.assertEqual([e.get("t") for e in self.burst("Void, stop")], ["barge"])
         self.assertEqual(server.Wake.speaking_until, 0.0)          # hushed
 
-    def test_answer_while_talking_stops_native_voice(self):
+    def test_stop_inside_longer_burst_while_talking(self):
+        server.Wake.talking_until(time.monotonic() + 5)
+        self.assertEqual([e.get("t") for e in self.burst("okay okay hold on a second")], ["barge"])
+
+    def test_stop_while_talking_stops_native_voice(self):
         server.Wake.talking_until(time.monotonic() + 5)
         stop = mock.Mock()
         with mock.patch.object(server.Speaker, "idle", classmethod(lambda cls: False)), \
                 mock.patch.object(server.Speaker, "stop", stop):
-            self.assertFollowUp(self.burst("please add milk to the shopping list"))
+            self.assertEqual([e.get("t") for e in self.burst("shut up")], ["barge"])
         stop.assert_called_once()
+
+    def test_words_while_talking_never_barge_in(self):
+        server.Wake.talking_until(time.monotonic() + 5)
+        stop = mock.Mock()
+        with mock.patch.object(server.Speaker, "stop", stop):
+            self.assertEqual(self.burst("please add milk to the shopping list"), [])
+        stop.assert_not_called()
+        self.assertGreater(server.Wake.speaking_until, time.monotonic())   # still talking
+
+    # what the log showed cutting him off: his own sentences, too garbled for the echo match
+    def test_garbled_echo_while_talking_no_barge_in(self):
+        server.note_spoken("Kill 'Em All really belongs in the 30K rolloff folder.")
+        server.Wake.talking_until(time.monotonic() + 5)
+        self.assertEqual(self.burst("I can kill them all really long in a 30K bonus folder"), [])
+        self.assertGreater(server.Wake.speaking_until, time.monotonic())
+
+    def test_garbled_tail_of_his_sentence_no_barge_in(self):   # "heard 7.0s, 22 words, while talking"
+        server.note_spoken("The other two albums are already sorted, and the remaster sits next to the original "
+                           "pressing so you can compare them side by side whenever you like.")
+        server.Wake.talking_until(time.monotonic() + 5)
+        tail = ("sorted in the remaster since next to the regional pressing so you can compare them, "
+                "side by side when ever you like")
+        self.assertEqual(len(tail.split()), 22)
+        self.assertEqual(self.burst(tail), [])
+        self.assertEqual(self.burst("But you might want to check me."), [])
+        self.assertGreater(server.Wake.speaking_until, time.monotonic())
 
     def test_echo_while_talking_dropped(self):
         server.note_spoken(REPLY)
