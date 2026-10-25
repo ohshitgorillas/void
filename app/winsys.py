@@ -96,16 +96,14 @@ class _PA:
 
 def stop():
     """Void is quitting: close every stream and stop PortAudio, for good. Runs at exit ahead of sounddevice's own
-    clean-up — otherwise the wake word sees its mic die under that, opens a new one on a PortAudio started over, and its
-    callback then comes in while Python is tearing itself down: it can't get Python back, and macOS reports a crash."""
+    clean-up, which _fresh takes off — otherwise the wake word sees its mic die under that, opens a new one on a PortAudio
+    started over, and its callback then comes in while Python is tearing itself down: it can't get Python back, and macOS
+    reports a crash."""
     import sys
     _PA.done = True                                        # (set first, lock or not: nothing opens after this)
     with _PA.brief() as got:
         if not got:                                        # a stream's open is stuck on the microphone permission
-            sd = sys.modules.get("sounddevice")            # prompt: quitting can't wait for it (the process exits anyway),
-            if sd is not None and hasattr(sd, "_exit_handler"):
-                atexit.unregister(sd._exit_handler)        # nor may sounddevice's own clean-up Pa_Terminate beside it
-            return
+            return                                         # prompt: quitting can't wait for it (the process exits anyway)
         for s in list(_PA.live):
             s.kill()
         sd = sys.modules.get("sounddevice")
@@ -130,7 +128,9 @@ def _fresh(sd, close=True, force=False):
         if _PA.done:
             raise sd.PortAudioError("PortAudio has stopped: Void is quitting")
         if not _PA.hooked:                                 # (sounddevice is imported by now, its clean-up registered:
-            _PA.hooked = True                              # this one, registered after, runs before it)
+            _PA.hooked = True                              # stop() takes that over, so it's taken off now — taking it
+            if hasattr(sd, "_exit_handler"):               # off at exit does nothing on Python 3.14+, which runs a copy
+                atexit.unregister(sd._exit_handler)        # of the list)
             atexit.register(stop)
         sig = _sig()
         if not (force or _PA.stale or (sig is not None and sig != _PA.sig)) or (_PA.live and not close):
