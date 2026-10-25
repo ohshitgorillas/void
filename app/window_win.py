@@ -654,6 +654,10 @@ class VoidWindow(QWidget):
 
     def _poll_mouse(self):
         if self.hover:
+            if self._escape_down():                                      # Esc: off your pointer and back home, even
+                self.set_hover(False)                                    # though he takes no clicks or keys as the cursor
+                self._js("window.voidCmd&&voidCmd('hover-off')")         # (the page saves it: not back on next launch)
+                return
             self._follow()
             return
         if not self.isVisible():
@@ -665,6 +669,13 @@ class VoidWindow(QWidget):
             return
         solid = any(x <= p.x() < x + w and y <= p.y() < y + h for x, y, w, h in self.rects)
         self._set_through(not solid)
+
+    @staticmethod
+    def _escape_down():
+        """Escape is held anywhere (asked each tick, never hooked: no key is recorded or kept from other apps)."""
+        if MAC:
+            return winsys.escape_down()
+        return bool(ctypes.windll.user32.GetAsyncKeyState(0x1B) & 0x8000)   # VK_ESCAPE
 
     # ---- show / hide / commands
     def show_me(self):

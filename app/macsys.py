@@ -279,6 +279,8 @@ _objc.sel_registerName.restype = ctypes.c_void_p
 _cg = ctypes.cdll.LoadLibrary(ctypes.util.find_library("CoreGraphics"))
 _cg.CGEventSourceButtonState.argtypes = (ctypes.c_int32, ctypes.c_uint32)
 _cg.CGEventSourceButtonState.restype = ctypes.c_bool
+_cg.CGEventSourceKeyState.argtypes = (ctypes.c_int32, ctypes.c_uint16)
+_cg.CGEventSourceKeyState.restype = ctypes.c_bool
 
 
 def _send(obj, sel, *args, restype=ctypes.c_void_p, argtypes=()):
@@ -351,6 +353,11 @@ def unconstrained(win_id):
 def mouse_down():
     """The left mouse button is held (anywhere)."""
     return bool(_cg.CGEventSourceButtonState(0, 0))                        # combined session state, left button
+
+
+def escape_down():
+    """The Escape key is held (anywhere: only asked, never watched or kept from the app you're in)."""
+    return bool(_cg.CGEventSourceKeyState(0, 53))                          # combined session state, kVK_Escape
 
 
 # ---------------------------------------------------------------- the menu bar and the Dock, as they are right now
