@@ -1154,6 +1154,8 @@ def last_speech_end(pcm: bytes):
 
 # when a spoken request is over: this long with no voice, or with nothing the speech detector calls speech
 TURN_QUIET, TURN_VAD, TURN_MAX = 1.2, 1.6, 120
+# while he talks only "stop" / "hey Void" matter, so the always-on mic checks at the first breath (and every 12 s at most)
+BARGE_QUIET, BARGE_VAD, BARGE_MAX = 0.7, 1.3, 12
 
 
 class MicAuto:
@@ -1613,7 +1615,10 @@ class Wake:
                             done = (now - last_voice > TURN_QUIET or now - vad_last > TURN_VAD
                                     or len(seg) > RATE * 2 * TURN_MAX)
                         else:
-                            done = now - last_voice > 0.7 or now - vad_last > 1.3 or len(seg) > RATE * 2 * 12
+                            # otherwise it may be you, talking for a while: wait for the end of your turn, not a pause
+                            quiet, vad, most = ((BARGE_QUIET, BARGE_VAD, BARGE_MAX) if cls.speaking()
+                                                else (TURN_QUIET, TURN_VAD, TURN_MAX))
+                            done = now - last_voice > quiet or now - vad_last > vad or len(seg) > RATE * 2 * most
                             if done and not cls.speaking() and len(seg) > RATE * 2 * 0.35:
                                 said = cls.heard(bytes(seg))
                                 if WAKE_RE.match(said or ""):     # "hey Void, ...": hear the rest of it out

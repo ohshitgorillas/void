@@ -258,6 +258,70 @@ class Echo(unittest.TestCase):
             learn.assert_called_once()
 
 
+class Mic:
+    """Plays a script of (seconds, loud?) to Wake.session, 0.2 s per read, moving the clock on as it goes."""
+
+    def __init__(self, clock, script):
+        tone = (b"\x00\x20" + b"\x00\xe0") * 20            # (a square wave, a quarter of full scale)
+        self.clock, self.pcm = clock, b"".join((tone if loud else bytes(len(tone))) * round(sec / 0.0025)
+                                               for sec, loud in script)
+
+    def read(self, sec):
+        if not self.pcm:
+            raise EOFError
+        n = int(server.RATE * 2 * sec)
+        chunk, self.pcm = self.pcm[:n], self.pcm[n:]
+        self.clock[0] += sec
+        return chunk
+
+    def close(self):
+        pass
+
+
+QUIET = [(2, False)]
+
+
+def talk(sec, pause=0.0):                       # words (0.2 s on, 0.2 s off), then that much more quiet
+    return [(0.2, i % 2 == 0) for i in range(round(sec / 0.2))] + ([(pause, False)] if pause else [])
+
+
+@unittest.skipIf(server is None, f"server.py doesn't import here: {IMPORT_ERR}")
+class Burst(unittest.TestCase):
+    """The always-on mic keeps one spoken turn as one burst, short pauses and all, and ends it once you've stopped."""
+
+    def run_mic(self, script, window=False):
+        clock, ended = [1000.0], []
+        W = server.Wake
+        with mock.patch.object(server, "time", mock.Mock(monotonic=lambda: clock[0])), \
+                mock.patch.object(server, "open_mic", lambda: (Mic(clock, script), "fake", b"")), \
+                mock.patch.object(server, "last_speech_end", lambda pcm: False), \
+                mock.patch.object(server.BUS, "pub", mock.Mock()), \
+                mock.patch.object(server.Speaker, "idle", classmethod(lambda cls: True)), \
+                mock.patch.object(W, "should_run", classmethod(lambda cls: True)), \
+                mock.patch.object(W, "window_open", classmethod(lambda cls: window)), \
+                mock.patch.object(W, "heard", staticmethod(lambda pcm: "")), \
+                mock.patch.object(W, "check", classmethod(lambda cls, pcm, started, text=None: ended.append(
+                    (round(len(pcm) / (server.RATE * 2), 1), round(clock[0] - 1000.0, 1))))), \
+                mock.patch.multiple(W, speaking_until=0.0, follow_from=0.0, follow_until=0.0, cut=None):
+            W.session()
+        return ended                            # (seconds heard, when it ended) per burst
+
+    def test_long_turn_with_pauses_is_one_burst(self):
+        turn = QUIET + sum((talk(4, 0.6) for _ in range(5)), []) + talk(3.4) + [(4, False)]
+        for window in (False, True):            # listening for "hey Void" / in the follow-up window
+            with self.subTest(window=window):
+                bursts = self.run_mic(turn, window)
+                self.assertEqual(len(bursts), 1, bursts)
+                self.assertGreater(bursts[0][0], 25)
+
+    def test_turn_then_silence_ends_promptly(self):
+        for window in (False, True):
+            with self.subTest(window=window):
+                bursts = self.run_mic(QUIET + talk(5) + [(6, False)], window)
+                self.assertEqual(len(bursts), 1, bursts)
+                self.assertLess(bursts[0][1] - 7, 2.0)        # within 2 s of your last word
+
+
 class Seg:
     def __init__(self, text, avg_logprob=-0.3, no_speech_prob=0.1, compression_ratio=1.4):
         self.text, self.avg_logprob, self.no_speech_prob, self.compression_ratio = (text, avg_logprob, no_speech_prob,
