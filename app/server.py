@@ -1433,7 +1433,8 @@ def is_echo(heard):
     now = time.monotonic()
     while SPOKEN and now - SPOKEN[0][0] > ECHO_KEEP:
         SPOKEN.popleft()
-    for _t, said in list(SPOKEN):
+    lines = [said for _t, said in SPOKEN]
+    for said in lines + [" ".join(lines)]:     # (he speaks a sentence at a time; one burst can catch several)
         s = re.findall(r"[^\W_]+", said.lower())
         row = [0] * (len(s) + 1)             # longest common subsequence of the words
         for w in h:
