@@ -1139,7 +1139,7 @@ function frame(ts){ faceRaf=0;
   lift=0;
   const rot=G.tilt.x+Math.sin(t*.5)*.5+G.gx.v*.012+(fx.rot||0);
   const dxp=G.dx.to(0,dt);
-  const bodyTr=`translate(${dxp.toFixed(2)},${(76*(1-sy*pump)).toFixed(2)}) rotate(${rot.toFixed(2)})`;
+  const lifty=(76*(1-sy*pump)).toFixed(2), bodyTr=`translate(${dxp.toFixed(2)},${lifty}) rotate(${rot.toFixed(2)})`;
   E.body.setAttribute('transform',`${bodyTr} scale(${(sx*pump).toFixed(4)},${(sy*pump).toFixed(4)})`);
   E.shadow.setAttribute('transform',`scale(${sx.toFixed(3)},1)`);
 
@@ -1203,9 +1203,10 @@ function frame(ts){ faceRaf=0;
   const spd=G.spd.to(A.spd,dt)+(m==='listening'?micLvl*2.2:0)+(isTalk(m)?lvl*1.4:0);
   const rad=G.rad.to(A.rad,dt)+micLvl*.1, oa=G.oa.to(A.a,dt), ha=G.ha.to(A.h,dt);
   orbT+=dt*spd;
-  // Glow, ring and sparks stay put: none of his move, squish, roll or tilt reaches them.
+  // Ring and sparks stay put: none of his move, squish, roll or tilt reaches them. The glow hugs his rim, so it
+  // takes his lift and squish (not his glance, roll or tilt), or a stretch would push his head up over it.
   const hs=1+micLvl*.07+lvl*.05+Math.sin(t*1.3)*.012;
-  E.haloW.setAttribute('transform',`scale(${hs.toFixed(4)})`);
+  E.haloW.setAttribute('transform',`translate(0,${lifty}) scale(${(sx*pump*hs).toFixed(4)},${(sy*pump*hs).toFixed(4)})`);
   E.vring.removeAttribute('transform'); E.orbBack.removeAttribute('transform'); E.orbFront.removeAttribute('transform');
   E.halo.setAttribute('opacity',clamp(ha+Math.sin(t*1.3)*.07+micLvl*.3+lvl*.25,0,1).toFixed(3));
   ringAmt=approach(ringAmt,m==='listening'?.25+micLvl*1.1:isTalk(m)?lvl*.9:0,dt,10);
