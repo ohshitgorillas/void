@@ -46,9 +46,9 @@ class Echo(unittest.TestCase):
         for k, v in self._saved.items():
             setattr(server.Wake, k, v)
 
-    def burst(self, text, started=None):
+    def burst(self, text, started=None, ended=None):
         self.text = text
-        server.Wake.check(PCM, time.monotonic() if started is None else started)
+        server.Wake.check(PCM, time.monotonic() if started is None else started, ended=ended)
         return [c.kwargs for c in self.pub.call_args_list]
 
     def after_speech(self, ago):             # he finished talking `ago` seconds ago, follow window open
@@ -139,6 +139,33 @@ class Echo(unittest.TestCase):
     def test_stray_word_in_tail_ignored(self):
         self.after_speech(0.3)
         self.assertEqual(self.burst("um", time.monotonic() - 0.5), [])
+
+    # what the log showed swallowing your reply: "heard 9.9s, 26 words" -> "ignored while talking"
+    ANSWER = ("no leave the remaster where it is and move Reload into the 30K folder next to Kill Em All then tell me "
+              "when the copy to the card has finished")
+
+    def test_answer_begun_as_he_finished_is_a_follow_up(self):
+        server.note_spoken(REPLY)
+        self.after_speech(10)                    # you started in his last second and talked on 10 s after he stopped
+        ev = self.burst(self.ANSWER, server.Wake.speaking_until - 0.5)
+        self.assertFollowUp(ev, self.ANSWER)
+
+    def test_echo_running_on_after_he_finished_dropped(self):
+        server.note_spoken(REPLY)
+        self.after_speech(10)
+        self.assertEqual(self.burst("Sure I moved the meeting to Thursday at three and told Sam about it",
+                                    server.Wake.speaking_until - 0.5), [])
+
+    def test_words_ending_in_tail_dropped(self):     # began as he finished, over by the time the room stopped ringing
+        self.after_speech(10)
+        su = server.Wake.speaking_until
+        self.assertEqual(self.burst("I can kill them all really long in a 30K bonus folder", su - 0.5,
+                                    su + server.ECHO_TAIL), [])
+
+    def test_answer_begun_as_he_finished_needs_follow_ups_on(self):
+        self.after_speech(10)
+        server.Wake.follow_until = 0.0
+        self.assertEqual(self.burst(self.ANSWER, server.Wake.speaking_until - 0.5), [])
 
     def test_follow_up_after_tail_accepted(self):
         self.after_speech(server.ECHO_TAIL + 0.6)
@@ -289,8 +316,9 @@ def talk(sec, pause=0.0):                       # words (0.2 s on, 0.2 s off), t
 class Burst(unittest.TestCase):
     """The always-on mic keeps one spoken turn as one burst, short pauses and all, and ends it once you've stopped."""
 
-    def run_mic(self, script, window=False):
+    def run_mic(self, script, window=False, talk_till=0.0):
         clock, ended = [1000.0], []
+        talk_till = 1000.0 + talk_till if talk_till else 0.0       # (he talks for the script's first `talk_till` s)
         W = server.Wake
         with mock.patch.object(server, "time", mock.Mock(monotonic=lambda: clock[0])), \
                 mock.patch.object(server, "open_mic", lambda: (Mic(clock, script), "fake", b"")), \
@@ -300,11 +328,12 @@ class Burst(unittest.TestCase):
                 mock.patch.object(W, "should_run", classmethod(lambda cls: True)), \
                 mock.patch.object(W, "window_open", classmethod(lambda cls: window)), \
                 mock.patch.object(W, "heard", staticmethod(lambda pcm: "")), \
-                mock.patch.object(W, "check", classmethod(lambda cls, pcm, started, text=None: ended.append(
-                    (round(len(pcm) / (server.RATE * 2), 1), round(clock[0] - 1000.0, 1))))), \
-                mock.patch.multiple(W, speaking_until=0.0, follow_from=0.0, follow_until=0.0, cut=None):
+                mock.patch.object(W, "check", classmethod(lambda cls, pcm, started, text=None, **kw:
+                    ended.append((round(len(pcm) / (server.RATE * 2), 1), round(clock[0] - 1000.0, 1), text)))), \
+                mock.patch.multiple(W, speaking_until=talk_till, follow_from=talk_till + server.ECHO_TAIL,
+                                    follow_until=talk_till + 60 if talk_till else 0.0, cut=None):
             W.session()
-        return ended                            # (seconds heard, when it ended) per burst
+        return ended                            # (seconds heard, when it ended, text it was given) per burst
 
     def test_long_turn_with_pauses_is_one_burst(self):
         turn = QUIET + sum((talk(4, 0.6) for _ in range(5)), []) + talk(3.4) + [(4, False)]
@@ -313,6 +342,12 @@ class Burst(unittest.TestCase):
                 bursts = self.run_mic(turn, window)
                 self.assertEqual(len(bursts), 1, bursts)
                 self.assertGreater(bursts[0][0], 25)
+
+    def test_answer_begun_as_he_finished_heard_out(self):     # his last second, then 10 s more: one whole burst
+        bursts = self.run_mic(QUIET + talk(11) + [(4, False)], talk_till=3)
+        self.assertEqual(len(bursts), 1, bursts)
+        self.assertGreater(bursts[0][0], 10.5)
+        self.assertIsNone(bursts[0][2])                   # (a request: transcribed in full, not a quick name check)
 
     def test_turn_then_silence_ends_promptly(self):
         for window in (False, True):
