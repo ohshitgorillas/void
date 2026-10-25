@@ -513,4 +513,5 @@ STUCK_QUIT_REAL_HANDLER = STUCK_QUIT.replace(
     "sd = sys.modules[\"sounddevice\"] = FakeSD()",
     "sd = sys.modules[\"sounddevice\"] = FakeSD()\n"
     "sd._exit_handler = lambda: print(\"pa_terminate\", flush=True)   # (as sounddevice's, registered at its import)\n"
-    "atexit.register(sd._exit_handler)")
+    "atexit.register(sd._exit_handler)").replace(
+    "winsys._PA.hooked = True\natexit.register(winsys.stop)\n", "")     # (the stuck open hooks stop() itself, for real)
