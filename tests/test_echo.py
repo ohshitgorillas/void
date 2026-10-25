@@ -62,6 +62,16 @@ class Echo(unittest.TestCase):
         self.assertTrue(server.is_echo("I moved the meeting to Thursday at three"))
         self.assertTrue(server.is_echo("Sure I moved the meeting to thursday, at 3 and told Sam"))
 
+    def test_match_spans_sentences(self):         # one burst can catch several of his sentences
+        for line in ("There are three things going on in Gauntlet.",
+                     "The checkpoint work has two steps committed, and its lead is still running.",
+                     "It fixed the three review findings, and is waiting on the checks before it commits."):
+            server.note_spoken(line)
+        self.assertTrue(server.is_echo("There are three things going on in government. The checkpoint work has two "
+                                       "steps committed, and its lead is still running. It fixed the three review "
+                                       "findings, and is waiting on the checks before it commits"))
+        self.assertFalse(server.is_echo("Can you check on the three review findings for me"))
+
     def test_match_ignores_real_questions(self):
         server.note_spoken(REPLY)
         self.assertFalse(server.is_echo("Can you move the meeting to Friday instead"))
