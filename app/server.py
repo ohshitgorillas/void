@@ -12,6 +12,7 @@ import argparse
 import array
 import atexit
 import collections
+import difflib
 import io
 import json
 import math
@@ -1423,7 +1424,8 @@ FOLLOW_NOTE = ("(Voice note from Void: the mic picked this up a few seconds afte
                "else, reply with exactly [ignore] and nothing else, and use no tools. Otherwise just answer it normally.)\n\n")
 IGNORE = "[ignore]"
 ECHO_TAIL = 1.0          # s after he stops talking that the room still rings: a burst starting before then is his own voice
-ECHO_KEEP, ECHO_RATIO, ECHO_MIN = 60, 0.6, 3     # remember what he said for 60 s · share of heard words in his order · fewest words to judge
+ECHO_KEEP, ECHO_RATIO, ECHO_MIN = 60, 0.55, 3    # remember what he said for 60 s · share of heard words matched · fewest words to judge
+ECHO_LIKE, ECHO_SKIP = 0.6, 0.25                 # how alike two words must be to count · cost of each of his words the burst skips
 SPOKEN = collections.deque(maxlen=200)           # (monotonic time, text) of what he said lately
 
 
@@ -1431,8 +1433,19 @@ def note_spoken(text):
     SPOKEN.append((time.monotonic(), langmark.unmark(text)))
 
 
+def word_like(a, b):
+    """How alike two words are, 0 to 1, forgiving speech-to-text slips ("them"/"'em", "long"/"belongs")."""
+    if a == b:
+        return 1.0
+    r = difflib.SequenceMatcher(None, a, b).ratio()
+    if min(len(a), len(b)) >= 2 and (a in b or b in a):
+        r = max(r, 0.8)
+    return r if r >= ECHO_LIKE else 0.0
+
+
 def is_echo(heard):
-    """The mic caught his own voice: most of the heard words are, in order, a stretch of something he said lately."""
+    """The mic caught his own voice: most of the heard words, however garbled, line up with a stretch of what he said
+    lately. Words may be misheard, dropped or added, but the stretch must run in his order and mostly unbroken."""
     h = re.findall(r"[^\W_]+", (heard or "").lower())
     if len(h) < ECHO_MIN:
         return False
@@ -1442,12 +1455,12 @@ def is_echo(heard):
     lines = [said for _t, said in SPOKEN]
     for said in lines + [" ".join(lines)]:     # (he speaks a sentence at a time; one burst can catch several)
         s = re.findall(r"[^\W_]+", said.lower())
-        row = [0] * (len(s) + 1)             # longest common subsequence of the words
+        row = [0.0] * (len(s) + 1)           # best alignment of the heard words so far, ending at each of his words
         for w in h:
-            prev, row = row, [0]
-            for j, x in enumerate(s):
-                row.append(prev[j] + 1 if w == x else max(prev[j + 1], row[j]))
-        if row[-1] >= ECHO_RATIO * len(h):
+            prev, row = row, [0.0]
+            for j, x in enumerate(s):        # match (by likeness) · drop a heard word · skip one of his, at a cost
+                row.append(max(prev[j] + word_like(w, x), prev[j + 1], row[j] - ECHO_SKIP))
+        if max(row) >= ECHO_RATIO * len(h):
             return True
     return False
 

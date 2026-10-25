@@ -85,6 +85,28 @@ class Echo(unittest.TestCase):
         server.SPOKEN.append((time.monotonic() - 120, REPLY))
         self.assertFalse(server.is_echo("I moved the meeting to Thursday at three"))
 
+    # what the log showed slipping through just after his echo: his own words, badly misheard
+    def test_badly_misheard_echo_after_tail_dropped(self):
+        server.note_spoken("Kill 'Em All really belongs in the 30K rolloff folder.")
+        server.note_spoken("The other two albums are already sorted, but you might want to check that.")
+        self.assertTrue(server.is_echo("I can kill them all really long in a 30K bonus folder"))
+        self.assertTrue(server.is_echo("But you might want to check me."))
+        for heard in ("I can kill them all really long in a 30K bonus folder", "But you might want to check me."):
+            self.after_speech(server.ECHO_TAIL + 0.6)
+            server.Wake.follow_from = 0.0
+            self.assertEqual(self.burst(heard), [], heard)
+
+    def test_request_sharing_his_words_gets_through(self):
+        server.note_spoken("Kill 'Em All really belongs in the 30K rolloff folder.")
+        server.note_spoken("The other two albums are already sorted, but you might want to check that.")
+        for ask in ("please move Reload to the 30K folder too", "can you check the 30K folder for me",
+                    "move all of the other albums to the rolloff folder"):
+            self.assertFalse(server.is_echo(ask), ask)
+        self.after_speech(server.ECHO_TAIL + 0.6)
+        server.Wake.follow_from = 0.0
+        self.assertFollowUp(self.burst("please move Reload to the 30K folder too"),
+                            "please move Reload to the 30K folder too")
+
     def test_speaker_say_records(self):
         with mock.patch.object(server.Speaker, "_start", classmethod(lambda cls: None)):
             server.Speaker.say(REPLY, 1)
