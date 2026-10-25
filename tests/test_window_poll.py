@@ -221,6 +221,30 @@ class Poll(unittest.TestCase):
         self.assertTrue(self.win.poll.isActive())
         self.assertEqual(self.win.poll.interval(), 33)
 
+    # 6
+    def test_escape_takes_him_off_the_pointer(self):
+        """Esc while he's the cursor: hover mode off (normal rate, glides home) and the page told, so it's saved."""
+        js = []
+        self.win._js = js.append
+        self.win.set_hover(True)
+        self.win._escape_down = lambda: True
+        self.win._poll_mouse()
+        self.assertFalse(self.win.hover)
+        self.assertEqual(self.win.poll.interval(), 33)
+        self.assertIn("window.voidCmd&&voidCmd('hover-off')", js)
+
+    def test_no_escape_keeps_him_on_the_pointer(self):
+        self.win.set_hover(True)
+        self.win._escape_down = lambda: False
+        self.win._poll_mouse()
+        self.assertTrue(self.win.hover)
+        self.assertIn(("follow", True), self.calls)
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS only")
+    def test_escape_key_state_is_asked_of_macos(self):
+        import macsys
+        self.assertIsInstance(macsys.escape_down(), bool)                 # (nobody holds Esc during the tests)
+
 
 if __name__ == "__main__":
     unittest.main()
