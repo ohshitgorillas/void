@@ -430,6 +430,7 @@ body.faceyou #code .rootb{transform:none;left:auto;right:-9px}
 #code .l{height:12px;white-space:pre;overflow:hidden}
 #code .l.add{color:#bfe8d3} #code .l.del{color:#ff8b8b}
 #code .l.out{color:#9a9a9a} #code .l.bad{color:#ff8b8b}
+#code .l.img{height:auto} #code .l.img img{display:block;max-width:100%;max-height:44px;border-radius:3px}
 #code i{font-style:normal} #code .k{color:var(--hot)} #code .s{color:var(--whiteL,#f3dccf)} #code .c{color:#5f5f5f}
 #code .pr,#code .ok{color:var(--hot)} #code .rt{color:#ff5a5a}
 #code .cur{display:inline-block;width:5px;height:9px;margin-left:1px;vertical-align:-1px;background:var(--hot);animation:cpBlink .9s steps(1) infinite}
@@ -3078,6 +3079,7 @@ const CP=(()=>{
   function open(title,root){ titleEl.textContent=title; stEl.textContent='…'; stEl.className=''; el.classList.toggle('root',!!root); el.classList.toggle('rootmode',!!info.root); out.innerHTML=''; show(); }
   function done(ok){ stEl.textContent=ok?'✓':'✕'; stEl.className=ok?'ok':'bad'; }
   async function result(id){ for(let i=0;i<1200&&!RES[id]&&busy;i++){ if(q.length&&i>20) break; await wait(50); } return RES[id]; }
+  function pics(r){ for(const src of (r&&r.images)||[]){ const d=line('','out img'), im=new Image(); im.src=src; d.appendChild(im); } }
   const rows=(t,n)=>String(t||'').replace(/\r/g,'').split('\n').filter(x=>x.trim()).slice(0,n);
   const name=p=>String(p||'').split('/').pop();
   const P=()=>info.root?'<i class="rt">#</i> ':'<i class="pr">$</i> ';
@@ -3098,8 +3100,8 @@ const CP=(()=>{
       if(r){ for(const t of rows(r.text,30)){ line(esc(t),r.is_error?'bad':'out'); await wait(hurry()?0:60); } done(!r.is_error); }
       await wait(hurry()?200:1000); },
     async Read(ev){ const x=ev.input||{}; open('reading '+name(x.file_path));
-      const r=await result(ev.id);
-      for(const t of rows(r&&r.text,40).map(t=>t.replace(/^\s*\d+[\t→]/,'')).filter(t=>t.trim()).slice(0,24)){ line(hl(t),'out'); await wait(hurry()?0:90); }
+      const r=await result(ev.id); pics(r);
+      for(const t of rows(r&&r.text,40).filter(t=>t.trim()!=='[image]').map(t=>t.replace(/^\s*\d+[\t→]/,'')).filter(t=>t.trim()).slice(0,24)){ line(hl(t),'out'); await wait(hurry()?0:90); }
       await wait(hurry()?100:500); },
     async Grep(ev){ const x=ev.input||{}; open('searching');
       await type('<i class="pr">⌕</i> ',x.pattern||x.glob||x.path||'','',50);
@@ -3125,7 +3127,7 @@ const CP=(()=>{
     running=false; if(!busy||answering) hide(); }
   return {
     tool(ev){ if(info.code_panel===false||NO_TERMINAL.has(ev.name)) return; answering=false; q.push(ev); if(!running) run(); },
-    result(ev){ RES[ev.id]={text:ev.text||'',is_error:!!ev.is_error}; },
+    result(ev){ RES[ev.id]={text:ev.text||'',is_error:!!ev.is_error,images:ev.images}; },
     answer(){ answering=true; if(!running) hide(); },
     done(){ answering=false; if(!running) hide(); },
     hide,

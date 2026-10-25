@@ -50,6 +50,17 @@ def tool_output(c):
     return txt if len(txt) <= 6000 else txt[:6000] + "\n…"
 
 
+def tool_images(c, limit=1_500_000):
+    """The pictures in a tool's output (a Read of a .png) as data: URIs for the code panel; huge ones are left out."""
+    imgs = []
+    for b in c if isinstance(c, list) else []:
+        src = b.get("source") if isinstance(b, dict) and b.get("type") == "image" else None
+        if isinstance(src, dict) and src.get("type") == "base64" and isinstance(src.get("data"), str) \
+                and len(src["data"]) <= limit and str(src.get("media_type", "")).startswith("image/"):
+            imgs.append(f"data:{src['media_type']};base64,{src['data']}")
+    return imgs[:3]
+
+
 def notes_prefix(notes):
     """Memory notes changed since the process started (its system prompt still has the old ones): the new ones go at
     the top of the next message instead of a restart, which would stop his subagents."""
@@ -170,8 +181,12 @@ class Stream:
                         out.append(("bus", {"t": "sub_start", "id": sid, "type": launch["type"], "desc": launch["desc"],
                                             "bg": False}))
                         out.append(("bus", {"t": "sub_end", "id": sid, "status": "failed"}))
-                    self._main(out, {"t": "toolres", "id": tid, "text": tool_output(b.get("content")),
-                                     "is_error": bool(b.get("is_error"))})
+                    ev = {"t": "toolres", "id": tid, "text": tool_output(b.get("content")),
+                          "is_error": bool(b.get("is_error"))}
+                    imgs = tool_images(b.get("content"))
+                    if imgs:
+                        ev["images"] = imgs
+                    self._main(out, ev)
         elif ty == "result":
             self.in_turn = False
             self._result(o, out)
