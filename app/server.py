@@ -1057,8 +1057,9 @@ def whisper():
         return _whisper
 
 
-def run_whisper(audio, beam=None, hint=None) -> str:
-    """Transcribe; if the GPU path blows up at run time (missing CUDA libs etc.), drop to CPU for good."""
+def run_whisper(audio, beam=None, hint=None, sure=False) -> str:
+    """Transcribe; if the GPU path blows up at run time (missing CUDA libs etc.), drop to CPU for good.
+    `sure`: keep only what Whisper is fairly sure it heard (the always-on mic hears the room all day)."""
     global _whisper
 
     def go():
@@ -1067,6 +1068,9 @@ def run_whisper(audio, beam=None, hint=None) -> str:
             vad_filter=True, vad_parameters={"min_silence_duration_ms": 600, "speech_pad_ms": 300},
             condition_on_previous_text=False, initial_prompt=(hint if hint is not None else CFG.get("stt_hint")) or None,
             no_speech_threshold=0.5)
+        if sure:     # (a guess at noise: low log-prob, the same few words looping, or "probably nobody talking")
+            segs = [s for s in segs if s.avg_logprob >= -1.0 and s.compression_ratio <= 2.4
+                    and not (s.no_speech_prob > 0.6 and s.avg_logprob < -0.5)]
         out = " ".join(s.text.strip() for s in segs).strip()      # segments are lazy: errors surface here
         # whisper sometimes "hears" the hint or filler on near-silence
         if out.strip(" .").lower() in ("", "you", "thank you", "thanks for watching", "bye"):
@@ -1447,6 +1451,12 @@ def is_echo(heard):
 
 # what the speech model "hears" in background noise — never treat these as a follow-up request
 NOISE_WORDS = {"you", "thank you", "thanks", "bye", "thanks for watching", "thank you for watching", "uh", "um", "hmm"}
+
+
+def is_noise(heard):
+    """Nothing, a stock filler, or one short phrase over and over ("Go. Go. Go.", "Oh my god, oh my god")."""
+    w = re.findall(r"[^\W_]+", (heard or "").lower())
+    return not w or " ".join(w) in NOISE_WORDS or (len(w) >= 2 and len(set(w)) * 2 <= len(w))
 WAKE_RE = re.compile(r"^\W*(?:(?:hey|hi|hay|okay|ok|yo|oi)\W+)?(void|voyd|boyd|voi|vod)\b\W*(.*)$", re.I | re.S)
 
 
@@ -1617,7 +1627,7 @@ class Wake:
             ss = speech_seconds(pcm)
             if ss < 0.25 or ss < len(pcm) / (RATE * 2) * 0.2:
                 return None
-            return transcribe_pcm(pcm, beam=1, hint="Hey Void.")
+            return transcribe_pcm(pcm, beam=1, hint="Hey Void.", sure=True)
         except Exception as e:  # noqa: BLE001
             print(f"[void] wake word stt: {e}", file=sys.stderr)
             return None
@@ -1629,14 +1639,13 @@ class Wake:
         follow = not cls.speaking() and cls.follow_from <= started < cls.follow_until
         # began while he talked / in his echo: may be his voice (is_echo below) or you answering over him
         over = cls.speaking() or started < cls.speaking_until + ECHO_TAIL
-        if not over:                             # (while he talks the mic also hears him: don't tune to his voice)
-            MicAuto.learn(pcm)
         try:
             ss = speech_seconds(pcm)
             if ss < 0.25 or ss < len(pcm) / (RATE * 2) * 0.2:    # music or noise, not talking: don't let Whisper dream up words
                 return
             if text is None:
-                text = transcribe_pcm(pcm) if follow or over else transcribe_pcm(pcm, beam=1, hint="Hey Void.")
+                text = (transcribe_pcm(pcm, sure=True) if follow or over
+                        else transcribe_pcm(pcm, beam=1, hint="Hey Void.", sure=True))
         except Exception as e:  # noqa: BLE001
             print(f"[void] wake word stt: {e}", file=sys.stderr)
             return
@@ -1648,14 +1657,15 @@ class Wake:
             print(f"[void] dropped echo of own speech: {text.strip()[:80]}", file=sys.stderr)
             return
         said = (text or "").strip(" .,!?")
+        if is_noise(said):                       # nothing, filler, or one phrase looping: the room, not you
+            return
         if cls.speaking() and (STOP_RE.fullmatch(said.lower()) or m):
             BUS.pub(t="barge", listen=bool(m), text=(m.group(2).strip(" .,!?") if m else ""))
             cls.hush()
             return
         if over and not m:
             # you talked over him (or right as he finished) and it isn't his echo: a barge-in, taken as a follow-up
-            if (len(said.split()) >= ECHO_MIN and said.lower() not in NOISE_WORDS
-                    and (CFG.get("barge_in") or CFG.get("follow_up"))):
+            if len(said.split()) >= ECHO_MIN and (CFG.get("barge_in") or CFG.get("follow_up")):
                 print("[void] barge-in: heard you over him", file=sys.stderr)
                 if not Speaker.idle():
                     Speaker.stop()               # (also hushes us)
@@ -1666,10 +1676,12 @@ class Wake:
             return
         if m:
             rest = m.group(2).strip(" .,!?")
+            MicAuto.learn(pcm)                   # (only your requests tune the mic: not noise, not his voice)
             BUS.pub(t="wake", text=rest)
         elif follow:
-            if len(said.split()) >= 2 and said.lower() not in NOISE_WORDS:     # (a stray word isn't a request)
+            if len(said.split()) >= 2:           # (a stray word isn't a request)
                 cls.follow_until = 0.0
+                MicAuto.learn(pcm)
                 BUS.pub(t="wake", text=said, follow=True)
 
 
