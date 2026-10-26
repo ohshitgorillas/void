@@ -47,6 +47,7 @@ KEPT_DB = 3.0               # your speech after he stops comes through within ab
 SETTLE = 1.0                # seconds the canceller has to learn the room before his echo is measured
 TAIL = 0.1                  # and his echo is measured this far past his voice's end (the room's reflections)
 AFTER = 0.5                 # you answer this long after his voice stops
+SWITCH = 3.0                # the speakers change this long after his voice starts
 
 
 def seconds(name):
@@ -88,6 +89,19 @@ class FastScenes(unittest.TestCase):
         n = seconds(sc["you"])
         off = level_db(window(t.clean, t.you_start, n)) - level_db(window(t.you, t.you_start, n))
         self.assertLessEqual(abs(off), KEPT_DB, f"your answer after he stopped came through {off:+.1f} dB off")
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_removes_at_least_25_db_of_his_echo_after_the_speakers_change(self):
+        sc = SCENES["void_alone"]
+        t = scenes.play(scenes.Room(), void=sc["void"], switch_at=SWITCH)
+        want = None if t.void_start is None else t.void_start + SWITCH
+        self.assertTrue(t.switched is not None and want is not None and abs(t.switched - want) <= 0.02,
+                        f"the speakers didn't change {SWITCH} s into his voice: switched at {t.switched}, "
+                        f"his voice started at {t.void_start}")
+        n = (t.void_end or 0.0) + TAIL - t.switched
+        removed = level_db(window(t.raw, t.switched, n)) - level_db(window(t.clean, t.switched, n))
+        self.assertGreaterEqual(removed, ECHO_REMOVED_DB,
+                                f"only {removed:.1f} dB of Void's echo removed after the speakers changed")
 
     def test_passes_the_mic_through_unchanged_without_the_canceller(self):
         sc = SCENES["interrupt_stop"]

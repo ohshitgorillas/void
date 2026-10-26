@@ -134,13 +134,16 @@ class Take:
     """What one scene produced, all 16 kHz int16 arrays on the scene's clock (0 = mic opened), same length:
     raw (what the mic picked up), clean (what Wake.session read from open_clean_mic), and the room's parts of raw:
     echo (Void through the room), you, music. Plus void_start/void_end and you_start/you_end in seconds (None when
-    absent) and events: the BUS events published during the scene."""
+    absent) and events: the BUS events published during the scene. switched: when the speakers changed mid-sentence
+    (play's switch_at), in seconds on the scene's clock: the moment the old speakers fell silent and the new ones took
+    over (None: no switch happened)."""
 
     def __init__(self):
         empty = np.zeros(0, np.int16)
         self.raw = self.clean = self.echo = self.you = self.music = empty
         self.void_start = self.void_end = self.you_start = self.you_end = None
         self.events = []
+        self.switched = None
 
 
 # ---------------------------------------------------------------- the simulated clock and its turn-taking
@@ -299,10 +302,12 @@ class SimCondition:
 
 class Scene:
     """The room as it sounds at the mic: what the speakers really played (from the fake players), through the room,
-    plus you, the music and the mic's hiss, captured 20 ms at a time as the clock reaches each chunk's end."""
+    plus you, the music and the mic's hiss, captured 20 ms at a time as the clock reaches each chunk's end. `lat` is
+    the true output latency of the speakers a new player opens on (play's switch changes it); `players`, every fake
+    player opened, in order; `first`, called once with the scene time (seconds) his voice first comes out."""
 
-    def __init__(self, sim, room, n, lat, you, you_at, has_void):
-        self.sim, self.room, self.lat = sim, room, lat
+    def __init__(self, sim, room, n, lat, you, you_at, has_void, first=None):
+        self.sim, self.room, self.lat, self.players, self.first = sim, room, lat, [], first
         pad = n + 4 * SR                                          # (the player writes up to ~1 s ahead of the clock)
         self.out = np.zeros(pad)                                  # what the speakers played, by scene sample
         self.h = room.impulse()
@@ -332,6 +337,8 @@ class Scene:
         self.out[k + lo:k + hi] += d[lo:hi]
         loud = np.flatnonzero(np.abs(y[lo:hi]) >= 0.5)            # (loud enough to come out of the mic as a sample)
         if len(loud):
+            if not self.played and self.first:
+                self.first((k + lo + int(loud[0])) / SR)
             self.played.append(k + lo + int(loud[0]))
 
     def void_start(self):
@@ -367,13 +374,17 @@ class Scene:
 
 
 class FakePlayer:
-    """The OS player, at whatever rate it is opened at: plays what it's handed in order, each sample `lat` after it
-    was written or straight after the one before, whichever is later; killed, whatever it still had queued past `lat`
-    from now never plays. What it plays reaches the room at the scene's 16 kHz, through the harness's own resampler:
-    each unbroken run of sound is resampled as one, the newest stretch redone as more of it arrives."""
+    """The OS player, at whatever rate it is opened at, on the speakers the scene has when it opens (their true
+    latency, scene.lat, is its `lat`): plays what it's handed in order, each sample `lat` after it was written or
+    straight after the one before, whichever is later; killed, whatever it still had queued past `lat` from now never
+    plays; its speakers gone (gone()), whatever it had not yet played never plays and its next write is a broken pipe.
+    What it plays reaches the room at the scene's 16 kHz, through the harness's own resampler: each unbroken run of
+    sound is resampled as one, the newest stretch redone as more of it arrives."""
 
     def __init__(self, scene, rate):
         self.scene, self.rate, self.stdin, self.end, self.killed, self.got = scene, rate, self, None, False, bytearray()
+        self.lat = scene.lat
+        scene.players.append(self)
         self.runs = []                     # unbroken runs: [start (scene seconds), samples at rate, first out index, out]
 
     def write(self, b):
@@ -381,7 +392,7 @@ class FakePlayer:
             raise BrokenPipeError("the player was killed")
         x = np.frombuffer(bytes(b), np.int16).astype(np.float64)
         now = self.scene.sim.now
-        start = now + self.scene.lat if self.end is None else max(self.end, now + self.scene.lat)
+        start = now + self.lat if self.end is None else max(self.end, now + self.lat)
         r, ts = self.rate, start - T0
         if self.runs and start == self.end:
             run = self.runs[-1]
@@ -406,10 +417,17 @@ class FakePlayer:
         return 0 if self.killed else None
 
     def kill(self):
+        self._silence(self.scene.sim.now + self.lat)
+
+    def gone(self):
+        """Its speakers went away (unplugged, power-cycled, another device picked): silent from now."""
+        self._silence(self.scene.sim.now)
+
+    def _silence(self, t):
         if self.killed:
             return
         self.killed = True
-        cut = self.scene.index(self.scene.sim.now + self.scene.lat)
+        cut = self.scene.index(t)
         for run in self.runs:
             k = max(cut, run[2])
             gone = run[3][k - run[2]:]
@@ -542,18 +560,25 @@ def _whisper(scene, clean, texts, void, you):
 
 # ---------------------------------------------------------------- a scene
 
-def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None) -> Take:
+def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch_at=None, switch_lat=None) -> Take:
     """Play a scene on a simulated clock: `void` (a clip name) goes through the real Speaker player path into PlayRef
     and out of the room's speakers; `you` (a clip name) speaks into the room at `you_at` seconds after Void's voice
     starts coming out of the speakers; the real Wake.session listens through open_clean_mic. hear=False stands in
     for speech detection and Whisper; hear=True runs the real ones. `seconds`: how long the scene runs (default:
-    until everything has played, plus a little)."""
+    until everything has played, plus a little). `switch_at`: seconds after Void's voice starts coming out of the
+    speakers at which the speakers change mid-sentence (the player he is writing to dies and a new one takes over, as
+    Speaker._write handles it, e.g. a USB DAC power-cycled or headphones plugged in): from that moment whatever the
+    old player had not yet played never plays, his next write to it fails as a broken pipe, and the real
+    Speaker._write opens a new player through make_player, which the room then hears. None means no switch. The
+    Take's `switched` says when it happened. `switch_lat`: the new speakers' true output latency, in seconds (default
+    Speaker.LAT, the latency Void assumes; more stands in for speakers slower than he thinks)."""
     app = str(Path(__file__).resolve().parent.parent / "app")
     if app not in sys.path:
         sys.path.insert(0, app)
     import server
     S, W, P = server.Speaker, server.Wake, server.hearing.PlayRef
     lat, texts = S.LAT, _texts()
+    switch_lat = lat if switch_lat is None else switch_lat
     void_pcm = clip(void) if void else None
     if seconds is None:
         ref = LEAD_IN + lat if void else LEAD_IN
@@ -564,11 +589,25 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None) -> Tak
             ends.append(ref + you_at + len(clip(you)) / SR)
         if room.music:
             ends.append(len(clip(room.music)) / SR)
-        seconds = max(ends) + AFTER
+        seconds = max(ends) + AFTER + (max(0.0, switch_lat - lat) if switch_at is not None else 0.0)
     n = math.ceil(seconds * SR)
 
     sim = Sim(T0)
-    scene = Scene(sim, room, n, lat, you, you_at, bool(void))
+    switch = types.SimpleNamespace(actor=None, at=None)
+
+    def first(t):                                                 # (his voice is out: the switch is due switch_at on)
+        if switch.actor is not None:
+            with sim.c:
+                switch.actor.due = min(switch.actor.due, T0 + t + switch_at)
+
+    def change():                                                 # (the speakers change: the old ones fall silent)
+        sim.park(sim.current(), math.inf)
+        switch.at = sim.now - T0
+        if scene.players:
+            scene.players[-1].gone()
+        scene.lat = switch_lat
+
+    scene = Scene(sim, room, n, lat, you, you_at, bool(void), first if switch_at is not None else None)
     events, clean = Events(), []
     real_open_clean_mic = server.open_clean_mic
 
@@ -617,6 +656,8 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None) -> Tak
                 player = sim.spawn("player", S._player_loop, T0)
                 S.threads = [maker.thread, player.thread]          # (so say() finds them running and starts none)
                 sim.spawn("void", lambda: S.say(texts.get(void, ""), 1), T0 + LEAD_IN)
+                if switch_at is not None:
+                    switch.actor = sim.spawn("switch", change, T0)
             sim.run(T0 + seconds)
         finally:
             sim.over = True
@@ -633,6 +674,7 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None) -> Tak
     t.raw, t.echo, t.you, t.music = (x[:k].copy() for x in (scene.raw, scene.echo, scene.you, scene.music))
     t.clean = np.frombuffer(b"".join(clean), np.int16).copy()
     t.events = events.got
+    t.switched = switch.at
     if void:
         t.void_start = scene.void_start()
         loud = np.flatnonzero(np.abs(scene.out) >= 0.5)
