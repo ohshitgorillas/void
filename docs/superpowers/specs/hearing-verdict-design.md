@@ -4,16 +4,15 @@ Status: approved.
 
 ## Why
 
-Every burst `Wake.check`, `Wake.heard`, `Wake.stop_in` and `Listen.run` hear is judged once by `gate.judge` (`app/server.py:1911`, `app/server.py:1828`, `app/server.py:1841`, `app/server.py:1484`). A burst is still dropped outside it in these places:
+Every burst `Wake.check`, `Wake.heard`, `Wake.stop_in` and `Listen.run` hear is judged once by `gate.judge` (`app/server.py:1885`, `app/server.py:1802`, `app/server.py:1815`, `app/server.py:1461`). A burst is still dropped outside it in these places:
 
-- `Wake.session`: bursts of 0.35 s or less are discarded unchecked `app/server.py:1753`, `app/server.py:1795`, `app/server.py:1801`.
-- `session_message`: Claude's `[ignore]` drops the reply `app/server.py:3503`.
+- `Wake.session`: bursts of 0.35 s or less are discarded unchecked `app/server.py:1727`, `app/server.py:1769`, `app/server.py:1775`.
+- `session_message`: Claude's `[ignore]` drops the reply `app/server.py:3477`.
 
-One concern is still copied:
+Per-frame voice detection has one home, `hearing.Voicing` (`app/hearing.py:291`), used by `speech_span` (`app/server.py:1173`), `Listen.run` (`app/server.py:1383`) and `Wake.session` (`app/server.py:1704`). These concerns are still copied:
 
 | Concern | Copies |
 |---|---|
-| Per-frame voice detector (rms, `Floor`, threshold, voiced count), with different constants | 3: `app/server.py:1192`, `app/server.py:1416`, `app/server.py:1745`; `Floor` at `app/server.py:1169` |
 | Fake `Heard` in tests | 5: `tests/test_gate.py:59`, `tests/test_wake_loop.py:345`, `tests/test_echo.py:49`, `tests/test_listen_enrol.py:114`, `tests/scenes.py:628` |
 | Speech-to-text patch sets in tests | 3: `tests/test_wake_loop.py:349`, `tests/test_echo.py:46`, `tests/scenes.py:734` |
 | `hiss` test helper | 2: `tests/test_wake_loop.py:292`, `tests/test_listen_enrol.py:57` |
@@ -46,7 +45,7 @@ It replaces:
 - the four speech-share checks
 - the drop branches of `Wake.check`, `Wake.stop_in` and `Listen.run`
 
-`SPOKEN` and `note_spoken` stay in `server.py` (`app/server.py:1524`), and `server.py` passes their text in through `said_lately`.
+`SPOKEN` and `note_spoken` stay in `server.py` (`app/server.py:1501`), and `server.py` passes their text in through `said_lately`.
 
 ```python
 # app/gate.py
@@ -90,14 +89,20 @@ def judge(b: Burst, spoken: list[str], cfg: dict) -> Verdict: ...
 
 ### `app/hearing.py`: gains the per-frame voice detector
 
-It replaces `Floor` (`app/server.py:1169`) and the three frame loops' rms, threshold and voiced arithmetic. Each caller keeps its own constants and passes them in.
+It replaces `Floor` and the three frame loops' rms, floor, threshold and voiced arithmetic. Each caller keeps its own constants and passes them in.
+
+- **`hold` is the caller's.** `Voicing` never decides it and never applies `voiced >= 3` itself. `speech_span` and `Listen.run` pass `hold=voiced >= 3`, the count the previous frame returned (`app/server.py:1176`, `app/server.py:1397`). `Wake.session` passes `hold` while Void is speaking or in the first 4 s of your speech (`app/server.py:1723`).
+- **A held first frame still counts.** The first frame goes into the room level even when `hold` is set, as `Floor` did (`app/hearing.py:308`).
+- **Clipping is not `Voicing`'s.** `Listen.run` reads the frame's samples itself to count clipping (`app/server.py:1400`).
+- **Built before the mic opens.** `Listen.run` and `Wake.session` create their `Voicing` before `open_clean_mic` (`app/server.py:1383`, `app/server.py:1704`).
 
 ```python
 # app/hearing.py
 class Voicing:
     def __init__(self, low: float, over: float): ...          # threshold = max(low, floor * over)
     def frame(self, fr: bytes, soft: float, hold: bool = False) -> tuple[float, float, float, int]:
-        """→ (rms, floor, threshold, voiced count 0–4)"""
+        """→ (rms, floor, threshold, voiced count 0–4). hold: the caller's; a held frame stays out of the room
+        level, except the first."""
 ```
 
 ### `app/server.py`: transcribes, scores and acts on the `Verdict`; decides nothing itself
@@ -115,19 +120,19 @@ class Voicing:
 | `Wake.stop_in` | `"peek"` | None | None | `Wake.speaking()` |
 | `Listen.run` | `"listen"` | None | None | `False` |
 
-`Wake.check` takes its kind from those rules alone; there is no separate `during` flag. A run-on burst is a `"follow"`, so a stop phrase in it does not barge. A follow-up, a wake-word clip inside the window included, is always transcribed with `transcribe_pcm_heard` (`app/server.py:1897`), and its voice is scored only when `cfg["voice_gate"]` is on.
+`Wake.check` takes its kind from those rules alone; there is no separate `during` flag. A run-on burst is a `"follow"`, so a stop phrase in it does not barge. A follow-up, a wake-word clip inside the window included, is always transcribed with `transcribe_pcm_heard` (`app/server.py:1133`), and its voice is scored only when `cfg["voice_gate"]` is on.
 
 **`Wake.heard`** returns None only on a "no speech" verdict; on any other verdict, kept or dropped, it returns the text heard, and `Wake.check` judges that text again as its own kind without a second Whisper pass. Both calls log a verdict line for the same burst.
 
 **`Wake.stop_in`**: a peek that is not a stop phrase logs one `while talking` line and returns False.
 
-**`Listen.run`**: with `talking=False`, a "stop" said into push-to-talk is sent on as a request. A dropped recording, too little speech included, emits `cancel` with `why` set to `v.why`, which ends the page's listen session (`app/static/index.html:1937`); no reader depends on the value `nospeech`. A `speech_seconds` or Whisper exception is not caught in `run` and reaches the handler's `error` event (`app/server.py:4051`).
+**`Listen.run`**: with `talking=False`, a "stop" said into push-to-talk is sent on as a request. A dropped recording, too little speech included, emits `cancel` with `why` set to `v.why`, which ends the page's listen session (`app/static/index.html:1956`); no reader depends on the value `nospeech`. A `speech_seconds` or Whisper exception is not caught in `run` and reaches the handler's `error` event (`app/server.py:4025`).
 
 **A speech-to-text failure is not a drop.** In `Wake.check`, `Wake.heard` and `Wake.stop_in` an exception from `speech_seconds` or Whisper prints `[void] <what> stt: <error>` and returns with no `Verdict` and no `verdict_out` line; it is the one return besides a `Verdict` that ends a burst.
 
 **Barge.** On a `"barge"` verdict `Wake.check` and `Wake.stop_in` call `Wake.barge(text)`, the one home of the barge action: it stops his voice if he is speaking, publishes BUS `barge`, and hushes. Where `gate.WAKE_RE` matches the text, the event carries `listen=True` and `text` set to the match's group 2 stripped of `" .,!?"`, which the page sends on as a request (`app/static/index.html:1918`); otherwise `{"t":"barge","listen":False,"text":""}`.
 
-**Output.** `verdict_out` is the one output for verdicts. A line counts as a verdict line when it matches `[void] <why>( (note))?: <said>` with `<why>` from `gate.WHY`; a scored voice appears in it as `{voice:.2f}`, at any position. Only a dropped `"follow"` verdict publishes `gate_drop`. The diagnostic line `[void] heard Xs, N words…` in `Wake.check` (`app/server.py:1906`) is not a verdict line and stays.
+**Output.** `verdict_out` is the one output for verdicts. A line counts as a verdict line when it matches `[void] <why>( (note))?: <said>` with `<why>` from `gate.WHY`; a scored voice appears in it as `{voice:.2f}`, at any position. Only a dropped `"follow"` verdict publishes `gate_drop`. The diagnostic line `[void] heard Xs, N words…` in `Wake.check` (`app/server.py:1880`) is not a verdict line and stays.
 
 ```python
 # app/server.py
@@ -163,7 +168,7 @@ def ears(server, text_for, speech_for=None) -> contextlib.ExitStack: ...  # patc
 | Whisper confidence thresholds | `gate` constants and `gate.sure` | a segment filter or logprob comparison in `server.py` |
 | Echo, noise, stop-phrase and wake-word tests | `gate.is_echo`, `gate.is_noise`, `gate.stop_said`, `gate.STOP_RE`, `gate.WAKE_RE` | their definitions in `server.py` |
 | Barge action | `Wake.barge` | a `Speaker.stop` or BUS `barge` publish on a verdict anywhere else |
-| Per-frame voice detection | `hearing.Voicing` | rms, floor or threshold arithmetic in a frame loop |
+| Per-frame voice detection | `hearing.Voicing` | rms, floor or threshold arithmetic in a frame loop; a `hold` decision or clip count inside `Voicing` |
 | Drop output | `server.verdict_out` | any other `print` of a verdict line or `gate_drop` publish; any file, store, counter or history of drops |
 | Hearing test doubles | `tests/fakes.py` | a `Heard(...)` literal, STT patch set, `hiss` or `pieces` in a test file |
 
@@ -173,6 +178,6 @@ Agents are given by role: `test-writer` for the tests, and the roster agent whos
 
 1. **`gate` core lands.** Put the stubs above in place, build all of them but `judge` and `spoken_enough`, move the echo, noise and stop tests and the thresholds into `gate`, and make `server.py` import them. Files: `app/gate.py`, `app/server.py`, `tests/test_gate.py`, `tests/test_echo.py`. Agent: the `app/` roster agent; `test-writer` for the two test files.
 2. **Every drop goes through `judge`.** Build `gate.spoken_enough` and `gate.judge` in `app/gate.py`, `judge` running the nine checks in the order under Modules, and remove `_follow_legacy` and its bridge. `Wake.check`, `Wake.heard`, `Wake.stop_in` and `Listen.run` build a `Burst` of the kind the table under `app/server.py` gives, call `gate.judge` once, act on the `Verdict`, barge through `Wake.barge`, and print through `verdict_out`. `run_whisper_heard` uses `gate.sure` and blanks nothing. Files: `app/gate.py`, `app/server.py`, `tests/test_gate.py`, `tests/test_wake_loop.py`, `tests/test_listen_enrol.py`. Agent: the `app/` roster agent; `test-writer` for the tests.
-3. **`Voicing` lands.** `speech_span`, `Listen.run` and `Wake.session` use it, and `Floor` leaves `server.py`. Files: `app/hearing.py`, `app/server.py`, `tests/test_hearing.py`. Agent: the `app/` roster agent; `test-writer` for the test.
+3. **`Voicing` lands.** `speech_span`, `Listen.run` and `Wake.session` use it, each passing its own `hold`; `Listen.run` and `Wake.session` create it before opening the mic; `Listen.run` keeps its clip count; and `Floor` leaves `server.py`. Files: `app/hearing.py`, `app/server.py`, `tests/test_hearing.py`. Agent: the `app/` roster agent; `test-writer` for the test.
 4. **`tests/fakes.py` lands** and the unit tests use it. Files: `tests/fakes.py`, `tests/test_gate.py`, `tests/test_wake_loop.py`, `tests/test_echo.py`, `tests/test_listen_enrol.py`. Agent: `test-writer`.
 5. **Scenes use `fakes.heard`.** Files: `tests/scenes.py`. Agent: `test-writer`.
