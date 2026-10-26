@@ -38,6 +38,8 @@ from unittest import mock
 
 import numpy as np
 
+import fakes
+
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "scenes"   # clips listed in manifest.json there
 
 SR = 16000                # the scene's rate: the mic's, PlayRef's, and the clips'
@@ -568,7 +570,7 @@ def opening_db(read, you, start):
 
 
 def _whisper(scene, clean, void_text, you_text):
-    """Stand-in for server.transcribe_pcm (and transcribe_pcm_heard, sure of whatever it made out): it makes out the words of whoever's voice the burst mostly sounds like.
+    """Stand-ins for Whisper and its speech detector, for fakes.ears: → (hear, speech). hear(pcm) makes out the words of whoever's voice the burst mostly sounds like.
     Finds where the burst sits on the scene's clock (it is a stretch of what Wake.session read), then, frame by frame,
     asks whose spectrum the burst's is most like there: your voice, Void's echo, or the music, as they reached the
     mic (spectra, not samples: the canceller's suppressor reshapes what it lets through, and hands it back a little
@@ -623,11 +625,7 @@ def _whisper(scene, clean, void_text, you_text):
         texts_ = [v[1] for v in votes.values()]
         return texts_[int(np.argmax(won))] if max(won) > 0 else ""
 
-    def heard(pcm, **kw):
-        text = hear(pcm, **kw)
-        return _server().Heard(text=text, logprob=0.0 if text else -math.inf, no_speech=0.0 if text else 1.0,
-                            seconds=speech(pcm))
-    return hear, heard, speech
+    return hear, speech
 
 
 # ---------------------------------------------------------------- a scene
@@ -730,11 +728,9 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
             wav = _wav(resample(void_pcm.astype(np.float64), SR, np.arange(m) * SR / VOICE_SR), VOICE_SR)
             patch(server, "synth", lambda text: (wav, 1.0))
         if not hear:
-            hear_text, hear_heard, hear_speech = _whisper(scene, clean, texts.get(void, "") if void else "", you_text)
-            patch(server, "speech_seconds", hear_speech)
+            hear_text, hear_speech = _whisper(scene, clean, texts.get(void, "") if void else "", you_text)
+            st.enter_context(fakes.ears(server, hear_text, hear_speech))
             patch(server, "last_speech_end", last_speech_end)
-            patch(server, "transcribe_pcm", hear_text)
-            patch(server, "transcribe_pcm_heard", hear_heard)
         for k, v in (("cv", SimCondition(sim)), ("todo", []), ("ready", []), ("making", False), ("gen", 0),
                      ("epoch", 0), ("proc", None), ("prate", None), ("t0", 0.0), ("written", 0), ("threads", []),
                      ("filled", False), ("stats", {})):
