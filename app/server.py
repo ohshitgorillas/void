@@ -89,6 +89,8 @@ VOICE_PROMPT = (
     "picture to open with the Read tool. It only looks, it can't click or type. Don't look when the task doesn't need it. "
     "Void's hover mode makes his face follow the user's mouse: run `void hover-off` when they want him off their "
     "pointer or back in his spot (`void hover-on` starts it). "
+    "For a long job, don't use a background subagent: start it as a detached `claude -p` process (always Claude, never "
+    "another CLI) told to report its result with `claude-ping` when it's done; that report reaches you with the other pings. "
     "Void has an expressive face. In your final spoken reply only, start each sentence with one tag in square brackets "
     "saying how you mean it, so the face matches your words: [neutral] [happy] [proud] [excited] [laugh] [warm] "
     "[curious] [unsure] [thinking] [surprised] [sorry] [serious]. Example: \"[proud] Fixed it, all nine tests pass now. "
