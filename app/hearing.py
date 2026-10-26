@@ -1,4 +1,5 @@
 """What Void hears of himself: a record of what the speakers play, to tell his own voice from yours."""
+import collections
 import math
 import sys
 import threading
@@ -285,3 +286,28 @@ class Canceller:
                 self.out = bytes(len(mic) - len(self.out)) + self.out
             got, self.out = self.out[:len(mic)], self.out[len(mic):]
             return got
+
+
+class Voicing:
+    """Per-frame voice detection for a mic loop: the frame's level, the room's noise level (the quiet end, 20th
+    percentile, of the last ~3 s), the threshold a voice must clear (`max(low, floor * over)`), and how many recent
+    frames cleared it, counted up to 4 and back down to 0. Steady background (music, a fan) lifts the room within
+    seconds, and the pauses between words still count as quiet. `hold` keeps a frame out of the room (you're talking),
+    except the very first. Each caller keeps its own `low` and `over`."""
+
+    def __init__(self, low: float, over: float):
+        self.low, self.over = low, over
+        self.h = collections.deque(maxlen=75)                     # 75 frames of 40 ms: 3 s
+        self.floor = 0.0
+        self.voiced = 0
+
+    def frame(self, fr: bytes, soft: float, hold: bool = False) -> tuple[float, float, float, int]:
+        """-> (rms, floor, threshold, voiced count 0-4)"""
+        s = memoryview(fr).cast("h")
+        rms = (sum(x * x for x in s) / len(s)) ** 0.5 / 32768.0 * soft if len(s) else 0.0
+        if not hold or not self.h:
+            self.h.append(rms)
+            self.floor = sorted(self.h)[len(self.h) // 5]
+        thr = max(self.low, self.floor * self.over)
+        self.voiced = min(4, self.voiced + 1) if rms > thr else max(0, self.voiced - 1)
+        return rms, self.floor, thr, self.voiced
