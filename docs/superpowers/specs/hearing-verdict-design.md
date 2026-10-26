@@ -9,14 +9,16 @@ Every burst `Wake.check`, `Wake.heard`, `Wake.stop_in` and `Listen.run` hear is 
 - `Wake.session`: bursts of 0.35 s or less are discarded unchecked `app/server.py:1727`, `app/server.py:1769`, `app/server.py:1775`.
 - `session_message`: Claude's `[ignore]` drops the reply `app/server.py:3477`.
 
-Per-frame voice detection has one home, `hearing.Voicing` (`app/hearing.py:291`), used by `speech_span` (`app/server.py:1173`), `Listen.run` (`app/server.py:1383`) and `Wake.session` (`app/server.py:1704`). These concerns are still copied:
+Per-frame voice detection has one home, `hearing.Voicing` (`app/hearing.py:291`), used by `speech_span` (`app/server.py:1173`), `Listen.run` (`app/server.py:1383`) and `Wake.session` (`app/server.py:1704`).
 
-| Concern | Copies |
-|---|---|
-| Fake `Heard` in tests | 5: `tests/test_gate.py:59`, `tests/test_wake_loop.py:345`, `tests/test_echo.py:49`, `tests/test_listen_enrol.py:114`, `tests/scenes.py:628` |
-| Speech-to-text patch sets in tests | 3: `tests/test_wake_loop.py:349`, `tests/test_echo.py:46`, `tests/scenes.py:734` |
-| `hiss` test helper | 2: `tests/test_wake_loop.py:292`, `tests/test_listen_enrol.py:57` |
-| `pieces` test helper | 2: `tests/test_wake_loop.py:300`, `tests/test_listen_enrol.py:99` |
+Hearing test doubles have one home, `tests/fakes.py`: `heard` (`tests/fakes.py:24`), `hiss` (`tests/fakes.py:32`), `pieces` (`tests/fakes.py:39`) and `ears` (`tests/fakes.py:45`), used by `tests/test_gate.py:100`, `tests/test_echo.py:47`, `tests/test_wake_loop.py:35`, `tests/test_listen_enrol.py:30` and `tests/scenes.py:732`. These look alike but are not copies, and stay where they are:
+
+| Stays | Where | What it is |
+|---|---|---|
+| `whisper()` `SimpleNamespace` | `tests/test_gate.py:298` | feeds `gate` directly, not a `server.Heard` |
+| `Seg` | `tests/test_echo.py:428` | a fake Whisper segment |
+| `WhisperHeard` | `tests/test_wake_loop.py:766` | tests `run_whisper_heard` itself |
+| numpy room noise | `tests/scenes.py:348` | part of mixing a scene's audio, not `hiss` |
 
 The voiceprint stays on. Its check is one step of the single verdict.
 
@@ -148,14 +150,22 @@ class Wake:
 
 ### `tests/fakes.py`: the one home of hearing test doubles
 
-It replaces the five `Heard` fakes, the three patch sets, and the `hiss` and `pieces` copies. The mics differ in behaviour and are not homed here: `tests/test_listen_enrol.py:79`, `tests/test_echo.py:316`, `tests/scenes.py:464`.
+It replaces the five `Heard` fakes, the three patch sets, and the `hiss` and `pieces` copies. The mics differ in behaviour and are not homed here: `tests/test_listen_enrol.py:74`, `tests/test_echo.py:314`, `tests/scenes.py:466`. Nor are the look-alikes under **Why**.
+
+- **`heard`'s numbers.** `sure=True`: `logprob=-0.2`, `no_speech=0.02`. `sure=False`: `logprob=-inf`, `no_speech=1.0`, `Heard`'s numbers for a burst Whisper kept nothing of. A scene's confident burst carries the `sure=True` numbers.
+- **`ears` agrees with itself.** `speech_seconds`, `transcribe_pcm` and `transcribe_pcm_heard` all answer from `text_for` and `speech_for`. A burst whose text is empty is heard with `sure=False`; any other with `sure=True`. With no `speech_for`, the whole burst is speech.
+- **`test_listen_enrol` uses `ears`'s speech stand-in**, not the real speech detector.
+- **`server` loads on first use.** `fakes` imports `server` inside the double that needs it, never at module load, so a test file sets up `suite_data` before `server` loads.
 
 ```python
 # tests/fakes.py
-def heard(text: str = "something was said here", sure: bool = True, seconds: float = 0.0): ...   # → server.Heard
+def heard(text: str = "something was said here", sure: bool = True, seconds: float = 0.0): ...
+    # → server.Heard; sure: logprob -0.2, no_speech 0.02; not sure: logprob -inf, no_speech 1.0
 def hiss(seconds: float, seed: int) -> bytes: ...
 def pieces(pcm: bytes, ms: int = 20) -> list[bytes]: ...
-def ears(server, text_for, speech_for=None) -> contextlib.ExitStack: ...  # patches speech_seconds, transcribe_pcm, transcribe_pcm_heard
+def ears(server, text_for, speech_for=None) -> contextlib.ExitStack: ...
+    # patches speech_seconds, transcribe_pcm, transcribe_pcm_heard; empty text → sure=False;
+    # speech_for None → the whole burst is speech
 ```
 
 ## Homes
@@ -170,7 +180,7 @@ def ears(server, text_for, speech_for=None) -> contextlib.ExitStack: ...  # patc
 | Barge action | `Wake.barge` | a `Speaker.stop` or BUS `barge` publish on a verdict anywhere else |
 | Per-frame voice detection | `hearing.Voicing` | rms, floor or threshold arithmetic in a frame loop; a `hold` decision or clip count inside `Voicing` |
 | Drop output | `server.verdict_out` | any other `print` of a verdict line or `gate_drop` publish; any file, store, counter or history of drops |
-| Hearing test doubles | `tests/fakes.py` | a `Heard(...)` literal, STT patch set, `hiss` or `pieces` in a test file |
+| Hearing test doubles | `tests/fakes.py` | a `Heard(...)` literal, STT patch set, `hiss` or `pieces` in a test file. The look-alikes under **Why** are not doubles of these and stay |
 
 ## Order
 
@@ -179,5 +189,5 @@ Agents are given by role: `test-writer` for the tests, and the roster agent whos
 1. **`gate` core lands.** Put the stubs above in place, build all of them but `judge` and `spoken_enough`, move the echo, noise and stop tests and the thresholds into `gate`, and make `server.py` import them. Files: `app/gate.py`, `app/server.py`, `tests/test_gate.py`, `tests/test_echo.py`. Agent: the `app/` roster agent; `test-writer` for the two test files.
 2. **Every drop goes through `judge`.** Build `gate.spoken_enough` and `gate.judge` in `app/gate.py`, `judge` running the nine checks in the order under Modules, and remove `_follow_legacy` and its bridge. `Wake.check`, `Wake.heard`, `Wake.stop_in` and `Listen.run` build a `Burst` of the kind the table under `app/server.py` gives, call `gate.judge` once, act on the `Verdict`, barge through `Wake.barge`, and print through `verdict_out`. `run_whisper_heard` uses `gate.sure` and blanks nothing. Files: `app/gate.py`, `app/server.py`, `tests/test_gate.py`, `tests/test_wake_loop.py`, `tests/test_listen_enrol.py`. Agent: the `app/` roster agent; `test-writer` for the tests.
 3. **`Voicing` lands.** `speech_span`, `Listen.run` and `Wake.session` use it, each passing its own `hold`; `Listen.run` and `Wake.session` create it before opening the mic; `Listen.run` keeps its clip count; and `Floor` leaves `server.py`. Files: `app/hearing.py`, `app/server.py`, `tests/test_hearing.py`. Agent: the `app/` roster agent; `test-writer` for the test.
-4. **`tests/fakes.py` lands** and the unit tests use it. Files: `tests/fakes.py`, `tests/test_gate.py`, `tests/test_wake_loop.py`, `tests/test_echo.py`, `tests/test_listen_enrol.py`. Agent: `test-writer`.
+4. **`tests/fakes.py` lands** and the unit tests use it, `test_listen_enrol`'s speech detection included. Files: `tests/fakes.py`, `tests/test_gate.py`, `tests/test_wake_loop.py`, `tests/test_echo.py`, `tests/test_listen_enrol.py`. Agent: `test-writer`.
 5. **Scenes use `fakes.heard`.** Files: `tests/scenes.py`. Agent: `test-writer`.
