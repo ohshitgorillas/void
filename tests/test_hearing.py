@@ -228,5 +228,263 @@ class EchoCancelSettingTest(unittest.TestCase):
         self.assertIs(server.DEFAULTS.get("echo_cancel"), True)
 
 
+SPK_RATE = 8000                                             # the player's rate in the Speaker tests
+SPK_STEP = 320                                              # bytes Speaker._write hands over at a time: 20 ms at 8 kHz
+
+
+class FakeRef:
+    """Stands in for hearing.PlayRef: records what it is told played, and where it was cut."""
+    def __init__(self):
+        self.calls, self.cuts = [], []
+
+    def played(self, pcm, rate, at):
+        self.calls.append((bytes(pcm), rate, at))
+
+    def cut(self, at):
+        self.cuts.append(at)
+
+
+class FakePlayer:
+    """A player that plays in real time (the fake clock moves on as each chunk goes in) and dies after `dies` writes."""
+    def __init__(self, clock, dies=None):
+        self.clock, self.dies, self.got, self.killed, self.dead = clock, dies, b"", False, False
+        self.stdin = self
+
+    def write(self, b):
+        if self.dies is not None and len(self.got) // SPK_STEP >= self.dies:
+            self.dead = True
+            raise BrokenPipeError("the speakers have changed")
+        self.got += b
+        self.clock[0] += len(b) / 2 / SPK_RATE
+
+    def flush(self):
+        pass
+
+    def poll(self):
+        return 0 if self.dead else None
+
+    def kill(self):
+        self.killed = True
+
+
+@unittest.skipIf(server is None or hearing is None, f"server.py or hearing.py doesn't import here: {SERVER_ERR or IMPORT_ERR}")
+class SpeakerFeedsPlayRefTest(unittest.TestCase):
+    """What Void hands the speakers goes into PlayRef at the time it will play; stopping him cuts it there."""
+    def setUp(self):
+        S = server.Speaker
+        self.clock = [100.0]
+        self.ref = FakeRef()
+        self.made = []
+        self.player = FakePlayer(self.clock)
+        for k, v in (("gen", 7), ("proc", self.player), ("prate", SPK_RATE), ("written", 1000), ("t0", 100.0),
+                     ("filled", False), ("stats", {}), ("todo", []), ("ready", [])):
+            self.patch(S, k, v)
+        self.patch(server.time, "monotonic", lambda: self.clock[0])
+        self.patch(server.time, "sleep", lambda s: self.clock.__setitem__(0, self.clock[0] + s))
+        self.patch(server, "make_player", self.make_player)
+        self.patch(hearing, "PlayRef", self.ref)
+        self.patch(server.Wake, "hush", classmethod(lambda cls: None))
+
+    def patch(self, obj, name, value):
+        p = mock.patch.object(obj, name, value)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def make_player(self, rate):
+        proc = FakePlayer(self.clock)
+        self.made.append(proc)
+        return proc
+
+    def test_write_feeds_playref_with_everything_it_plays_at_its_rate(self):
+        data = bytes(range(256)) * 19
+        self.assertTrue(server.Speaker._write(data, 7))
+        self.assertTrue(self.ref.calls, "Speaker._write never told PlayRef anything played")
+        self.assertEqual(b"".join(c[0] for c in self.ref.calls), self.player.got, "PlayRef wasn't told what played")
+        self.assertEqual({c[1] for c in self.ref.calls}, {SPK_RATE}, "PlayRef was told the wrong rate")
+
+    def test_write_stamps_each_chunk_with_when_it_will_play(self):
+        data = bytes(range(256)) * 19
+        start = 100.0 + 1000 / SPK_RATE                                # t0 + written / prate: after what's queued
+        self.assertTrue(server.Speaker._write(data, 7))
+        self.assertTrue(self.ref.calls, "Speaker._write never told PlayRef anything played")
+        first = self.ref.calls[0][2]
+        self.assertGreaterEqual(first, start - 1e-6, "the first chunk is stamped before the queue ahead of it plays")
+        self.assertLessEqual(first, start + server.Speaker.LAT + 1e-6, "the first chunk is stamped too late")
+        for (a, _, t), (_, _, u) in zip(self.ref.calls, self.ref.calls[1:]):
+            self.assertAlmostEqual(u, t + len(a) / 2 / SPK_RATE, delta=1e-6,
+                                   msg="consecutive chunks aren't stamped back to back")
+
+    def test_write_doesnt_count_a_chunk_the_dead_player_never_took(self):
+        self.player.dies = 5
+        data = bytes(range(256)) * 19
+        self.assertTrue(server.Speaker._write(data, 7))
+        self.assertEqual(len(self.made), 1)
+        told = b"".join(c[0] for c in self.ref.calls)
+        n = len(self.player.got)
+        self.assertEqual(told[:n], self.player.got, "what the old player took isn't what PlayRef was told")
+        self.assertEqual(told[n:], self.made[0].got, "what the new player took isn't what PlayRef was told")
+
+    def test_stop_cuts_playref_at_the_moment_of_the_stop(self):
+        self.clock[0] = 123.0
+        server.Speaker.stop()
+        self.assertEqual(len(self.ref.cuts), 1, f"Speaker.stop cut PlayRef {len(self.ref.cuts)} times")
+        self.assertGreaterEqual(self.ref.cuts[0], 123.0 - 1e-6)
+        self.assertLessEqual(self.ref.cuts[0], 123.0 + server.Speaker.LAT + 1e-6)
+
+
+MIC_RATE = 16000
+
+
+class FakeMic:
+    """A mic that captures in real time: each read hands back the next chunk, the fake clock having moved on by its
+    length while it was captured. An empty chunk is "nothing yet"; None is the mic stopping (EOFError)."""
+    def __init__(self, clock, chunks):
+        self.clock, self.chunks, self.timeouts, self.closed = clock, list(chunks), [], 0
+        self.name = "fakemic"
+
+    def read(self, timeout):
+        self.timeouts.append(timeout)
+        c = self.chunks.pop(0)
+        if c is None:
+            raise EOFError
+        self.clock[0] += len(c) / 2 / MIC_RATE
+        return c
+
+    def close(self):
+        self.closed += 1
+
+    def err(self):
+        return "the mic's last words"
+
+
+def flip(b):
+    return bytes(x ^ 0xFF for x in b)
+
+
+class FakeCanceller:
+    """Stands in for hearing.Canceller: flips every bit of what it's given, and remembers each chunk and its stamp."""
+    made = []
+
+    def __init__(self, on=True):
+        self.on, self.seen, self.available = on, [], True
+        FakeCanceller.made.append(self)
+
+    def process(self, mic, at):
+        self.seen.append((bytes(mic), at))
+        return flip(mic)
+
+
+@unittest.skipIf(server is None or hearing is None, f"server.py or hearing.py doesn't import here: {SERVER_ERR or IMPORT_ERR}")
+class OpenCleanMicTest(unittest.TestCase):
+    """open_clean_mic is open_mic with everything it hands over first put through a Canceller, stamped with when it
+    was captured."""
+    FIRST = bytes(range(256)) * 12 + bytes(64)                 # 100 ms at 16 kHz, captured just before it returns
+    CHUNK = bytes(range(1, 241)) * 2 + bytes(range(160))       # 20 ms
+
+    def setUp(self):
+        self.clock = [200.0]
+        FakeCanceller.made = []
+        self.mic = FakeMic(self.clock, [self.CHUNK, b"", self.CHUNK, None])
+        self.opened = 0
+        for obj, k, v in ((server.time, "monotonic", lambda: self.clock[0]), (hearing, "Canceller", FakeCanceller),
+                          (server, "open_mic", self.open_mic)):
+            p = mock.patch.object(obj, k, v)
+            p.start()
+            self.addCleanup(p.stop)
+        p = mock.patch.dict(server.CFG, {"echo_cancel": True})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def open_mic(self):
+        self.opened += 1
+        return self.mic, "fakemic", self.FIRST
+
+    def drain(self, mic):
+        """Read until the mic stops: every non-empty chunk handed over."""
+        out = []
+        with self.assertRaises(EOFError):
+            while True:
+                c = mic.read(0.2)
+                if c:
+                    out.append(c)
+        return out
+
+    def test_opens_the_mic_through_open_mic_and_keeps_its_name(self):
+        _mic, name, first = server.open_clean_mic()
+        self.assertEqual(self.opened, 1)
+        self.assertEqual(name, "fakemic")
+        self.assertEqual(len(first), len(self.FIRST))
+
+    def test_makes_its_canceller_with_the_echo_cancel_setting(self):
+        for on in (True, False):
+            FakeCanceller.made = []
+            with mock.patch.dict(server.CFG, {"echo_cancel": on}):
+                server.open_clean_mic()
+            self.assertEqual([c.on for c in FakeCanceller.made], [on], f"with echo_cancel {on}")
+
+    def test_first_has_been_through_the_canceller(self):
+        _mic, _name, first = server.open_clean_mic()
+        self.assertEqual(first, flip(self.FIRST), "first wasn't handed over as the canceller gave it back")
+
+    def test_everything_read_has_been_through_the_canceller_in_order(self):
+        mic, _name, first = server.open_clean_mic()
+        out = self.drain(mic)
+        self.assertEqual(first + b"".join(out), flip(self.FIRST + self.CHUNK * 2))
+        self.assertEqual(len(FakeCanceller.made), 1, "one canceller for the whole session")
+        fed = b"".join(m for m, _ in FakeCanceller.made[0].seen)
+        self.assertEqual(fed, self.FIRST + self.CHUNK * 2, "the canceller wasn't fed the mic's audio, all of it, in order")
+
+    def test_each_chunk_is_stamped_with_when_it_was_captured(self):
+        mic, _name, _first = server.open_clean_mic()
+        self.drain(mic)
+        self.assertEqual(len(FakeCanceller.made), 1, "one canceller for the whole session")
+        seen = [(m, at) for m, at in FakeCanceller.made[0].seen if m]
+        self.assertEqual([len(m) for m, _ in seen], [len(self.FIRST), len(self.CHUNK), len(self.CHUNK)])
+        # FIRST was captured over the 100 ms before open returned at 200.0; each CHUNK over the 20 ms before its read
+        for (_, at), want in zip(seen, (199.9, 200.0, 200.02)):
+            self.assertAlmostEqual(at, want, delta=0.025, msg="a chunk wasn't stamped with when it was captured")
+
+    def test_read_passes_its_timeout_and_nothing_yet_through(self):
+        mic, _name, _first = server.open_clean_mic()
+        self.assertEqual(mic.read(0.2), flip(self.CHUNK))
+        self.assertEqual(mic.read(0.7), b"")
+        self.assertEqual(self.mic.timeouts, [0.2, 0.7])
+
+    def test_close_and_err_are_the_mics(self):
+        mic, _name, _first = server.open_clean_mic()
+        self.assertIsNot(mic, self.mic, "the mic itself came back, not one that cancels")
+        self.assertEqual(mic.err(), "the mic's last words")
+        mic.close()
+        self.assertEqual(self.mic.closed, 1)
+
+
+class Opened(Exception):
+    pass
+
+
+@unittest.skipIf(server is None, f"server.py doesn't import here: {SERVER_ERR}")
+class SessionsOpenTheCleanMicTest(unittest.TestCase):
+    """Listen.run and Wake.session hear the mic with his own voice taken out."""
+    def setUp(self):
+        def which(name):
+            def f(*a, **k):
+                raise Opened(name)
+            return f
+        for k in ("open_mic", "open_clean_mic"):
+            p = mock.patch.object(server, k, which(k))
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_listen_opens_the_clean_mic(self):
+        with self.assertRaises(Opened) as e:
+            server.Listen("auto").run(lambda **k: None)
+        self.assertEqual(str(e.exception), "open_clean_mic")
+
+    def test_wake_session_opens_the_clean_mic(self):
+        with self.assertRaises(Opened) as e:
+            server.Wake.session()
+        self.assertEqual(str(e.exception), "open_clean_mic")
+
+
 if __name__ == "__main__":
     unittest.main()
