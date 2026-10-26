@@ -2380,6 +2380,7 @@ class Speaker:
                 cls.proc.stdin.write(data[i:i + step])
                 cls.proc.stdin.flush()
             except (BrokenPipeError, OSError, AttributeError):
+                hearing.PlayRef.cut(time.monotonic() + cls.LAT)   # its queue died with it: only what was out still plays
                 if not again or g != cls.gen or cls.proc is None:
                     return False
                 back = int(max(0.0, ahead) * cls.prate) * 2
