@@ -509,13 +509,15 @@ class RecordedMic:
 
 
 class Events:
-    """BUS during a scene: keeps every event published."""
+    """BUS during a scene: keeps every event published, each with `at`, the scene time it was published at (seconds
+    from the scene's start)."""
 
-    def __init__(self):
+    def __init__(self, sim):
+        self.sim = sim
         self.got = []
 
     def pub(self, **ev):
-        self.got.append(ev)
+        self.got.append(dict(ev, at=self.sim.now - T0))
 
     def sub(self):
         import queue
@@ -700,7 +702,7 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
 
     scene = Scene(sim, room, n, lat, you_pcm, you_at, bool(void),
                   first if switch_at is not None or mic_at is not None else None)
-    events, clean = Events(), []
+    events, clean = Events(sim), []
     real_open_clean_mic = server.open_clean_mic
 
     def open_mic():
