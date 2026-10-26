@@ -284,6 +284,20 @@ def clip(name):
         return w.readframes(w.getnframes())
 
 
+def hiss(seconds, seed):
+    """Quiet room hiss, `seconds` long: the lead-in a burst carries before you start talking."""
+    import random
+    rnd = random.Random(seed)
+    return b"".join(int(max(-32768, min(32767, round(rnd.gauss(0.0, 0.003) * 32768)))).to_bytes(2, "little", signed=True)
+                    for _ in range(int(seconds * 16000)))
+
+
+def pieces(pcm, ms=20):
+    """Every `ms`-long piece of `pcm`, back to back."""
+    n = 16000 * 2 * ms // 1000
+    return [pcm[i:i + n] for i in range(0, len(pcm) - n + 1, n)]
+
+
 @unittest.skipIf(server is None, f"server.py doesn't import here: {IMPORT_ERR}")
 class FollowUpGate(unittest.TestCase):
     @classmethod
@@ -356,6 +370,12 @@ class FollowUpGate(unittest.TestCase):
             events.append(self.q.get_nowait())
         return pcm, events, [ln for ln in err.getvalue().splitlines() if ln.startswith("[void]")]
 
+    @staticmethod
+    def spoken(pcm):
+        """The stretch of `pcm` where the owner spoke (server.speech_span): what's scored or enrolled."""
+        span = server.speech_span(pcm)
+        return pcm if span is None else pcm[span[0]:span[1]]
+
     def judged(self):
         try:
             import gate
@@ -412,26 +432,26 @@ class FollowUpGate(unittest.TestCase):
                 pcm, events, log = self.check("you_hey_void.wav", follow=follow)
                 self.assertEqual(len(self.wakes(events)), 1, f"wake word not taken: {events}\n{log}")
                 self.assertEqual(calls, [], "a wake-word clip went through gate.judge")
-                self.assertTrue(self.enrolled == [pcm], f"the wake-word clip was enrolled {len(self.enrolled)}x, "
+                self.assertTrue(self.enrolled == [self.spoken(pcm)], f"the wake-word clip was enrolled {len(self.enrolled)}x, "
                                                         "not once by the wake-word branch alone")
 
     def test_wake_word_clip_is_enrolled_beside_mic_learn(self):
         pcm, events, log = self.check("you_hey_void.wav", follow=False)
         self.assertTrue(self.learned == [pcm], f"MicAuto.learn got {len(self.learned)} clip(s), not the wake-word clip: {log}")
-        self.assertTrue(self.enrolled == [pcm], f"the wake-word clip wasn't enrolled into the voiceprint ({len(self.enrolled)} clip(s) enrolled)")
+        self.assertTrue(self.enrolled == [self.spoken(pcm)], f"the wake-word clip wasn't enrolled into the voiceprint ({len(self.enrolled)} clip(s) enrolled)")
 
     def test_follow_ups_are_never_enrolled(self):
         followed = []
         for name in ("you_overlap.wav", "room_music.wav"):     # (one kept, one dropped)
             self.scored.clear()
             pcm, events, log = self.check(name, follow=True)
-            followed.append(pcm)
-            self.assertTrue(self.scored == [pcm], f"follow-up {name} not scored once against the voiceprint "
+            followed.append(self.spoken(pcm))
+            self.assertTrue(self.scored == [self.spoken(pcm)],f"follow-up {name} not scored once against the voiceprint "
                                                   f"({len(self.scored)} score(s)): {log}")
         wake, events, log = self.check("you_hey_void.wav", follow=False)
         self.assertEqual(len(self.enrolled), 1, f"{len(self.enrolled)} clip(s) enrolled, not just the wake-word clip")
         self.assertFalse([p for p in followed if p in self.enrolled], "a follow-up clip was enrolled into the voiceprint")
-        self.assertTrue(self.enrolled == [wake], "the wake-word clip after the follow-ups wasn't enrolled")
+        self.assertTrue(self.enrolled == [self.spoken(wake)], "the wake-word clip after the follow-ups wasn't enrolled")
 
     def test_the_gate_adds_under_100_ms_over_whisper_alone(self):
         self.whisper_s = WHISPER_S
@@ -492,6 +512,109 @@ class FollowUpGate(unittest.TestCase):
         self.assertEqual(len(self.enrolled), 1, f"exactly one clip should be enrolled ({len(self.enrolled)} enrolled)")
         self.assertTrue(self.enrolled[0] in self.learned[0] and len(self.enrolled[0]) < len(self.learned[0]),
                         "the enrolled clip should be the speech within the recording MicAuto.learn got, not the whole recording")
+
+    # ---- only the stretch where the owner spoke is scored or enrolled, cut by one shared speech-span function
+    LEAD_IN = 3.0                                # seconds of room before the owner starts a follow-up
+
+    def check_pcm(self, pcm, said, follow):
+        """Wake.check on `pcm`, heard as `said`, inside the follow-up window or not. → (bus events, '[void]' log lines)."""
+        self.heard_text[pcm] = said
+        now = time.monotonic()
+        server.Wake.speaking_until = 0.0
+        server.Wake.follow_from, server.Wake.follow_until = (now - 1, now + 5) if follow else (0.0, 0.0)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            server.Wake.check(pcm, now)
+        events = []
+        while not self.q.empty():
+            events.append(self.q.get_nowait())
+        return events, [ln for ln in err.getvalue().splitlines() if ln.startswith("[void]")]
+
+    def assert_speech_only(self, got, lead, speech, what):
+        led = sum(1 for p in pieces(lead) if p in got)
+        self.assertEqual(led, 0, f"{what}: {led * 20} ms of the lead-in went in with the owner's speech")
+        spoken = pieces(speech)
+        kept = sum(1 for p in spoken if p in got)
+        self.assertGreaterEqual(kept / len(spoken), 0.8, f"{what}: only {kept} of {len(spoken)} 20 ms pieces of the "
+                                                         "owner's speech went in")
+
+    def test_owner_follow_up_after_seconds_of_lead_in_is_kept(self):
+        pcm = hiss(self.LEAD_IN, 7) + clip("you_overlap.wav")
+        events, log = self.check_pcm(pcm, SAID["you_overlap.wav"], follow=True)
+        got = self.wakes(events)
+        self.assertTrue(len(got) == 1 and got[0].get("follow"),
+                        f"the owner's follow-up after {self.LEAD_IN:.0f} s of lead-in was not kept: {events}\n{log}")
+        self.assertFalse([e for e in events if e.get("t") == "gate_drop"], f"gate_drop on the owner's follow-up: {log}")
+
+    def test_follow_up_is_scored_on_the_owner_s_speech_alone(self):
+        lead, speech = hiss(self.LEAD_IN, 7), clip("you_overlap.wav")
+        events, log = self.check_pcm(lead + speech, SAID["you_overlap.wav"], follow=True)
+        self.assertEqual(len(self.scored), 1, f"the follow-up was scored {len(self.scored)}x, not once: {log}")
+        self.assert_speech_only(bytes(self.scored[0]), lead, speech, "the follow-up's voice score")
+
+    def test_wake_word_clip_is_enrolled_without_its_lead_in(self):
+        lead, speech = hiss(self.LEAD_IN, 8), clip("you_hey_void.wav")
+        events, log = self.check_pcm(lead + speech, SAID["you_hey_void.wav"], follow=False)
+        self.assertEqual(len(self.wakes(events)), 1, f"wake word not taken: {events}\n{log}")
+        self.assertEqual(len(self.enrolled), 1, f"the wake-word clip was enrolled {len(self.enrolled)}x, not once")
+        self.assert_speech_only(bytes(self.enrolled[0]), lead, speech, "the wake-word enrolment")
+
+    def test_wake_word_enrolment_logs_the_voiceprint_enrolling_line(self):
+        events, log = self.check_pcm(hiss(1.0, 9) + clip("you_hey_void.wav"), SAID["you_hey_void.wav"], follow=False)
+        self.assertEqual(len(self.enrolled), 1, f"the wake-word clip was enrolled {len(self.enrolled)}x, not once")
+        lines = [ln for ln in log if "voiceprint enrolling" in ln]
+        self.assertEqual(len(lines), 1, f"a wake-word enrolment logged {len(lines)} 'voiceprint enrolling' lines, "
+                                        f"not one:\n" + "\n".join(log))
+        m = re.match(r"\[void\] voiceprint enrolling (\d+\.\d)s of your speech: (.+)$", lines[0])
+        self.assertIsNotNone(m, f"not the line Listen logs ('voiceprint enrolling N.Ns of your speech: ...'): {lines[0]!r}")
+        secs = len(self.enrolled[0]) / (server.RATE * 2)
+        self.assertLessEqual(abs(float(m.group(1)) - secs), 0.1,
+                             f"the line says {m.group(1)}s but {secs:.1f}s was enrolled: {lines[0]!r}")
+        self.assertIn("open my downloads", m.group(2).lower(), f"the line doesn't say what was enrolled: {lines[0]!r}")
+
+    def test_listen_wake_word_and_follow_up_cut_the_same_stretch_of_one_recording(self):
+        server.CFG["voice_gate"] = True
+        speech = clip("you_hey_void.wav")
+        pcm = hiss(1.0, 10) + speech + hiss(0.6, 11)
+        pcm = pcm[:len(pcm) // server.FRAME * server.FRAME]  # (whole 40 ms frames: Listen keeps every byte it reads)
+        said = SAID["you_hey_void.wav"]
+
+        class FakeMic:                           # the recording, 0.1 s a read, then the recorder ends
+            def __init__(self):
+                self.left = pcm
+
+            def read(self, s):
+                if not self.left:
+                    raise EOFError
+                n = int(server.RATE * 2 * s)
+                out, self.left = self.left[:n], self.left[n:]
+                return out
+
+            def close(self):
+                pass
+
+            def err(self):
+                return ""
+
+        with mock.patch.object(server, "open_clean_mic", lambda: (FakeMic(), "fake mic", b"")), \
+                mock.patch.object(server, "transcribe_pcm", lambda b, **kw: said), \
+                contextlib.redirect_stderr(io.StringIO()):
+            server.Listen("ptt").run(lambda **ev: None)
+        self.assertEqual(len(self.enrolled), 1, f"Listen enrolled {len(self.enrolled)} clip(s), not one")
+        listen = bytes(self.enrolled[0])
+        self.enrolled.clear()
+        self.check_pcm(pcm, said, follow=False)
+        self.assertEqual(len(self.enrolled), 1, f"the wake word enrolled {len(self.enrolled)} clip(s), not one")
+        wake = bytes(self.enrolled[0])
+        self.scored.clear()
+        self.check_pcm(pcm, "Open my Downloads folder instead, and the Pictures one too.", follow=True)
+        self.assertEqual(len(self.scored), 1, f"the follow-up was scored {len(self.scored)}x, not once")
+        followed = bytes(self.scored[0])
+        self.assertEqual((len(wake), len(followed)), (len(listen), len(listen)),
+                         "Listen, the wake word and a follow-up cut different stretches of one recording "
+                         f"(Listen {len(listen)} bytes, wake word {len(wake)}, follow-up {len(followed)})")
+        self.assertTrue(wake == listen and followed == listen,
+                        "Listen, the wake word and a follow-up cut different stretches of one recording")
 
 
 if __name__ == "__main__":
