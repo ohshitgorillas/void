@@ -6,12 +6,16 @@ The model is fetched on first use into Void's data folder, so the first run need
 
     python3 -m unittest tests.test_voiceprint -v
 """
+import io
 import sys
 import tempfile
 import time
+import types
 import unittest
 import wave
 from pathlib import Path
+
+import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
 SCENES = ROOT / "tests" / "fixtures" / "scenes"
@@ -26,6 +30,13 @@ except Exception as e:  # noqa: BLE001
 else:
     IMPORT_ERR = None
 
+try:
+    import gate
+except Exception as e:  # noqa: BLE001
+    gate, GATE_ERR = None, e
+else:
+    GATE_ERR = None
+
 MODEL_DIR = suite_data.MODEL_DIR                  # the app's, read from the real data folder, so it is fetched once
 
 ENROLL = ["you_stop.wav", "you_hold_on.wav", "you_shut_up.wav", "you_hey_void.wav", "you_answer.wav"]
@@ -37,6 +48,17 @@ def pcm(name):
     with wave.open(str(SCENES / name), "rb") as w:
         assert (w.getnchannels(), w.getsampwidth(), w.getframerate()) == (1, 2, 16000), name
         return w.readframes(w.getnframes())
+
+
+def keys(path):
+    with np.load(io.BytesIO(Path(path).read_bytes())) as f:
+        return {k: f[k] for k in f.files}
+
+
+def resave(path, **fields):
+    buf = io.BytesIO()
+    np.savez(buf, **fields)
+    Path(path).write_bytes(buf.getvalue())
 
 
 class Voiceprint(unittest.TestCase):
@@ -98,6 +120,39 @@ class Voiceprint(unittest.TestCase):
         self.assertIsInstance(vp.why, str)
         self.assertTrue(vp.why.strip(), "unavailable without saying why")
         vp.enroll(pcm(ENROLL[0]))
+        self.assertIsNone(vp.score(pcm(HELD_OUT[0])))
+
+    def test_a_print_saved_before_versions_is_not_used(self):
+        # a print as Void saved it before prints carried a version: the running mean and its clip count, nothing else
+        stale = self.ready().embed(pcm(NOT_OWNER[0]))
+        self.assertIsNotNone(stale)
+        resave(self.path, print=stale, enrolled=np.int64(voiceprint.MAX_ENROLL))
+        vp = self.ready()
+        self.assertEqual(vp.enrolled, 0, "a print saved before this change was loaded and used")
+        self.assertIsNone(vp.score(pcm(HELD_OUT[0])), "scored against a print saved before this change")
+        self.assertIsNotNone(gate, f"app/gate.py doesn't import: {GATE_ERR}")
+        heard = types.SimpleNamespace(text="and what about tomorrow", logprob=-0.2, no_speech=0.02, seconds=2.0)
+        cfg = {"voice_gate": True, "voice_min": 0.99}
+        clips = [pcm(n) for n in ENROLL]
+        for i in range(voiceprint.MIN_ENROLL):
+            for n in HELD_OUT:
+                v = gate.judge(heard, vp.score(pcm(n)), cfg)
+                self.assertTrue(v.keep, f"owner's follow-up {n} dropped ({v.why}) with {vp.enrolled} clips enrolled")
+            vp.enroll(clips[i % len(clips)])
+        self.assertEqual(vp.enrolled, voiceprint.MIN_ENROLL)
+
+    def test_saved_prints_carry_a_version(self):
+        vp = self.ready()
+        clips = [pcm(n) for n in ENROLL]
+        for i in range(voiceprint.MIN_ENROLL):
+            vp.enroll(clips[i % len(clips)])
+        saved = keys(self.path)
+        self.assertIn("version", sorted(saved), f"a print saved now carries no version: {sorted(saved)}")
+        self.assertEqual(self.ready().enrolled, voiceprint.MIN_ENROLL, "a print saved now isn't used when loaded again")
+        later = dict(saved, version=np.asarray(saved["version"]) + 1)
+        resave(self.path, **later)
+        vp = self.ready()
+        self.assertEqual(vp.enrolled, 0, "a print saved in another format version was loaded and used")
         self.assertIsNone(vp.score(pcm(HELD_OUT[0])))
 
 
