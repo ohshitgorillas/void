@@ -13,6 +13,8 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import suite_data  # noqa: E402  (Void's data folder: the suite's own, set before server.py settles it)
 
 try:
     import server
