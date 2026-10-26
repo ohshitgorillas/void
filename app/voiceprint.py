@@ -23,6 +23,7 @@ MAX_ENROLL = 30          # the running mean counts at most this many clips
 MODEL = "wespeaker_en_voxceleb_resnet34.onnx"
 SOURCES = ["https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/",
            "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/"]
+MAX_SAMPLES = 3 * SR     # embed at most the first 3 s of a clip
 MIN_SAMPLES = SR // 4    # shorter than this, there's too little voice to embed
 
 _said = set()            # why-not lines already printed this process
@@ -119,6 +120,7 @@ class Voiceprint:
         """The clip's unit-length speaker embedding, or None without the model or with too little audio."""
         if not self.available or len(pcm) // 2 < MIN_SAMPLES:
             return None
+        pcm = pcm[:MAX_SAMPLES * 2]
         e = self.session.run(None, {"feats": fbank(pcm)[None]})[0][0].astype(np.float32)
         norm = float(np.linalg.norm(e))
         return e / norm if norm > 0 else None
