@@ -2,6 +2,9 @@
 stock filler, or as an echo of his own voice enrols nothing. What is enrolled is the recording's speech alone, without
 the lead-in silence and the chime before it, and each enrolment logs one line saying what was enrolled.
 
+Every Listen recording is kept or dropped by gate.judge alone, as a "listen" burst: a dropped one (too little speech,
+noise or filler, his own echo) is never sent on as a request, and each verdict logs one '[void] <why>: <said>' line.
+
 The mic is a fake that plays one recording (a lead-in of room hiss, a chime, then a real clip of you) and Whisper is
 replaced by what it "hears", so the tests need neither a microphone nor the speech model.
 
@@ -24,6 +27,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "app"))
 sys.path.insert(0, str(ROOT / "tests"))
 import suite_data  # noqa: E402,F401  (Void's data folder: the suite's own, set before server.py settles it)
+import gate  # noqa: E402
 
 try:
     import server
@@ -181,6 +185,71 @@ class ListenEnrolTest(unittest.TestCase):
         says_text = "that's not what i asked" in lines[0].lower()
         says_secs = any(abs(float(x) - secs) <= 0.1 for x in re.findall(r"(\d+(?:\.\d+)?)\s*s\b", lines[0]))
         self.assertTrue(says_text or says_secs, f"the enrolment line doesn't say what was enrolled: {lines[0]!r}")
+
+    # ---- every recording is kept or dropped by gate.judge, and its verdict logged in one line
+    def run_listen(self, heard):
+        """One Listen session heard as `heard`. → (the events it emitted, its '[void]' log lines)."""
+        self.heard = heard
+        events, err = [], io.StringIO()
+        with contextlib.redirect_stderr(err):
+            server.Listen("ptt").run(lambda **k: events.append(k))
+        return events, [ln for ln in err.getvalue().splitlines() if ln.startswith("[void]")]
+
+    @staticmethod
+    def verdicts(log):
+        """The verdict lines in `log`: '[void] <why>' (any reason gate.WHY names, maybe a note in brackets), ': ', said."""
+        return [(w, ln) for ln in log for w in gate.WHY if re.match(rf"\[void\] {re.escape(w)}(?: \([^)]*\))?: ", ln)]
+
+    @staticmethod
+    def sent(events):
+        """What the recording sent on as a request: every 'text' event with words in it."""
+        return [e for e in events if e.get("t") == "text" and (e.get("text") or "").strip()]
+
+    def test_a_recording_is_judged_once_as_a_listen_burst(self):
+        calls, real = [], gate.judge
+        with mock.patch.object(gate, "judge", lambda *a, **k: calls.append(a) or real(*a, **k)):
+            self.run_listen(REQUEST)
+        self.assertEqual(len(calls), 1, f"gate.judge called {len(calls)}x on one Listen recording")
+        b = calls[0][0]
+        self.assertIsInstance(b, gate.Burst, f"gate.judge not handed a gate.Burst: {b!r}")
+        self.assertEqual((b.kind, b.text, b.voice), ("listen", REQUEST, None),
+                         f"not judged as an unscored 'listen' burst of what Whisper heard: {b!r}")
+
+    def test_a_kept_request_is_sent_and_logs_one_kept_line(self):
+        events, log = self.run_listen(REQUEST)
+        self.assertEqual([e["text"] for e in self.sent(events)], [REQUEST], f"the request wasn't sent on once: {events}")
+        got = self.verdicts(log)
+        self.assertEqual(len(got), 1, f"{len(got)} verdict lines, not one:\n" + "\n".join(log))
+        self.assertEqual(got[0][0], "kept", f"a request in words not logged as kept: {got[0][1]!r}")
+        self.assertIn("that's not what i asked", got[0][1].lower(), f"the verdict line doesn't say what was heard: {got[0][1]!r}")
+
+    def test_noise_and_filler_are_dropped_not_sent(self):
+        for heard in ("Thank you.", "Um.", "The two of them were the two of them. The two of them were the two of them."):
+            with self.subTest(heard=heard):
+                events, log = self.run_listen(heard)
+                self.assertEqual(self.sent(events), [], f"a recording heard as {heard!r} was sent on as a request")
+                got = self.verdicts(log)
+                self.assertEqual([w for w, _ in got], ["noise"], f"{heard!r} not logged as one noise verdict:\n"
+                                 + "\n".join(log))
+
+    def test_an_echo_of_his_own_voice_is_dropped_and_logged_as_echo(self):
+        said = "The build finished and all forty tests passed on the first run."
+        server.SPOKEN.append((time.monotonic(), said))
+        events, log = self.run_listen(said)
+        self.assertEqual(self.sent(events), [], "an echo of his own voice was sent on as a request")
+        got = self.verdicts(log)
+        self.assertEqual([w for w, _ in got], ["echo"], "the echo not logged as one echo verdict:\n" + "\n".join(log))
+
+    def test_a_recording_with_too_little_speech_is_dropped_untranscribed(self):
+        whispered = []
+        with mock.patch.object(server, "speech_seconds", lambda pcm: 0.1), \
+                mock.patch.object(server, "run_whisper_heard", lambda *a, **k: whispered.append(a) or server.Heard(
+                    text=REQUEST, logprob=-0.2, no_speech=0.05, seconds=0.1)):
+            events, log = self.run_listen(REQUEST)
+        self.assertEqual(self.sent(events), [], "a push-to-talk recording with 0.1 s of speech was sent on as a request")
+        self.assertEqual(whispered, [], "a recording with too little speech was still sent to Whisper")
+        got = self.verdicts(log)
+        self.assertEqual([w for w, _ in got], ["no speech"], "not logged as one 'no speech' verdict:\n" + "\n".join(log))
 
     def test_nothing_enrolled_logs_no_enrolment(self):
         log = self.listen("Um.")

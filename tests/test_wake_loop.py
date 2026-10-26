@@ -9,6 +9,10 @@ And Wake.check's follow-up gate: a follow-up without "hey Void" that is music in
 learned only from wake-word and Listen clips, never from follow-ups; voice_gate off takes follow-ups as before; and
 the gate adds under 100 ms of wall time to a follow-up over Whisper alone, the voice scored while Whisper transcribes.
 
+Every burst Wake.check, Wake.heard and Wake.stop_in hear is kept or dropped by gate.judge alone, handed a gate.Burst;
+each verdict logs one '[void] <why>: <said>' line through server.verdict_out, with the voice score, and only a dropped
+follow-up also tells the page (gate_drop). run_whisper_heard keeps only the segments gate.sure passes and blanks nothing.
+
     python3 -m unittest discover -s tests
 """
 import collections
@@ -378,16 +382,23 @@ class FollowUpGate(unittest.TestCase):
         return pcm if span is None else pcm[span[0]:span[1]]
 
     def judged(self):
+        """Spy on gate.judge. → the list each call's first argument (the burst judged) is appended to."""
         try:
             import gate
         except Exception as e:  # noqa: BLE001
             self.fail(f"app/gate.py doesn't import: {e}")
         calls = []
         real = gate.judge
-        p = mock.patch.object(gate, "judge", lambda *a, **k: calls.append(a) or real(*a, **k))
+        p = mock.patch.object(gate, "judge", lambda *a, **k: calls.append(a[0] if a else k.get("b")) or real(*a, **k))
         p.start()
         self.addCleanup(p.stop)
         return calls
+
+    @staticmethod
+    def verdicts(log):
+        """The verdict lines in `log`: '[void] <why>' (any reason gate.WHY names, maybe a note in brackets), ': ', said."""
+        import gate
+        return [(w, ln) for ln in log for w in gate.WHY if re.match(rf"\[void\] {re.escape(w)}(?: \([^)]*\))?: ", ln)]
 
     def wakes(self, events):
         return [e for e in events if e.get("t") == "wake"]
@@ -407,11 +418,16 @@ class FollowUpGate(unittest.TestCase):
         self.assertTrue(len(got) == 1 and got[0].get("follow"), f"the owner's follow-up not kept: {events}\n{log}")
         self.assertFalse([e for e in events if e.get("t") == "gate_drop"], f"gate_drop on a kept clip: {events}")
 
-    def test_each_follow_up_is_judged_once_with_its_voice_score(self):
+    def test_each_follow_up_is_judged_once_as_a_burst_with_its_voice_score(self):
+        import gate
         calls = self.judged()
         self.check("you_overlap.wav", follow=True)
         self.assertEqual(len(calls), 1, f"gate.judge called {len(calls)}x on one follow-up")
-        self.assertIsInstance(calls[0][1], float, "judged without the clip's voice score")
+        b = calls[0]
+        self.assertIsInstance(b, gate.Burst, f"gate.judge not handed a gate.Burst: {b!r}")
+        self.assertEqual((b.kind, b.text), ("follow", SAID["you_overlap.wav"]), f"not judged as the follow-up heard: {b!r}")
+        self.assertIsInstance(b.voice, float, f"judged without the clip's voice score: {b!r}")
+        self.assertIsInstance(b.heard, server.Heard, f"judged without Whisper's confidence: {b!r}")
 
     def test_every_follow_up_verdict_logs_its_voice_score(self):
         for name in ("you_overlap.wav", "room_music.wav"):     # (one kept, one dropped)
@@ -424,7 +440,8 @@ class FollowUpGate(unittest.TestCase):
                 self.assertTrue(any(abs(n - score) < 0.01 for n in numbers),
                                 f"{name}: the verdict doesn't log its voice score {score:.2f}: {verdict[0]}")
 
-    def test_wake_word_clip_is_never_judged(self):
+    def test_wake_word_clip_is_judged_once_and_taken(self):
+        import gate
         calls = self.judged()
         for follow in (False, True):
             with self.subTest(in_follow_window=follow):
@@ -432,7 +449,12 @@ class FollowUpGate(unittest.TestCase):
                 self.enrolled.clear()
                 pcm, events, log = self.check("you_hey_void.wav", follow=follow)
                 self.assertEqual(len(self.wakes(events)), 1, f"wake word not taken: {events}\n{log}")
-                self.assertEqual(calls, [], "a wake-word clip went through gate.judge")
+                self.assertEqual(len(calls), 1, f"gate.judge called {len(calls)}x on one wake-word clip")
+                self.assertIsInstance(calls[0], gate.Burst, f"gate.judge not handed a gate.Burst: {calls[0]!r}")
+                if not follow:
+                    self.assertEqual((calls[0].kind, calls[0].voice), ("wake", None),
+                                     f"a wake-word clip outside the follow-up window not judged as an unscored "
+                                     f"'wake' burst: {calls[0]!r}")
                 self.assertTrue(self.enrolled == [self.spoken(pcm)], f"the wake-word clip was enrolled {len(self.enrolled)}x, "
                                                         "not once by the wake-word branch alone")
 
@@ -440,6 +462,74 @@ class FollowUpGate(unittest.TestCase):
         pcm, events, log = self.check("you_hey_void.wav", follow=False)
         self.assertTrue(self.learned == [pcm], f"MicAuto.learn got {len(self.learned)} clip(s), not the wake-word clip: {log}")
         self.assertTrue(self.enrolled == [self.spoken(pcm)], f"the wake-word clip wasn't enrolled into the voiceprint ({len(self.enrolled)} clip(s) enrolled)")
+
+    def test_each_verdict_logs_one_line_with_its_reason_and_what_was_heard(self):
+        for name, follow, why in (("you_overlap.wav", True, "kept"), ("room_music.wav", True, "not your voice"),
+                                  ("room_music.wav", False, "no wake word"), ("you_hey_void.wav", False, "kept")):
+            with self.subTest(name=name, in_follow_window=follow):
+                pcm, events, log = self.check(name, follow=follow)
+                got = self.verdicts(log)
+                self.assertEqual([w for w, _ in got], [why], f"{name}: not one '{why}' verdict line:\n" + "\n".join(log))
+                self.assertIn(SAID[name][:30].lower(), got[0][1].lower(),
+                              f"{name}: the verdict line doesn't say what was heard: {got[0][1]!r}")
+
+    def test_only_a_dropped_follow_up_tells_the_page(self):
+        for name, follow, told in (("room_music.wav", True, 1), ("room_music.wav", False, 0),
+                                   ("you_overlap.wav", True, 0)):
+            with self.subTest(name=name, in_follow_window=follow):
+                _, events, log = self.check(name, follow=follow)
+                drops = [e for e in events if e.get("t") == "gate_drop"]
+                self.assertEqual(len(drops), told, f"{name}: {len(drops)} gate_drop(s), not {told}: {events}\n{log}")
+
+    # ---- a burst begun over him, peeked at for a stop phrase, and the quick listen for his name
+    STOP = "Stop, stop, that's not what I asked for."
+
+    def peek(self, name, said):
+        """Wake.stop_in on fixture `name`, heard as `said`, while he talks. → (its answer, bus events, '[void]' lines)."""
+        pcm = clip(name)
+        self.heard_text[pcm] = said
+        server.Wake.speaking_until = time.monotonic() + 5
+        server.Wake.follow_from = server.Wake.follow_until = 0.0
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            stopped = server.Wake.stop_in(pcm)
+        events = []
+        while not self.q.empty():
+            events.append(self.q.get_nowait())
+        return stopped, events, [ln for ln in err.getvalue().splitlines() if ln.startswith("[void]")]
+
+    def test_a_stop_said_over_him_is_judged_as_a_peek_and_stops_him(self):
+        import gate
+        calls = self.judged()
+        stopped, events, log = self.peek("you_stop.wav", self.STOP)
+        self.assertEqual(len(calls), 1, f"gate.judge called {len(calls)}x on one peek")
+        self.assertIsInstance(calls[0], gate.Burst, f"gate.judge not handed a gate.Burst: {calls[0]!r}")
+        self.assertEqual(calls[0].kind, "peek", f"a burst peeked at while he talks not judged as a 'peek': {calls[0]!r}")
+        self.assertTrue(stopped, f"a stop phrase said over him didn't stop him:\n{log}")
+        self.assertEqual([e for e in events if e.get("t") == "barge"], [{"t": "barge", "listen": False, "text": ""}],
+                         f"no single plain barge published: {events}")
+        self.assertEqual([w for w, _ in self.verdicts(log)], ["kept"], "the stop not logged as one kept verdict:\n"
+                         + "\n".join(log))
+
+    def test_anything_else_said_over_him_is_dropped_by_the_peek(self):
+        stopped, events, log = self.peek("you_overlap.wav", SAID["you_overlap.wav"])
+        self.assertFalse(stopped, "a burst with no stop phrase in it stopped him")
+        self.assertEqual([e for e in events if e.get("t") == "barge"], [], f"barge published without a stop: {events}")
+        self.assertEqual([w for w, _ in self.verdicts(log)], ["while talking"],
+                         "not logged as one 'while talking' verdict:\n" + "\n".join(log))
+
+    def test_the_quick_listen_for_his_name_is_judged_as_a_wake_burst(self):
+        import gate
+        calls = self.judged()
+        pcm = clip("you_hey_void.wav")
+        self.heard_text[pcm] = SAID["you_hey_void.wav"]
+        server.Wake.speaking_until = server.Wake.follow_from = server.Wake.follow_until = 0.0
+        with contextlib.redirect_stderr(io.StringIO()):
+            said = server.Wake.heard(pcm)
+        self.assertEqual(len(calls), 1, f"gate.judge called {len(calls)}x on one quick listen")
+        self.assertIsInstance(calls[0], gate.Burst, f"gate.judge not handed a gate.Burst: {calls[0]!r}")
+        self.assertEqual(calls[0].kind, "wake", f"the quick listen not judged as a 'wake' burst: {calls[0]!r}")
+        self.assertEqual(said, SAID["you_hey_void.wav"], "the quick listen didn't hand back what was heard")
 
     def test_follow_ups_are_never_enrolled(self):
         followed = []
@@ -642,6 +732,78 @@ class FollowUpGate(unittest.TestCase):
                          f"(Listen {len(listen)} bytes, wake word {len(wake)}, follow-up {len(followed)})")
         self.assertTrue(wake == listen and followed == listen,
                         "Listen, the wake word and a follow-up cut different stretches of one recording")
+
+
+@unittest.skipIf(server is None, f"server.py doesn't import here: {IMPORT_ERR}")
+class VerdictOut(unittest.TestCase):
+    """server.verdict_out: one stderr line per verdict, and a dropped follow-up also tells the page."""
+
+    def setUp(self):
+        self.q = server.BUS.sub()
+        self.addCleanup(server.BUS.unsub, self.q)
+
+    def out(self, keep, why, act, said, voice, kind):
+        import gate
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            server.verdict_out(gate.Verdict(keep, why, act, said if keep else ""), said, voice, kind)
+        events = []
+        while not self.q.empty():
+            events.append(self.q.get_nowait())
+        return events, err.getvalue().splitlines()
+
+    def test_one_line_per_verdict_with_its_reason_what_was_heard_and_the_voice_score(self):
+        said = "take me down to the river tonight"
+        for keep, why, act, voice, kind in ((False, "not your voice", "drop", 0.31, "follow"),
+                                            (True, "kept", "follow", 0.74, "follow"),
+                                            (False, "no wake word", "drop", None, "wake")):
+            with self.subTest(why=why, kind=kind):
+                _, lines = self.out(keep, why, act, said, voice, kind)
+                self.assertEqual(len(lines), 1, f"{len(lines)} stderr lines for one verdict: {lines}")
+                self.assertRegex(lines[0], rf"^\[void\] {re.escape(why)}(?: \([^)]*\))?: {re.escape(said)}",
+                                 "not '[void] <why>: <said>'")
+                if voice is not None:
+                    self.assertIn(f"{voice:.2f}", lines[0], "the verdict line doesn't carry the voice score")
+
+    def test_only_a_dropped_follow_up_publishes_gate_drop(self):
+        said = "take me down to the river tonight"
+        for keep, why, act, kind, told in ((False, "not your voice", "drop", "follow", 1),
+                                           (True, "kept", "follow", "follow", 0),
+                                           (False, "no wake word", "drop", "wake", 0),
+                                           (False, "noise", "drop", "listen", 0),
+                                           (False, "while talking", "drop", "over", 0)):
+            with self.subTest(why=why, kind=kind):
+                events, _ = self.out(keep, why, act, said, 0.31, kind)
+                drops = [e for e in events if e.get("t") == "gate_drop"]
+                self.assertEqual(len(drops), told, f"{len(drops)} gate_drop(s) for a {kind} verdict '{why}', not {told}")
+
+
+@unittest.skipIf(server is None, f"server.py doesn't import here: {IMPORT_ERR}")
+class WhisperHeard(unittest.TestCase):
+    """run_whisper_heard keeps the segments gate.sure passes and blanks nothing: fillers reach the gate as heard."""
+
+    def run_on(self, *texts, sure=True):
+        import types
+        import numpy as np
+        segs = [types.SimpleNamespace(text=" " + t, avg_logprob=-0.2, compression_ratio=1.2, no_speech_prob=0.05)
+                for t in texts]
+        model = types.SimpleNamespace(transcribe=lambda audio, **kw: (iter(segs), None))
+        with mock.patch.object(server, "whisper", lambda: model), \
+                mock.patch.object(server, "_speech_seconds", lambda audio: 1.0):
+            return server.run_whisper_heard(np.zeros(16000, dtype=np.float32), sure=sure)
+
+    def test_filler_is_handed_on_as_heard(self):
+        for said in ("Thank you.", "you", "Bye.", "Thanks for watching!"):
+            with self.subTest(said=said):
+                self.assertEqual(self.run_on(said).text, said, f"run_whisper_heard blanked {said!r}")
+
+    def test_sure_keeps_only_what_gate_sure_passes(self):
+        import gate
+        seen = []
+        with mock.patch.object(gate, "sure", lambda segs: seen.append(list(segs)) or segs[1:]):
+            heard = self.run_on("Open the", "Downloads folder.")
+        self.assertEqual(len(seen), 1, f"gate.sure called {len(seen)}x on one transcription")
+        self.assertEqual(heard.text, "Downloads folder.", "the text isn't made of the segments gate.sure kept")
 
 
 if __name__ == "__main__":
