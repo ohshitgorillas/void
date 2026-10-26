@@ -106,7 +106,7 @@ class PlayRef:
 
 class Linear:
     """A linear echo canceller beside the APM: a partitioned-block frequency-domain NLMS filter (overlap-save, 10 ms
-    blocks, K of them: 200 ms of room) that learns the path from what PlayRef says played to the mic. Its residual
+    blocks, K of them: 100 ms of room) that learns the path from what PlayRef says played to the mic. Its residual
     (the mic less its estimate of his echo) is a subtraction, so it has your voice in it at full level even while he
     talks: what Canceller hands on while you talk over him, where the APM's suppressor turns your opening down.
     Two filters, as in Speex's MDF: the one in front (`w`, whose estimate is used) and one behind (`b`) that always
