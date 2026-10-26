@@ -11,6 +11,11 @@
     "you": {
       "engine": "piper",
       "voice": "en_GB-alan-medium"
+    },
+    "room": {
+      "engine": "kokoro",
+      "voice": "bf_emma",
+      "sung": true
     }
   },
   "clips": {
@@ -53,6 +58,11 @@
       "speaker": "you",
       "text": "So what I'd really like you to do is, um, go through all of last week's photos and pick out the ones from the beach, the ones with the dog in them, and then put those in a new folder called summer, on the desktop.",
       "seconds": 15.2801
+    },
+    "room_music.wav": {
+      "speaker": "room",
+      "text": "take me down to the river tonight where the summer lights are shining bright hold my hand and sing along with me",
+      "seconds": 18.0
     }
   },
   "scenes": {
@@ -87,6 +97,10 @@
     "long_pauses": {
       "void": null,
       "you": "you_long_pauses.wav"
+    },
+    "room_music": {
+      "void": null,
+      "room": "room_music.wav"
     }
   }
 }
