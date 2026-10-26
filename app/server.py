@@ -1185,6 +1185,32 @@ class Floor:
         return self.v
 
 
+def speech_span(pcm: bytes):
+    """Where your voice is in `pcm`, for the voiceprint: (start, end) byte offsets, or None (no voice in it). A loud run
+    counts once its level rises again, as a voice does and a chime (struck, then only dying away) never does, so the
+    lead-in and the listening chime stay out of it. The one cut every enrolment and every follow-up's voice score uses."""
+    fl = Floor()
+    voiced, run_at, rose, last_rms, said_from, said_to = 0, None, False, 0.0, None, None
+    for at in range(0, len(pcm) - FRAME + 1, FRAME):
+        s = memoryview(pcm[at:at + FRAME]).cast("h")
+        rms = (sum(x * x for x in s) / len(s)) ** 0.5 / 32768.0 * MicAuto.soft
+        floor = fl.update(rms, hold=voiced >= 3)
+        thr = max(0.012, floor * 3.0)
+        voiced = min(4, voiced + 1) if rms > thr else max(0, voiced - 1)
+        if rms <= thr:
+            run_at, rose = None, False
+        elif run_at is None:
+            run_at = at
+        else:
+            rose = rose or rms > last_rms * 1.25
+        last_rms = rms
+        if voiced >= 3 and rose and said_from is None:
+            said_from = run_at
+        if said_from is not None and rms > thr * 0.6:
+            said_to = at + FRAME
+    return None if said_from is None else (said_from, said_to)
+
+
 def last_speech_end(pcm: bytes):
     """Where, in seconds into `pcm`, someone is last heard talking (the speech detector, so music doesn't count).
     None: nobody. False: no detector available."""
@@ -1384,9 +1410,6 @@ class Listen:
         fl = Floor()
         floor, spoke, voiced, last_voice, peak, clipped, clip_run = None, False, 0, t0, 0.0, 0, 0
         vad_at = vad_last = 0.0
-        # where your voice is in `pcm`, for the voiceprint: a loud run counts once its level rises again, as a voice does
-        # and a chime (struck, then only dying away) never does, so the lead-in and the listening chime stay out of it
-        run_at, rose, last_rms, said_from, said_to = None, False, 0.0, None, None
         reason = "stop"
         try:
             while True:
@@ -1406,17 +1429,6 @@ class Listen:
                     floor = fl.update(rms, hold=voiced >= 3)
                     thr = max(0.012, floor * 3.0)
                     voiced = min(4, voiced + 1) if rms > thr else max(0, voiced - 1)
-                    if rms <= thr:
-                        run_at, rose = None, False
-                    elif run_at is None:
-                        run_at = len(pcm) - len(fr)
-                    else:
-                        rose = rose or rms > last_rms * 1.25
-                    last_rms = rms
-                    if voiced >= 3 and rose and said_from is None:
-                        said_from = run_at
-                    if said_from is not None and rms > thr * 0.6:
-                        said_to = len(pcm)
                     if voiced >= 3:
                         if not spoke:
                             emit(t="speech")
@@ -1454,6 +1466,7 @@ class Listen:
                     break
         finally:
             mic.close()
+        span = speech_span(bytes(pcm))           # (where your voice is, cut before MicAuto.learn retunes the level)
         if peak < 0.0005:
             emit(t="error", text="the mic is completely silent — is the right input selected/unmuted? "
                                  "(`void doctor` lists inputs; set mic_device in the config)")
@@ -1481,13 +1494,8 @@ class Listen:
         emit(t="text", text=text)
         # teach him your voice only from a request in words (not nothing, noise or filler; echo is out above), and only
         # from the stretch you were talking in
-        if learned and not is_noise(text) and said_from is not None:
-            vp = Voice.get()
-            if vp is not None and vp.available:
-                said = bytes(pcm[said_from:said_to])
-                print(f"[void] voiceprint enrolling {len(said) / (RATE * 2):.1f}s of your speech: {text.strip()[:80]}",
-                      file=sys.stderr)
-                Voice.enroll(said)
+        if learned and not is_noise(text) and span is not None:
+            Voice.enroll(bytes(pcm[span[0]:span[1]]), text)
 
 
 def reset_whisper():
@@ -1637,10 +1645,13 @@ class Voice:
         return wait
 
     @classmethod
-    def enroll(cls, pcm):
-        """Fold one of the owner's own requests (wake-word or Listen, never a follow-up) into the voiceprint."""
+    def enroll(cls, pcm, text):
+        """Fold one of the owner's own requests (wake-word or Listen, never a follow-up) into the voiceprint: `pcm` is
+        the stretch speech_span found, `text` what was said in it (for the log)."""
         vp = cls.get()
-        if vp is not None:
+        if vp is not None and vp.available:
+            print(f"[void] voiceprint enrolling {len(pcm) / (RATE * 2):.1f}s of your speech: {(text or '').strip()[:80]}",
+                  file=sys.stderr)
             try:
                 vp.enroll(pcm)
             except Exception as e:  # noqa: BLE001
@@ -1896,8 +1907,10 @@ class Wake:
             ss = speech_seconds(pcm)
             if ss < 0.25 or ss < len(pcm) / (RATE * 2) * 0.2:    # music or noise, not talking: don't let Whisper dream up words
                 return
+            span = speech_span(pcm)              # (only where you spoke is scored or enrolled, never the lead-in)
+            spoken = pcm if span is None else pcm[span[0]:span[1]]
             if gated:
-                voice = Voice.score_soon(pcm)
+                voice = Voice.score_soon(spoken)
             if gated:                            # (a judged follow-up needs Whisper's confidence, not just words)
                 heard = transcribe_pcm_heard(pcm, sure=True)
                 text = heard.text
@@ -1940,7 +1953,8 @@ class Wake:
             log("wake word request")
             MicAuto.learn(pcm)                   # (only your requests tune the mic: not noise, not his voice)
             BUS.pub(t="wake", text=rest)
-            Voice.enroll(pcm)                    # (…and teach him your voice: after the request is out, never a follow-up)
+            if span is not None:                 # (…and teach him your voice: after the request is out, never a follow-up)
+                Voice.enroll(spoken, said)
         elif follow:
             if len(said.split()) >= 2:           # (a stray word isn't a request)
                 score = voice() if voice else None
