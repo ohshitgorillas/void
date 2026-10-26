@@ -38,7 +38,7 @@ sys.path.insert(0, str(APP_DIR))
 import quick  # noqa: E402
 import agents  # noqa: E402
 import gate  # noqa: E402
-from gate import ECHO_KEEP, ECHO_RUN, ECHO_TAIL, STOP_RE, WAKE_RE, is_echo, is_noise, stop_said  # noqa: E402
+from gate import ECHO_KEEP, ECHO_RUN, ECHO_TAIL, WAKE_RE  # noqa: E402
 import hearing  # noqa: E402
 import langmark  # noqa: E402
 import notifier  # noqa: E402
@@ -1098,10 +1098,7 @@ def run_whisper_heard(audio, beam=None, hint=None, sure=False) -> Heard:
         segs = list(segs)                                          # segments are lazy: errors surface here
         if sure:     # (a guess at noise: low log-prob, the same few words looping, or "probably nobody talking")
             segs = gate.sure(segs)
-        out = " ".join(s.text.strip() for s in segs).strip()
-        # whisper sometimes "hears" the hint or filler on near-silence
-        if out.strip(" .").lower() in ("", "you", "thank you", "thanks for watching", "bye"):
-            out, segs = "", []
+        out = " ".join(s.text.strip() for s in segs).strip()     # (filler and all: gate.judge decides on it)
         return Heard(text=out,
                      logprob=sum(s.avg_logprob for s in segs) / len(segs) if segs else float("-inf"),
                      no_speech=max((s.no_speech_prob for s in segs), default=1.0),
@@ -1473,27 +1470,26 @@ class Listen:
         learned = spoke or (floor is not None and peak > max(0.001, floor * 2.5))   # you said something, maybe too quietly
         if learned:
             MicAuto.learn(bytes(pcm))
-        if spoke and self.mode == "auto" and not self.cancel and reason == "done":
-            try:
-                if speech_seconds(bytes(pcm)) < 0.25:     # it was the music, not you
-                    self.cancel, reason = True, "nospeech"
-            except Exception:  # noqa: BLE001
-                pass
         if self.cancel:
             emit(t="cancel", why=reason)
             return
         if clipped > RATE * 0.05:
             emit(t="note", text="your mic is clipping (too loud) — turn the input down to ~65% for better recognition")
-        emit(t="transcribing")
-        text = transcribe_pcm(bytes(pcm))
-        if is_echo(text, said_lately()):         # (his own voice through the mic, not you)
-            print(f"[void] dropped echo of own speech: {text.strip()[:80]}", file=sys.stderr)
-            emit(t="cancel", why="echo")
+        ss, secs = speech_seconds(bytes(pcm)), len(pcm) / (RATE * 2)
+        text = ""                                # (too little speech: judged as heard nothing, never sent to Whisper)
+        if gate.spoken_enough(ss, secs, "listen"):
+            emit(t="transcribing")
+            text = transcribe_pcm(bytes(pcm))
+        # (push-to-talk is you asking: not judged as heard over him, so a "stop" said into it is sent on as said)
+        v = gate.judge(gate.Burst(text, None, ss, secs, None, "listen", False), said_lately(), CFG)
+        verdict_out(v, text, None, "listen")
+        if not v.keep:
+            emit(t="cancel", why=v.why)
             return
-        emit(t="text", text=text)
-        # teach him your voice only from a request in words (not nothing, noise or filler; echo is out above), and only
-        # from the stretch you were talking in
-        if learned and not is_noise(text) and span is not None:
+        emit(t="text", text=v.rest)
+        # teach him your voice only from a request in words (judge has dropped nothing, noise, filler and echo), and
+        # only from the stretch you were talking in
+        if learned and span is not None:
             Voice.enroll(bytes(pcm[span[0]:span[1]]), text)
 
 
@@ -1538,6 +1534,16 @@ def said_lately():
     while SPOKEN and now - SPOKEN[0][0] > ECHO_KEEP:
         SPOKEN.popleft()
     return [said for _t, said in SPOKEN]
+
+
+def verdict_out(v: "gate.Verdict", said: str, voice: float | None, kind: str) -> None:
+    """One stderr line per verdict, '[void] <why>: <said>' with the voice score. A follow-up verdict whose keep is
+    false also publishes BUS gate_drop, shown on the page (app/static/index.html:1905). Never a file, store or count."""
+    vs = "" if voice is None else f" (voice {voice:.2f})"     # (on every scored verdict: the next wrong call reads off the log)
+    line = f"{v.why}{vs}: {(said or '').strip(' .,!?')[:80]}"
+    print(f"[void] {line}", file=sys.stderr)
+    if kind == "follow" and not v.keep:
+        BUS.pub(t="gate_drop", text=line)
 
 
 class Voice:
@@ -1808,40 +1814,45 @@ class Wake:
                 BUS.pub(t="follow", on=False)
             mic.close()
 
-    @staticmethod
-    def heard(pcm):
-        """A quick listen for his name at the first pause (None: nothing worth transcribing)."""
+    @classmethod
+    def heard(cls, pcm):
+        """A quick listen for his name at the first pause: what Whisper heard, kept or dropped (Wake.check judges it
+        again as its own kind). None: too little speech to be worth transcribing."""
         try:
-            ss = speech_seconds(pcm)
-            if ss < 0.25 or ss < len(pcm) / (RATE * 2) * 0.2:
-                return None
-            return transcribe_pcm(pcm, beam=1, hint="Hey Void.", sure=True)
+            ss, secs = speech_seconds(pcm), len(pcm) / (RATE * 2)
+            text = (transcribe_pcm(pcm, beam=1, hint="Hey Void.", sure=True)
+                    if gate.spoken_enough(ss, secs, "wake") else "")
         except Exception as e:  # noqa: BLE001
             print(f"[void] wake word stt: {e}", file=sys.stderr)
             return None
+        v = gate.judge(gate.Burst(text, None, ss, secs, None, "wake", cls.speaking()), said_lately(), CFG)
+        verdict_out(v, text, None, "wake")
+        return None if v.why == "no speech" else text
 
     @classmethod
     def stop_in(cls, pcm):
         """A burst begun over him, still going: if what's said so far holds a stop phrase, stop him now (True)."""
         try:
-            ss = speech_seconds(pcm)
-            if ss < 0.25 or ss < len(pcm) / (RATE * 2) * 0.2:
-                return False
-            text = transcribe_pcm(pcm, beam=1, sure=True)
+            ss, secs = speech_seconds(pcm), len(pcm) / (RATE * 2)
+            text = transcribe_pcm(pcm, beam=1, sure=True) if gate.spoken_enough(ss, secs, "peek") else ""
         except Exception as e:  # noqa: BLE001
             print(f"[void] stop check stt: {e}", file=sys.stderr)
             return False
-        if is_echo(text, said_lately()):
+        v = gate.judge(gate.Burst(text, None, ss, secs, None, "peek", cls.speaking()), said_lately(), CFG)
+        verdict_out(v, text, None, "peek")
+        if v.act != "barge":
             return False
-        said = (text or "").strip(" .,!?")
-        if not stop_said(said):
-            return False
-        print(f"[void] barge-in mid-burst: you told him to stop: {said[:80]}", file=sys.stderr)
+        cls.barge(text)
+        return True
+
+    @classmethod
+    def barge(cls, text):
+        """You stopped him: stop his voice, tell the page (with the request, if you said his name), no follow-up."""
+        m = WAKE_RE.match(text or "")
         if not Speaker.idle():
             Speaker.stop()                       # (also hushes us)
-        BUS.pub(t="barge", listen=False, text="")
+        BUS.pub(t="barge", listen=bool(m), text=(m.group(2).strip(" .,!?") if m else ""))
         cls.hush()
-        return True
 
     @classmethod
     def ran_on(cls, started, ended):
@@ -1858,9 +1869,8 @@ class Wake:
         # started after he finished talking, inside the follow-up window → it's a request, no "hey Void" needed
         # (Claude may still be working: the page keeps it and sends it once he's done)
         follow = not cls.speaking() and cls.follow_from <= started < cls.follow_until
-        # began while he talked / in his echo: may be his voice (is_echo below) or you answering over him
+        # began while he talked / in his echo: may be his voice (gate.judge: echo) or you answering over him
         over = cls.speaking() or started < cls.speaking_until + ECHO_TAIL
-        during = over                            # (kept: "stop" begun over him counts even once his sentence has ended)
         cut = 0                                  # (bytes of his voice cut off the front)
         if over and cls.ran_on(started, ended):   # …but it ran on long after: your turn, as a follow-up
             follow, over = True, False
@@ -1869,81 +1879,48 @@ class Wake:
                 pcm = pcm[cut:]                  # opened the burst, and heard or scored it is his voice, not yours)
             else:
                 cut = 0
-        gated = follow and not over and CFG.get("voice_gate", True)
+        kind = "over" if over else "follow" if follow else "wake"
+        gated = kind == "follow" and CFG.get("voice_gate", True)
         voice = None                             # (a follow-up's voice score: worked out while Whisper transcribes)
         heard = None
+        span = None
         try:
-            ss = speech_seconds(pcm)
-            if ss < 0.25 or ss < len(pcm) / (RATE * 2) * 0.2:    # music or noise, not talking: don't let Whisper dream up words
-                return
-            span = speech_span(pcm)              # (only where you spoke is scored or enrolled, never the lead-in)
-            spoken = pcm if span is None else pcm[span[0]:span[1]]
-            if gated:
-                voice = Voice.score_soon(spoken)
-            if gated:                            # (a judged follow-up needs Whisper's confidence, not just words)
-                heard = transcribe_pcm_heard(pcm, sure=True)
-                text = heard.text
-            elif text is None:
-                text = (transcribe_pcm(pcm, sure=True) if follow or over
-                        else transcribe_pcm(pcm, beam=1, hint="Hey Void.", sure=True))
+            ss, secs = speech_seconds(pcm), len(pcm) / (RATE * 2)
+            if not gate.spoken_enough(ss, secs, kind):   # (music or noise, not talking: Whisper would dream up words)
+                text = ""
+            else:
+                span = speech_span(pcm)          # (only where you spoke is scored or enrolled, never the lead-in)
+                spoken = pcm if span is None else pcm[span[0]:span[1]]
+                if gated:
+                    voice = Voice.score_soon(spoken)
+                if kind == "follow":             # (a judged follow-up needs Whisper's confidence, not just words)
+                    heard = transcribe_pcm_heard(pcm, sure=True)
+                    text = heard.text
+                elif text is None:
+                    text = (transcribe_pcm(pcm, sure=True) if over
+                            else transcribe_pcm(pcm, beam=1, hint="Hey Void.", sure=True))
         except Exception as e:  # noqa: BLE001
             print(f"[void] wake word stt: {e}", file=sys.stderr)
             return
-        m = WAKE_RE.match(text or "")
-        print(f"[void] heard {len(pcm) / (RATE * 2):.1f}s, {len((text or '').split())} words"
+        text = text or ""
+        print(f"[void] heard {secs:.1f}s, {len(text.split())} words"
               f"{', follow-up' if follow else ''}{f', after his last word ({cut / (RATE * 2):.1f}s of him cut)' if cut else ''}"
-              f"{', wake word' if m else ''}{', while talking' if cls.speaking() else ''}",
+              f"{', wake word' if WAKE_RE.match(text) else ''}{', while talking' if cls.speaking() else ''}",
               file=sys.stderr)
-        if is_echo(text, said_lately()):
-            print(f"[void] dropped echo of own speech: {text.strip()[:80]}", file=sys.stderr)
-            return
-        said = (text or "").strip(" .,!?")
-
-        def log(what):                           # (what it heard, so the next missed turn shows in the log)
-            print(f"[void] {what}: {said[:80]}", file=sys.stderr)
-        if is_noise(said) and not (during and stop_said(said)):
-            # nothing, filler, or a sentence looping: the room, not you (but a stop said over him is you stopping him)
-            if said:
-                log("dropped as noise")
-            return
-        low = said.lower()
-        if (cls.speaking() and (m or STOP_RE.fullmatch(low))) or (during and stop_said(low)):
-            log("barge-in: you told him to stop")
-            if not Speaker.idle():
-                Speaker.stop()                   # (also hushes us)
-            BUS.pub(t="barge", listen=bool(m), text=(m.group(2).strip(" .,!?") if m else ""))
-            cls.hush()
-            return
-        if over and not m:
-            # anything else heard while he talks (or in his echo) is most likely his own voice, garbled: never a barge-in
-            log("ignored while talking")
-            return
-        if m:
-            rest = m.group(2).strip(" .,!?")
-            log("wake word request")
+        score = voice() if voice else None
+        v = gate.judge(gate.Burst(text, heard, ss, secs, score, kind, cls.speaking()), said_lately(), CFG)
+        verdict_out(v, text, score, kind)
+        if v.act == "barge":
+            cls.barge(text)
+        elif v.act == "request":
             MicAuto.learn(pcm)                   # (only your requests tune the mic: not noise, not his voice)
-            BUS.pub(t="wake", text=rest)
+            BUS.pub(t="wake", text=v.rest)
             if span is not None:                 # (…and teach him your voice: after the request is out, never a follow-up)
-                Voice.enroll(spoken, said)
-        elif follow:
-            if len(said.split()) >= 2:           # (a stray word isn't a request)
-                score = voice() if voice else None
-                v = gate.judge(heard, score, CFG)
-                # (the voice score on every verdict, kept or dropped, so the next wrong call can be read off the log)
-                vs = "voice n/a" if score is None else f"voice {score:.2f}"
-                if not v.keep:
-                    what = f"dropped follow-up, {v.why} ({vs})"
-                    log(what)
-                    BUS.pub(t="gate_drop", text=f"{what}: {said[:80]}")
-                    return
-                log(f"follow-up request ({vs})")
-                cls.follow_until = 0.0
-                MicAuto.learn(pcm)
-                BUS.pub(t="wake", text=said, follow=True)
-            else:
-                log("ignored stray word")
-        else:
-            log("ignored: no \"hey Void\"")
+                Voice.enroll(spoken, text.strip(" .,!?"))
+        elif v.act == "follow":
+            cls.follow_until = 0.0
+            MicAuto.learn(pcm)
+            BUS.pub(t="wake", text=v.rest.strip(" .,!?"), follow=True)
 
 
 def echo_report(c: "hearing.Canceller") -> str:

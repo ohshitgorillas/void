@@ -127,11 +127,6 @@ def judge(b: Burst, spoken: list[str], cfg: dict) -> Verdict:
     """Keep or drop one heard burst, and what to do with a kept one. `spoken`: his lines lately, oldest first (for the
     echo test) · `cfg`: voice_gate (off: follow-ups are not judged on Whisper's confidence or the voiceprint),
     voice_min (the lowest voice score that is still the owner)."""
-    if not isinstance(b, Burst):
-        # TEMPORARY bridge, gone when Wake.check builds a Burst (design Order step 2): the old follow-up call
-        # judge(heard, voice, cfg) from server.py still lands here.
-        return _follow_legacy(b, spoken, cfg)
-
     def drop(why):
         return Verdict(False, why, "drop", "")
     text = b.text or ""
@@ -181,18 +176,3 @@ def judge(b: Burst, spoken: list[str], cfg: dict) -> Verdict:
             return drop("not your voice")
     return Verdict(True, "kept", "follow", text)
 
-
-def _follow_legacy(heard, voice: float | None, cfg: dict) -> Verdict:
-    """The old follow-up gate, unchanged. `heard`: server.Heard · `voice`: cosine to the owner's voiceprint, or None
-    · `cfg`: voice_gate (off keeps everything), voice_min (the lowest voice score that is still the owner)."""
-    def out(keep, why):
-        return Verdict(keep, why, "follow" if keep else "drop", getattr(heard, "text", "") if keep else "")
-    if not cfg.get("voice_gate", True):
-        return out(True, "kept")
-    if not (heard.text or "").strip() or heard.no_speech >= NO_SPEECH:
-        return out(False, "no speech")
-    if heard.logprob < MIN_LOGPROB:
-        return out(False, "low confidence")
-    if voice is not None and voice < float(cfg.get("voice_min", 0.5)):
-        return out(False, "not your voice")
-    return out(True, "kept")

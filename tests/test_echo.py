@@ -81,9 +81,10 @@ class Echo(unittest.TestCase):
         server.note_spoken("Kill 'Em All really belongs in the 30K rolloff folder.")
         server.note_spoken("The other two albums are already sorted, but you might want to check that.")
         for heard in ("I can kill them all really long in a 30K bonus folder", "But you might want to check me."):
+            self.pub.reset_mock()
             self.after_speech(server.ECHO_TAIL + 0.6)
             server.Wake.follow_from = 0.0
-            self.assertEqual(self.burst(heard), [], heard)
+            self.assertDropped(self.burst(heard), heard)
 
     def test_request_sharing_his_words_gets_through(self):
         server.note_spoken("Kill 'Em All really belongs in the 30K rolloff folder.")
@@ -99,7 +100,7 @@ class Echo(unittest.TestCase):
         self.addCleanup(server.Speaker.todo.clear)
         self.after_speech(server.ECHO_TAIL + 0.6)
         server.Wake.follow_from = 0.0
-        self.assertEqual(self.burst("I moved the meeting to Thursday at three"), [])
+        self.assertDropped(self.burst("I moved the meeting to Thursday at three"))
 
     # the time gate
     def test_follow_window_waits_for_tail(self):
@@ -108,6 +109,9 @@ class Echo(unittest.TestCase):
 
     def assertFollowUp(self, ev, text="please add milk to the shopping list"):
         self.assertEqual([(e.get("t"), e.get("text"), e.get("follow")) for e in ev], [("wake", text, True)])
+
+    def assertDropped(self, ev, msg=None):          # a dropped follow-up: shown on the page, never a request or a barge
+        self.assertEqual([e.get("t") for e in ev], ["gate_drop"], msg)
 
     def test_words_in_tail_dropped(self):          # still his echo ringing: not a request
         self.after_speech(0.3)
@@ -141,8 +145,8 @@ class Echo(unittest.TestCase):
     def test_echo_running_on_after_he_finished_dropped(self):
         server.note_spoken(REPLY)
         self.after_speech(10)
-        self.assertEqual(self.burst("Sure I moved the meeting to Thursday at three and told Sam about it",
-                                    server.Wake.speaking_until - 0.5), [])
+        self.assertDropped(self.burst("Sure I moved the meeting to Thursday at three and told Sam about it",
+                                      server.Wake.speaking_until - 0.5))
 
     def test_words_ending_in_tail_dropped(self):     # began as he finished, over by the time the room stopped ringing
         self.after_speech(10)
@@ -173,7 +177,7 @@ class Echo(unittest.TestCase):
     def test_follow_up_echo_dropped_after_tail(self):
         self.after_speech(server.ECHO_TAIL + 0.6)
         server.note_spoken(REPLY)
-        self.assertEqual(self.burst("I moved the meeting to Thursday at three"), [])
+        self.assertDropped(self.burst("I moved the meeting to Thursday at three"))
 
     def test_wake_word_echo_dropped(self):
         server.note_spoken("Okay. Hey Void, you can ask me anything about the calendar this week.")
@@ -294,7 +298,7 @@ class Echo(unittest.TestCase):
             self.pub.reset_mock()
             self.after_speech(server.ECHO_TAIL + 0.6)
             server.Wake.follow_from = 0.0
-            self.assertEqual(self.burst(junk), [], junk)
+            self.assertDropped(self.burst(junk), junk)
 
     def test_mic_gain_learns_only_from_your_requests(self):
         learn = mock.Mock()
@@ -304,6 +308,7 @@ class Echo(unittest.TestCase):
             self.burst("")                                   # "heard 2.0s, 0 words"
             self.burst("It is a pleasure to be here. It is a pleasure to be here")
             learn.assert_not_called()
+            self.pub.reset_mock()
             self.assertFollowUp(self.burst("please add milk to the shopping list"))
             learn.assert_called_once()
 
