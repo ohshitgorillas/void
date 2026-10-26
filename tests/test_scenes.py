@@ -6,8 +6,11 @@ Fast tier (always runs; speech detection and Whisper stood in for):
     ~/.local/share/void/venv/bin/python -m unittest tests.test_scenes
 Slow tier (real speech detection and Whisper): VOID_SCENES=1, same command.
 """
+import contextlib
+import io
 import json
 import math
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -96,7 +99,75 @@ class FastScenes(unittest.TestCase):
                         f"read, {differ} of them different")
 
 
-# Slow tier (VOID_SCENES=1: real speech detection and Whisper) goes here.
+# Slow tier (VOID_SCENES=1): real speech detection and Whisper base.en hear each scene; what Void did is read off the
+# BUS events Wake.check publishes ("barge": you stopped him; "wake": a request, follow=True when no "hey Void").
+
+OVER = 2.0                  # you cut in this long after his voice starts
+LAST_SECOND = 0.5           # and start this long before his voice ends to talk over his last second
+
+
+def heard(sc, you_at=0.0):
+    """Play scene `sc` with real hearing: the Take, plus what Void logged hearing and deciding (his "[void]" lines)."""
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        t = scenes.play(scenes.Room(music=sc.get("room")), void=sc.get("void"), you=sc.get("you"),
+                        you_at=you_at, hear=True)
+    return t, [ln for ln in err.getvalue().splitlines() if ln.startswith("[void]")]
+
+
+def did(t):
+    """Just the events that are Void acting on what he heard: interruptions and requests."""
+    return [e for e in t.events if e.get("t") in ("barge", "wake")]
+
+
+def instead(t, log):
+    """What Void did instead, for a failure message: his interruptions and requests, every event kind seen, and his
+    log of what he heard and made of it."""
+    lines = "".join(f"\n    {ln}" for ln in log) or " nothing logged"
+    return (f"\n  Void did: {did(t) or 'nothing'}\n  events seen: {sorted({e.get('t') for e in t.events})}"
+            f"\n  heard:{lines}")
+
+
+@unittest.skipUnless(os.environ.get("VOID_SCENES") == "1", "slow tier: set VOID_SCENES=1")
+@unittest.skipIf(server is None, f"server.py doesn't import here: {IMPORT_ERR}")
+@unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+class SlowScenes(unittest.TestCase):
+    def test_void_talking_alone_produces_nothing(self):
+        t, log = heard(SCENES["void_alone"])
+        self.assertEqual(did(t), [], f"Void acted on his own voice:{instead(t, log)}")
+
+    def _interrupts(self, name):
+        t, log = heard(SCENES[name], you_at=OVER)
+        self.assertTrue(any(e["t"] == "barge" for e in did(t)),
+                        f"{name}: Void wasn't interrupted:{instead(t, log)}")
+
+    # Expected failure until addition 1 of stage a (stop words over Void) lands: the canceller turns your voice down 7-8 dB for its first second over him, and Whisper hears "That's not what I asked for" with no "Stop, stop".
+    @unittest.expectedFailure
+    def test_stop_over_void_interrupts_him(self):
+        self._interrupts("interrupt_stop")
+
+    def test_hold_on_over_void_interrupts_him(self):
+        self._interrupts("interrupt_hold_on")
+
+    def _follows_up(self, name, you_at):
+        t, log = heard(SCENES[name], you_at=you_at)
+        got = did(t)
+        self.assertTrue(len(got) == 1 and got[0]["t"] == "wake" and got[0].get("follow"),
+                        f"{name}: not taken as one follow-up request:{instead(t, log)}")
+
+    # Expected failure until stage b: "Move them into Pictures, please." is heard right, then dropped by is_echo as his own voice, because it repeats his words. Stage b trusts the echo canceller over word-matching.
+    @unittest.expectedFailure
+    def test_answering_just_after_void_finishes_is_a_follow_up(self):
+        sc = SCENES["answer_after"]
+        self._follows_up("answer_after", seconds(sc["void"]) + AFTER)
+
+    def test_starting_in_his_last_second_and_carrying_on_is_a_follow_up(self):
+        sc = SCENES["overlap_last_second"]
+        self._follows_up("overlap_last_second", seconds(sc["void"]) - LAST_SECOND)
+
+    def test_room_music_with_no_reference_gives_nothing(self):
+        t, log = heard(SCENES["room_music"])
+        self.assertEqual(did(t), [], f"Void acted on the room's music:{instead(t, log)}")
 
 
 if __name__ == "__main__":
