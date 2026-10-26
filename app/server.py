@@ -37,6 +37,7 @@ APP_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(APP_DIR))
 import quick  # noqa: E402
 import agents  # noqa: E402
+import hearing  # noqa: E402
 import langmark  # noqa: E402
 import recall  # noqa: E402
 WIN = os.name == "nt"                        # Windows: OS bits go through winsys.py instead of Linux command-line tools
@@ -1272,6 +1273,32 @@ def open_mic():
     raise RuntimeError("couldn't open the mic — " + "; ".join(errs))
 
 
+class CleanMic:
+    """The mic with his own voice taken out: each chunk goes through the canceller, stamped with when it was captured
+    (it has just come in, so it began its own length ago)."""
+    def __init__(self, mic, canc):
+        self.mic, self.canc = mic, canc
+
+    def clean(self, b):
+        return self.canc.process(b, time.monotonic() - len(b) / 2 / RATE) if b else b
+
+    def read(self, timeout):
+        return self.clean(self.mic.read(timeout))
+
+    def close(self):
+        self.mic.close()
+
+    def err(self):
+        return self.mic.err()
+
+
+def open_clean_mic():
+    """open_mic, through a fresh echo canceller (one per session: it learns the room as it goes)."""
+    mic, name, first = open_mic()
+    m = CleanMic(mic, hearing.Canceller(CFG.get("echo_cancel", True)))
+    return m, name, m.clean(first)
+
+
 def spawn_kw():
     """Start a child in its own group, so stopping it also stops whatever it started."""
     return {"creationflags": 0x00000200 | winsys.NO_WINDOW} if WIN else {"start_new_session": True}
@@ -1307,7 +1334,7 @@ class Listen:
         self.stop_ev.set()
 
     def run(self, emit):
-        mic, name, buf = open_mic()
+        mic, name, buf = open_clean_mic()
         emit(t="open", rec=name)
         pcm = bytearray()
         t0 = time.monotonic()
@@ -1567,7 +1594,7 @@ class Wake:
 
     @classmethod
     def session(cls):
-        mic, _name, buf = open_mic()
+        mic, _name, buf = open_clean_mic()
         fl = Floor()
         floor, voiced, seg, in_speech, last_voice, started = None, 0, bytearray(), False, 0.0, 0.0
         pre, n, vad_at, vad_last = bytearray(), 0, 0.0, 0.0
@@ -2270,6 +2297,7 @@ class Speaker:
                 p.kill()
             except OSError:
                 pass
+        hearing.PlayRef.cut(time.monotonic() + cls.LAT)          # what was already out of the player still plays
         Wake.hush()
 
     # ---- worker 1: make the audio ahead of time
@@ -2361,6 +2389,7 @@ class Speaker:
                     print(f"[void] audio player: {e}", file=sys.stderr)
                     return False
                 return cls._write(data[max(0, i - back):], g, again=False)
+            hearing.PlayRef.played(data[i:i + step], cls.prate, cls.t0 + cls.written / cls.prate + cls.LAT)  # (heard from the speakers then)
             cls.written += len(data[i:i + step]) // 2
         return True
 
