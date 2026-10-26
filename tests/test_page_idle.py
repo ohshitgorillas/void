@@ -37,8 +37,12 @@ def node_path():
 
 NODE_PATH = node_path()
 
-# every script's chromium.launch(LAUNCH) gets these options: the installed Google Chrome, never a downloaded browser
-LAUNCH = {"channel": "chrome"}
+# where a Chromium already sits for Playwright's own use (never downloaded or installed here), if any
+BROWSERS = "/opt/pw-browsers" if any(Path("/opt/pw-browsers").glob("chromium*")) else None
+
+# every script's chromium.launch(LAUNCH) gets these options: with BROWSERS, Playwright's bundled Chromium from there;
+# otherwise the installed Google Chrome
+LAUNCH = {} if BROWSERS else {"channel": "chrome"}
 
 # the page's main loop is the rAF callback named frame that works out rawDt; each one asked for (and not yet run or
 # cancelled) is pending; each run is logged with its ts and the frame clock (lastTs) it found
@@ -103,6 +107,8 @@ def run_page(script, init):
         js.write_text(script.replace("INIT", json.dumps(init)).replace("PAGE", json.dumps(str(PAGE)))
                      .replace("LAUNCH", json.dumps(LAUNCH)))
         env = dict(os.environ, NODE_PATH=NODE_PATH)
+        if BROWSERS:
+            env["PLAYWRIGHT_BROWSERS_PATH"] = BROWSERS
         r = subprocess.run(["node", str(js)], capture_output=True, text=True, timeout=60, env=env)
     try:
         out = json.loads(r.stdout)
