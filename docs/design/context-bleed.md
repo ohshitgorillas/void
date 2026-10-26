@@ -1,4 +1,4 @@
-Status: proposed, for the owner's approval.
+Status: approved by the owner.
 
 # Context bleed: keep the long main session asleep
 
@@ -19,7 +19,6 @@ Shared concerns and their current copies:
 
 - Whisper's confidence signal: computed per segment inside `run_whisper` (`app/server.py:1070-1077`) and thrown away;
   callers get a string.
-- One-shot fast-model calls: `summarize_command` (`app/server.py:538`) is the only copy; the notifier would be the second.
 - "Is this the owner talking": `MicAuto.learn` call sites (`app/server.py:1405, 1744, 1750`) are already the only
   places a clip is known to be the owner's.
 
@@ -63,7 +62,7 @@ class Verdict:
 def judge(heard: Heard, voice: float | None, cfg: dict) -> Verdict: ...
 ```
 
-`app/notifier.py` (new) — pings in, at most one turn out per quiet spell.
+`app/notifier.py` (new) — pings in, at most one turn out per quiet spell. No model call.
 
 ```python
 class PingBatch:                                  # pure: clock injected, no threads
@@ -71,14 +70,14 @@ class PingBatch:                                  # pure: clock injected, no thr
     def add(self, line: str) -> None: ...
     def due(self) -> list[str] | None: ...        # the batch once quiet_s passed since the last line, or hold_s since the first
 
-def triage(lines: list[str], ask=oneshot) -> str | None: ...   # None: nothing needs the owner; else one short digest
+def digest(lines: list[str]) -> str: ...          # the batch as one message, one line per ping, in arrival order
 ```
 
-`app/agents.py` — gains the one home for fast-model one-shots.
+`DEFAULTS["voice_prompt"]` in `app/server.py` — tells the main session to run long jobs as detached `claude -p`
+processes (Claude only) that report with `claude-ping`, not as background subagents, so their results arrive through
+the batch.
 
-```python
-def oneshot(prompt: str, *, binary: str, cwd: str, model="haiku", timeout=15) -> str | None: ...
-```
+`app/static/index.html` — a faint spark when the gate drops a clip, on a new bus event `{"t": "gate_drop"}`.
 
 ## Homes
 
@@ -87,8 +86,9 @@ def oneshot(prompt: str, *, binary: str, cwd: str, model="haiku", timeout=15) ->
 | Whisper confidence numbers and thresholds | `run_whisper_heard` (numbers), `gate.judge` (thresholds for follow-ups) | No caller reads segments itself |
 | Owner's voice | `voiceprint.Voiceprint`; enrolled only beside `MicAuto.learn` on wake-word and Listen clips | Never enrolled from follow-ups or clips the gate judged |
 | Keep/drop of a follow-up | `gate.judge`, called once in `Wake.check`'s follow branch | Wake-word clips never reach it; `Handler.ask` adds no filter |
-| Ping batching | `notifier.PingBatch` | `InboxFollower` only feeds it and delivers its result |
-| Fast-model one-shot | `agents.oneshot` | `summarize_command` and `triage` call it; no other `subprocess.run([binary, "-p", ...])` |
+| Ping batching | `notifier.PingBatch` and `notifier.digest` | `InboxFollower` only feeds it and delivers its result |
+| Showing a dropped clip | `Wake.check` publishes `gate_drop` with the log line; the page draws the spark | No other code path publishes it |
+| How long jobs report back | `DEFAULTS["voice_prompt"]` | |
 | Config | `DEFAULTS` in `app/server.py`: `voice_gate` (on), `voice_min`, `ping_quiet_s`, `ping_hold_s` | |
 | "off/unavailable and why" | `Voiceprint.why`, reported by `void doctor` and diagnostics the way `echo_report` does | |
 
@@ -99,36 +99,27 @@ target under 100 ms on the Mac CPU, checked by step 4's test).
 
 ## Order
 
-Each step: one worker, one done-check, one commit. A lead dispatches them in this order.
+Each step: one worker, one done-check, one commit. Two streams; within a stream the steps run in order.
+
+Gate stream:
 
 1. `Heard` and `run_whisper_heard` / `transcribe_pcm_heard`; `run_whisper` keeps its signature. Files: `app/server.py`,
    `tests/test_hearing.py`. Done: suite green, `Heard` numbers present for a fixture clip.
-2. `agents.oneshot`; `summarize_command` uses it. Files: `app/agents.py`, `app/server.py`, `tests/test_agents.py`.
-   Done: no `[binary, "-p", "--model"` left outside `oneshot`; suite green.
-3. `voiceprint.py` with model fetch and `why`. Files: `app/voiceprint.py`, `tests/test_voiceprint.py`,
+2. `voiceprint.py` with model fetch and `why`. Files: `app/voiceprint.py`, `tests/test_voiceprint.py`,
    installers only if the model must ship. Done: the owner-voice fixtures score above the Kokoro and room-music
    fixtures.
-4. `gate.judge` wired into `Wake.check`'s follow branch; enrollment beside the three `MicAuto.learn` calls; config
-   keys; doctor line. Files: `app/gate.py`, `app/server.py`, `tests/test_gate.py`, `tests/test_wake_loop.py`.
-   Done: room-music follow-up dropped, owner follow-up kept, wake-word clip never judged, judge+score under budget.
-5. `PingBatch` and `triage`. Files: `app/notifier.py`, `tests/test_notifier.py`. Done: fake-clock tests for quiet and
-   hold; `triage` returns None on a SKIP answer and on a failed call falls back to a plain digest.
-6. `InboxFollower` feeds `PingBatch` and delivers one `session_message` per due batch (or none). Files:
-   `app/server.py`, `tests/test_inbox.py`. Done: five lines in one quiet spell give at most one turn.
+3. `gate.judge` wired into `Wake.check`'s follow branch; enrollment beside the three `MicAuto.learn` calls; confidence
+   only until 5 clips are enrolled; config keys; doctor line; `gate_drop` published with the log line. Files:
+   `app/gate.py`, `app/server.py`, `tests/test_gate.py`, `tests/test_wake_loop.py`. Done: room-music follow-up
+   dropped, owner follow-up kept, wake-word clip never judged, judge+score under budget.
+4. The faint spark on `gate_drop`. Files: `app/static/index.html`, `tests/test_page_sparks.py`. Done: a `gate_drop`
+   event draws one faint spark that fades; existing spark tests green.
 
-## Decisions for the owner
+Ping stream:
 
-1. **Before the voiceprint has enough of you.** Recommend: confidence-only gate until 5 wake-word/Listen clips are
-   enrolled, then voice too, all automatic. Alternative: a one-time "read these three sentences" enrollment in
-   settings (sure from day one, but a step you must do).
-2. **What you see when a clip is dropped.** Recommend: log line only (`[void] gate dropped: not your voice`).
-   Alternative: a faint spark on the page so you know he heard something (costs a page change and a test).
-3. **Ping triage.** Recommend: batch over a quiet spell (20 s quiet, 2 min max hold), then one Haiku one-shot decides
-   "nothing" or a two-line digest; only a digest wakes the main session. Alternative: batch only, no model, the whole
-   batch as one turn (simpler, still wakes the session once per spell).
-4. **Background subagent notifications.** Void cannot stop Claude Code running a turn per `task-notification`.
-   Recommend: Void's own instructions to the main session say to run long jobs as detached `claude -p` jobs that
-   report with `claude-ping`, so they land in the batch. Alternative: leave them (they are usually results you asked
-   for).
-5. **Speaker model.** Recommend: a small ONNX speaker-embedding model (about 25 MB, fetched on first use) on
-   onnxruntime, which faster-whisper already installs. Alternative: resemblyzer (pulls in torch, hundreds of MB).
+5. `PingBatch` and `digest`. Files: `app/notifier.py`, `tests/test_notifier.py`. Done: fake-clock tests for quiet
+   (20 s) and hold (2 min).
+6. `InboxFollower` feeds `PingBatch` and delivers one `session_message` of `digest(batch)` per due batch. Files:
+   `app/server.py`, `tests/test_inbox.py`. Done: five lines in one quiet spell give exactly one turn.
+7. `DEFAULTS["voice_prompt"]` tells the main session to run long jobs as detached Claude processes that report with
+   `claude-ping`. Files: `app/server.py`, one test of the prompt text. Done: the prompt says it; suite green.
