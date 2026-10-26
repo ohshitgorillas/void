@@ -55,6 +55,13 @@ SWITCH = 3.0                # the speakers change this long after his voice star
 DELAYS = (0.010, 0.020, 0.030, 0.040)   # speakers this far off Speaker.LAT: the range real hardware lands in
 FIRST = 1.0                 # the first this-many seconds of every warm mic session must already have his echo out
 MID_VOICE = 2.0             # a session that opens while he is already talking opens this far into his voice
+CUT_IN = (1.0, 2.0, 3.0, 4.0)   # you tell him to stop this far into his voice (he talks for 7.7 s)
+SAID = {                    # each way to stop him, said on its own, as people say it: its words and how long they take
+    "interrupt_stop": ("Stop, stop.", 1.02),
+    "interrupt_hold_on": ("Hold on.", 0.72),
+    "interrupt_shut_up": ("Shut up.", 0.39),
+    "interrupt_hey_void": ("Hey Void.", 0.72),
+}
 
 
 def seconds(name):
@@ -133,6 +140,47 @@ class FastScenes(FreshRun):
                                             f"only {removed:.1f} dB of Void's echo removed in the first {FIRST} s of a "
                                             f"later mic session in the run, opened {when}, speakers {delay * 1000:.0f} ms off Speaker.LAT")
 
+    def _stops_him(self, name):
+        sc, (words, length) = SCENES[name], SAID[name]
+        for at in CUT_IN:
+            with self.subTest(said=words, into_his_voice=at):
+                scenes.new_run()
+                scenes.warm_up(scenes.Room())                      # (he has already spoken in this run)
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    t = scenes.play(scenes.Room(), void=sc["void"], you=sc["you"], you_at=at,
+                                    you_only=(words, length))
+                log = [ln for ln in err.getvalue().splitlines() if ln.startswith("[void]")]
+                self.assertTrue(any(e["t"] == "barge" for e in did(t)),
+                                f"\"{words}\" said {at} s into his voice didn't stop him: its opening came through "
+                                + ("unmeasured" if t.opening_db is None else f"{t.opening_db:+.1f} dB")
+                                + f" against how you said it{instead(t, log)}")
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_stop_said_over_him_stops_him(self):
+        self._stops_him("interrupt_stop")
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_hold_on_said_over_him_stops_him(self):
+        self._stops_him("interrupt_hold_on")
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_shut_up_said_over_him_stops_him(self):
+        self._stops_him("interrupt_shut_up")
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_hey_void_said_over_him_stops_him(self):
+        self._stops_him("interrupt_hey_void")
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_him_talking_alone_does_nothing(self):
+        scenes.warm_up(scenes.Room())                              # (he has already spoken in this run)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            t = scenes.play(scenes.Room(), void=SCENES["void_alone"]["void"])
+        log = [ln for ln in err.getvalue().splitlines() if ln.startswith("[void]")]
+        self.assertEqual(did(t), [], f"Void acted on his own voice:{instead(t, log)}")
+
     def test_passes_the_mic_through_unchanged_without_the_canceller(self):
         sc = SCENES["interrupt_stop"]
         with mock.patch.object(server.hearing, "rtc", None):            # livekit missing: no canceller
@@ -185,10 +233,11 @@ class SlowScenes(FreshRun):
         self.assertTrue(any(e["t"] == "barge" for e in did(t)),
                         f"{name}: Void wasn't interrupted:{instead(t, log)}")
 
-    # Expected failure until addition 1 of stage a (stop words over Void) lands: the canceller turns your voice down 7-8 dB for its first second over him, and Whisper hears "That's not what I asked for" with no "Stop, stop".
-    @unittest.expectedFailure
     def test_stop_over_void_interrupts_him(self):
         self._interrupts("interrupt_stop")
+
+    def test_shut_up_over_void_interrupts_him(self):
+        self._interrupts("interrupt_shut_up")
 
     def test_hold_on_over_void_interrupts_him(self):
         self._interrupts("interrupt_hold_on")
