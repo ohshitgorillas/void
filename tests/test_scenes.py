@@ -181,9 +181,12 @@ class FastScenes(FreshRun):
                             you_only=SAID["interrupt_stop"])
         self.assertTrue(t.events, "the scene recorded no events at all")
         for e in t.events:
-            self.assertIn("at", e, f"event carries no scene time: {e}")
-            self.assertIsInstance(e["at"], (int, float), f"scene time is not seconds: {e}")
-            self.assertGreaterEqual(e["at"], 0.0, f"scene time before the scene's start: {e}")
+            self.assertIn("scene_at", e, f"event carries no scene time: {e}")
+            self.assertIsInstance(e["scene_at"], (int, float), f"scene time is not seconds: {e}")
+            self.assertGreaterEqual(e["scene_at"], 0.0, f"scene time before the scene's start: {e}")
+            if e.get("t") == "spk":      # the server's own `at` (ms, where in the playback) is left as it put it
+                self.assertIn("at", e, f"the spk event lost the server's own `at`: {e}")
+                self.assertNotEqual(e["at"], e["scene_at"], f"the scene stamp overwrote the server's `at`: {e}")
 
     @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
     def test_him_talking_alone_does_nothing(self):
@@ -208,6 +211,7 @@ class FastScenes(FreshRun):
 # BUS events Wake.check publishes ("barge": you stopped him; "wake": a request, follow=True when no "hey Void").
 
 OVER = 2.0                  # you cut in this long after his voice starts
+PROMPT = 1.5                # a stop word said over him stops him this soon, though you go on talking
 LAST_SECOND = 0.5           # and start this long before his voice ends to talk over his last second
 
 
@@ -248,6 +252,14 @@ class SlowScenes(FreshRun):
 
     def test_stop_over_void_interrupts_him(self):
         self._interrupts("interrupt_stop")
+
+    def test_stop_over_void_stops_him_while_you_are_still_talking(self):
+        t, log = heard(SCENES["interrupt_stop"], you_at=OVER)
+        barge = [e for e in did(t) if e["t"] == "barge"]
+        self.assertTrue(barge and t.you_start is not None and barge[0]["scene_at"] - t.you_start <= PROMPT,
+                        "interrupt_stop: Void wasn't stopped within " + f"{PROMPT} s of you starting"
+                        + (f" (stopped {barge[0]['scene_at'] - t.you_start:.1f} s in)" if barge and t.you_start is not None else "")
+                        + instead(t, log))
 
     def test_shut_up_over_void_interrupts_him(self):
         self._interrupts("interrupt_shut_up")
