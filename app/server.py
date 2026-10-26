@@ -1335,7 +1335,8 @@ class CleanMic:
 
 
 def open_clean_mic():
-    """open_mic, through a fresh echo canceller (one per session: it learns the room as it goes)."""
+    """open_mic, through an echo canceller: a fresh one per session, but all of them share the process's one kept APM
+    (hearing.Canceller.kept), so a session after the first starts already knowing the room."""
     mic, name, first = open_mic()
     m = CleanMic(mic, hearing.Canceller(CFG.get("echo_cancel", True)))
     return m, name, m.clean(first)

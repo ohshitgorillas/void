@@ -94,17 +94,17 @@ class Room:
 
     delay: seconds from the speakers to the mic. It also stands in for any error in Speaker.LAT (how long the
     speakers really take to get his voice out, against the latency Void assumes): either way his echo reaches the
-    mic that much later than PlayRef says it played. With 10 ms or more, the canceller takes out only about 6 to
-    10 dB of his echo for roughly the first 2 s of his speech, while it finds the extra delay. reflections: (extra delay in seconds, gain) for each echo of the
+    mic that much later than PlayRef says it played. On real hardware that comes to some 10 to 40 ms; the default,
+    20 ms, sits inside it. reflections: (extra delay in seconds, gain) for each echo of the
     speakers off the walls. echo_db: Void's loudness at the mic, in dB relative to the clip as played. you_db: your
     loudness at the mic, the same way. music: a clip name played in the room that Void did not play (so no echo
     reference has it), at music_db.
 
-    The defaults are a laptop on a desk: its own small speakers some 17 cm from its mic (0.5 ms; loud at the mic, and
-    with no bass: they roll off below about SPEAKER_CUT Hz), you about half a metre away, the desk and the walls
+    The defaults are a laptop on a desk: its own small speakers near its mic, their sound reaching it 20 ms later
+    than Speaker.LAT says (loud at the mic, and with no bass: they roll off below about SPEAKER_CUT Hz), you about half a metre away, the desk and the walls
     sending back fainter, later copies of him, and the mic's own hiss at noise_db (dB below full scale, RMS)."""
 
-    def __init__(self, delay=0.0005, reflections=((0.007, 0.4), (0.019, 0.25), (0.041, 0.12)),
+    def __init__(self, delay=0.020, reflections=((0.007, 0.4), (0.019, 0.25), (0.041, 0.12)),
                  echo_db=-6.0, you_db=-12.0, music=None, music_db=-20.0, noise_db=-70.0):
         self.delay = delay
         self.reflections = reflections
@@ -133,7 +133,8 @@ class Room:
 class Take:
     """What one scene produced, all 16 kHz int16 arrays on the scene's clock (0 = mic opened), same length:
     raw (what the mic picked up), clean (what Wake.session read from open_clean_mic), and the room's parts of raw:
-    echo (Void through the room), you, music. Plus void_start/void_end and you_start/you_end in seconds (None when
+    echo (Void through the room), you, music; all of them silence before mic_from (seconds), when the mic session
+    opened (0 unless play's mic_at put it later). Plus void_start/void_end and you_start/you_end in seconds (None when
     absent) and events: the BUS events published during the scene. switched: when the speakers changed mid-sentence
     (play's switch_at), in seconds on the scene's clock: the moment the old speakers fell silent and the new ones took
     over (None: no switch happened)."""
@@ -144,6 +145,7 @@ class Take:
         self.void_start = self.void_end = self.you_start = self.you_end = None
         self.events = []
         self.switched = None
+        self.mic_from = 0.0
 
 
 # ---------------------------------------------------------------- the simulated clock and its turn-taking
@@ -441,7 +443,8 @@ class FakeMic:
     ends (EOFError), as a recorder that stopped does."""
 
     def __init__(self, scene):
-        self.scene, self.k, self.closed, self.name = scene, 0, False, "scene mic"
+        self.scene, self.closed, self.name = scene, False, "scene mic"
+        self.k = math.ceil(round((scene.sim.now - T0) * SR, 6) / CHUNK)   # (opened late: from the next 20 ms on)
 
     def read(self, timeout):
         sim = self.scene.sim
@@ -560,7 +563,8 @@ def _whisper(scene, clean, texts, void, you):
 
 # ---------------------------------------------------------------- a scene
 
-def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch_at=None, switch_lat=None) -> Take:
+def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch_at=None, switch_lat=None,
+         mic_at=None) -> Take:
     """Play a scene on a simulated clock: `void` (a clip name) goes through the real Speaker player path into PlayRef
     and out of the room's speakers; `you` (a clip name) speaks into the room at `you_at` seconds after Void's voice
     starts coming out of the speakers; the real Wake.session listens through open_clean_mic. hear=False stands in
@@ -571,11 +575,16 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
     old player had not yet played never plays, his next write to it fails as a broken pipe, and the real
     Speaker._write opens a new player through make_player, which the room then hears. None means no switch. The
     Take's `switched` says when it happened. `switch_lat`: the new speakers' true output latency, in seconds (default
-    Speaker.LAT, the latency Void assumes; more stands in for speakers slower than he thinks)."""
-    app = str(Path(__file__).resolve().parent.parent / "app")
-    if app not in sys.path:
-        sys.path.insert(0, app)
-    import server
+    Speaker.LAT, the latency Void assumes; more stands in for speakers slower than he thinks). `mic_at`: seconds
+    after his voice starts coming out of the speakers at which the mic session (Wake.session, through a fresh
+    open_clean_mic session, with whatever canceller this run has kept) opens, as the always-on mic opens a new one
+    when he starts talking;
+    0 opens it as his voice starts, more while he is already talking. None (the default) opens it at scene time 0,
+    before he is handed his line. The Take's `mic_from` says when it opened.
+
+    Scenes played one after another are one run of Void: whatever the app keeps across mic sessions in the process
+    (a canceller kept warm) carries from one scene to the next. new_run() starts a fresh run."""
+    server = _server()
     S, W, P = server.Speaker, server.Wake, server.hearing.PlayRef
     lat, texts = S.LAT, _texts()
     switch_lat = lat if switch_lat is None else switch_lat
@@ -592,13 +601,20 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
         seconds = max(ends) + AFTER + (max(0.0, switch_lat - lat) if switch_at is not None else 0.0)
     n = math.ceil(seconds * SR)
 
+    if mic_at is not None:
+        if not void or mic_at < 0:
+            raise ValueError("mic_at needs Void's voice, and opens the mic at or after its start")
     sim = Sim(T0)
     switch = types.SimpleNamespace(actor=None, at=None)
+    wake = types.SimpleNamespace(actor=None, at=0.0)
 
-    def first(t):                                                 # (his voice is out: the switch is due switch_at on)
-        if switch.actor is not None:
-            with sim.c:
+    def first(t):                       # (his voice is out: the switch is due switch_at on, the mic session mic_at on)
+        with sim.c:
+            if switch.actor is not None:
                 switch.actor.due = min(switch.actor.due, T0 + t + switch_at)
+            if wake.actor is not None and mic_at is not None:
+                wake.at = t + mic_at
+                wake.actor.due = min(wake.actor.due, T0 + wake.at)
 
     def change():                                                 # (the speakers change: the old ones fall silent)
         sim.park(sim.current(), math.inf)
@@ -607,7 +623,8 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
             scene.players[-1].gone()
         scene.lat = switch_lat
 
-    scene = Scene(sim, room, n, lat, you, you_at, bool(void), first if switch_at is not None else None)
+    scene = Scene(sim, room, n, lat, you, you_at, bool(void),
+                  first if switch_at is not None or mic_at is not None else None)
     events, clean = Events(), []
     real_open_clean_mic = server.open_clean_mic
 
@@ -650,7 +667,7 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
             patch(P, k, v)
 
         try:
-            sim.spawn("wake", W.session, T0)
+            wake.actor = sim.spawn("wake", W.session, T0 if mic_at is None else math.inf)
             if void:
                 maker = sim.spawn("maker", S._maker, T0)
                 player = sim.spawn("player", S._player_loop, T0)
@@ -672,7 +689,10 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
     t = Take()
     k = scene.n
     t.raw, t.echo, t.you, t.music = (x[:k].copy() for x in (scene.raw, scene.echo, scene.you, scene.music))
-    t.clean = np.frombuffer(b"".join(clean), np.int16).copy()
+    t.mic_from = scene.index(T0 + wake.at) / SR if mic_at is not None else 0.0
+    a = math.ceil(round(t.mic_from * SR, 6) / CHUNK) * CHUNK      # (the first 20 ms the session read)
+    t.mic_from = a / SR
+    t.clean = np.concatenate((np.zeros(min(a, k), np.int16), np.frombuffer(b"".join(clean), np.int16)))[:k]
     t.events = events.got
     t.switched = switch.at
     if void:
@@ -683,3 +703,25 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
         t.you_start = scene.you_from / SR
         t.you_end = min(k, scene.you_from + len(scene.you_clip)) / SR
     return t
+
+
+# ---------------------------------------------------------------- a run of Void (what carries from scene to scene)
+
+def _server():
+    app = str(Path(__file__).resolve().parent.parent / "app")
+    if app not in sys.path:
+        sys.path.insert(0, app)
+    import server
+    return server
+
+
+def new_run():
+    """Start a fresh run of Void, as a fresh process would: `Canceller.forget()` drops the echo canceller the app
+    keeps across mic sessions. Scenes and tests call this so that none depends on which ran before it."""
+    _server().hearing.Canceller.forget()
+
+
+def warm_up(room, void="void_question.wav"):
+    """Let Void speak through the clean mic in `room` for the whole of `void` (7.7 s for the default), in this run,
+    with the mic open from before he starts: what a later session in the same run inherits. Returns its Take."""
+    return play(room, void=void)
