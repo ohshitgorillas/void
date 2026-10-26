@@ -18,19 +18,27 @@ PAGE = Path(__file__).resolve().parent.parent / "app" / "static" / "index.html"
 
 
 def node_path():
-    """Where a global playwright lives (npm's global root, or the node-tools one), or None."""
+    """Where a global playwright lives (npm's global root, the node-tools one, or the one brew's playwright-cli
+    bundles), or None."""
     if not shutil.which("node"):
         return None
     roots = [os.environ.get("NODE_PATH", ""), "/opt/node-tools/node_modules"]
-    try:
-        roots.insert(0, subprocess.run(["npm", "root", "-g"], capture_output=True, text=True, timeout=20).stdout.strip())
-    except (OSError, subprocess.SubprocessError):
-        pass
+    for cmd, sub in ((["npm", "root", "-g"], ""),
+                     (["brew", "--prefix", "playwright-cli"], "libexec/lib/node_modules/@playwright/cli/node_modules")):
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=20).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if out:
+            roots.append(str(Path(out) / sub))
     roots = [r for r in os.pathsep.join(roots).split(os.pathsep) if r and (Path(r) / "playwright").is_dir()]
     return os.pathsep.join(roots) or None
 
 
 NODE_PATH = node_path()
+
+# every script's chromium.launch(LAUNCH) gets these options: the installed Google Chrome, never a downloaded browser
+LAUNCH = {"channel": "chrome"}
 
 # the page's main loop is the rAF callback named frame that works out rawDt; each one asked for (and not yet run or
 # cancelled) is pending; each run is logged with its ts and the frame clock (lastTs) it found
@@ -54,7 +62,7 @@ INIT = r"""(() => {
 
 SCRIPT = r"""const { chromium } = require('playwright');
 (async () => {
-  const out = {errors: []}, b = await chromium.launch();
+  const out = {errors: []}, b = await chromium.launch(LAUNCH);
   try {
     const p = await b.newPage({viewport: {width: 340, height: 460}});
     p.on('pageerror', e => out.errors.push(String(e && e.message || e)));
@@ -92,9 +100,9 @@ def run_page(script, init):
     """Run one node+playwright script against the page; its JSON output (or skip the class if it can't run)."""
     with tempfile.TemporaryDirectory() as d:
         js = Path(d) / "idle.js"
-        js.write_text(script.replace("INIT", json.dumps(init)).replace("PAGE", json.dumps(str(PAGE))))
+        js.write_text(script.replace("INIT", json.dumps(init)).replace("PAGE", json.dumps(str(PAGE)))
+                     .replace("LAUNCH", json.dumps(LAUNCH)))
         env = dict(os.environ, NODE_PATH=NODE_PATH)
-        env.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/opt/pw-browsers")
         r = subprocess.run(["node", str(js)], capture_output=True, text=True, timeout=60, env=env)
     try:
         out = json.loads(r.stdout)
@@ -185,7 +193,7 @@ TINIT = r"""(() => {
 
 TSCRIPT = r"""const { chromium } = require('playwright');
 (async () => {
-  const out = {errors: []}, b = await chromium.launch();
+  const out = {errors: []}, b = await chromium.launch(LAUNCH);
   try {
     const p = await b.newPage({viewport: {width: 340, height: 460}});
     p.on('pageerror', e => out.errors.push(String(e && e.message || e)));
