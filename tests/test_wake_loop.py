@@ -477,7 +477,9 @@ class FollowUpGate(unittest.TestCase):
                 contextlib.redirect_stderr(io.StringIO()):
             server.Listen("ptt").run(lambda **ev: events.append(ev))
         self.assertEqual(len(self.learned), 1, f"MicAuto.learn not called once on the Listen clip: {events[-3:]}")
-        self.assertTrue(self.enrolled == self.learned, f"the Listen clip wasn't enrolled beside MicAuto.learn ({len(self.enrolled)} clip(s) enrolled)")
+        self.assertEqual(len(self.enrolled), 1, f"exactly one clip should be enrolled ({len(self.enrolled)} enrolled)")
+        self.assertTrue(self.enrolled[0] in self.learned[0] and len(self.enrolled[0]) < len(self.learned[0]),
+                        "the enrolled clip should be the speech within the recording MicAuto.learn got, not the whole recording")
 
 
 if __name__ == "__main__":
