@@ -173,6 +173,19 @@ class FastScenes(FreshRun):
         self._stops_him("interrupt_hey_void")
 
     @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_every_recorded_event_carries_its_scene_time_in_seconds_from_the_start(self):
+        sc = SCENES["interrupt_stop"]
+        scenes.warm_up(scenes.Room())                              # (he has already spoken in this run)
+        with contextlib.redirect_stderr(io.StringIO()):
+            t = scenes.play(scenes.Room(), void=sc["void"], you=sc["you"], you_at=CUT_IN[0],
+                            you_only=SAID["interrupt_stop"])
+        self.assertTrue(t.events, "the scene recorded no events at all")
+        for e in t.events:
+            self.assertIn("at", e, f"event carries no scene time: {e}")
+            self.assertIsInstance(e["at"], (int, float), f"scene time is not seconds: {e}")
+            self.assertGreaterEqual(e["at"], 0.0, f"scene time before the scene's start: {e}")
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
     def test_him_talking_alone_does_nothing(self):
         scenes.warm_up(scenes.Room())                              # (he has already spoken in this run)
         err = io.StringIO()
