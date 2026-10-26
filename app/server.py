@@ -29,6 +29,7 @@ import tempfile
 import threading
 import time
 import wave
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -37,6 +38,7 @@ APP_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(APP_DIR))
 import quick  # noqa: E402
 import agents  # noqa: E402
+import gate  # noqa: E402
 import hearing  # noqa: E402
 import langmark  # noqa: E402
 import notifier  # noqa: E402
@@ -188,6 +190,11 @@ DEFAULTS = {
     "barge_in": True,
     # for this many seconds after he stops talking, just talk — no "hey Void" needed (0 = off)
     "follow_up": 4,
+    # follow-ups (no "hey Void") that aren't you are dropped: Whisper unsure, nobody talking, or — once he knows your voice
+    # from five of your "hey Void" / Listen requests — a voice that isn't yours (music in the room, the TV, other people)
+    "voice_gate": True,
+    # how close to your voiceprint a follow-up must sound to count as you (cosine, 0–1; you ~0.85, music ~0.15)
+    "voice_min": 0.5,
     # context: he tracks how full Claude's memory of the chat is; past `compact_at` he writes himself a short note and
     # starts a fresh chat from it (so a long session can't quietly eat your usage). Off = only warn.
     "auto_compact": True,
@@ -1068,9 +1075,18 @@ def whisper():
         return _whisper
 
 
-def run_whisper(audio, beam=None, hint=None, sure=False) -> str:
-    """Transcribe; if the GPU path blows up at run time (missing CUDA libs etc.), drop to CPU for good.
-    `sure`: keep only what Whisper is fairly sure it heard (the always-on mic hears the room all day)."""
+@dataclass
+class Heard:
+    """What Whisper heard and how sure it was: the one place its confidence numbers come out (callers never read segments)."""
+    text: str
+    logprob: float        # mean avg_logprob over kept segments (-inf when none)
+    no_speech: float      # max no_speech_prob over kept segments (1.0 when none)
+    seconds: float        # speech_seconds of the clip
+
+
+def run_whisper_heard(audio, beam=None, hint=None, sure=False) -> Heard:
+    """Transcribe, with Whisper's confidence; if the GPU path blows up at run time (missing CUDA libs etc.), drop to CPU
+    for good. `sure`: keep only what Whisper is fairly sure it heard (the always-on mic hears the room all day)."""
     global _whisper
 
     def go():
@@ -1079,14 +1095,18 @@ def run_whisper(audio, beam=None, hint=None, sure=False) -> str:
             vad_filter=True, vad_parameters={"min_silence_duration_ms": 600, "speech_pad_ms": 300},
             condition_on_previous_text=False, initial_prompt=(hint if hint is not None else CFG.get("stt_hint")) or None,
             no_speech_threshold=0.5)
+        segs = list(segs)                                          # segments are lazy: errors surface here
         if sure:     # (a guess at noise: low log-prob, the same few words looping, or "probably nobody talking")
             segs = [s for s in segs if s.avg_logprob >= -1.0 and s.compression_ratio <= 2.4
                     and not (s.no_speech_prob > 0.6 and s.avg_logprob < -0.5)]
-        out = " ".join(s.text.strip() for s in segs).strip()      # segments are lazy: errors surface here
+        out = " ".join(s.text.strip() for s in segs).strip()
         # whisper sometimes "hears" the hint or filler on near-silence
         if out.strip(" .").lower() in ("", "you", "thank you", "thanks for watching", "bye"):
-            return ""
-        return out
+            out, segs = "", []
+        return Heard(text=out,
+                     logprob=sum(s.avg_logprob for s in segs) / len(segs) if segs else float("-inf"),
+                     no_speech=max((s.no_speech_prob for s in segs), default=1.0),
+                     seconds=_speech_seconds(audio))
     try:
         return go()
     except Exception as e:  # noqa: BLE001
@@ -1096,6 +1116,11 @@ def run_whisper(audio, beam=None, hint=None, sure=False) -> str:
         with _whisper_lock:
             _whisper = _load("cpu")
         return go()
+
+
+def run_whisper(audio, beam=None, hint=None, sure=False) -> str:
+    """Transcribe to text alone (see run_whisper_heard)."""
+    return run_whisper_heard(audio, beam=beam, hint=hint, sure=sure).text
 
 
 def pcm_audio(pcm: bytes):
@@ -1109,18 +1134,28 @@ def pcm_audio(pcm: bytes):
     return audio
 
 
+def transcribe_pcm_heard(pcm: bytes, **kw) -> Heard:
+    """Raw s16le 16 kHz mono → what was heard, with Whisper's confidence."""
+    if len(pcm) < 16000 * 2 * 0.3:          # < 0.3 s: nothing worth sending
+        return Heard(text="", logprob=float("-inf"), no_speech=1.0, seconds=0.0)
+    return run_whisper_heard(pcm_audio(pcm), **kw)
+
+
 def transcribe_pcm(pcm: bytes, **kw) -> str:
     """Raw s16le 16 kHz mono → text."""
-    if len(pcm) < 16000 * 2 * 0.3:          # < 0.3 s: nothing worth sending
-        return ""
-    return run_whisper(pcm_audio(pcm), **kw)
+    return transcribe_pcm_heard(pcm, **kw).text
+
+
+def _speech_seconds(audio) -> float:
+    """How many seconds of `audio` (pcm_audio's float32) Whisper's speech detector thinks are someone talking."""
+    from faster_whisper.vad import VadOptions, get_speech_timestamps
+    ts = get_speech_timestamps(audio, VadOptions(min_silence_duration_ms=300))
+    return sum(t["end"] - t["start"] for t in ts) / 16000
 
 
 def speech_seconds(pcm: bytes) -> float:
     """How many seconds of `pcm` (s16le 16 kHz mono) Whisper's speech detector thinks are someone talking."""
-    from faster_whisper.vad import VadOptions, get_speech_timestamps
-    ts = get_speech_timestamps(pcm_audio(pcm), VadOptions(min_silence_duration_ms=300))
-    return sum(t["end"] - t["start"] for t in ts) / 16000
+    return _speech_seconds(pcm_audio(pcm))
 
 
 def level_db(pcm: bytes) -> float:
@@ -1408,7 +1443,8 @@ class Listen:
             emit(t="error", text="the mic is completely silent — is the right input selected/unmuted? "
                                  "(`void doctor` lists inputs; set mic_device in the config)")
             return
-        if spoke or (floor is not None and peak > max(0.001, floor * 2.5)):   # you said something, maybe too quietly
+        learned = spoke or (floor is not None and peak > max(0.001, floor * 2.5))   # you said something, maybe too quietly
+        if learned:
             MicAuto.learn(bytes(pcm))
         if spoke and self.mode == "auto" and not self.cancel and reason == "done":
             try:
@@ -1428,6 +1464,8 @@ class Listen:
             emit(t="cancel", why="echo")
             return
         emit(t="text", text=text)
+        if learned:
+            Voice.enroll(bytes(pcm))             # (beside MicAuto.learn: once it's known to be your request, not echo)
 
 
 def reset_whisper():
@@ -1512,6 +1550,94 @@ def is_noise(heard):
     w = re.findall(r"[^\W_]+", (heard or "").lower())
     return not w or " ".join(w) in NOISE_WORDS or (len(w) >= 2 and len(set(w)) * 2 <= len(w))
 WAKE_RE = re.compile(r"^\W*(?:(?:hey|hi|hay|okay|ok|yo|oi)\W+)?(void|voyd|boyd|voi|vod)\b\W*(.*)$", re.I | re.S)
+
+
+class Voice:
+    """The server's one voiceprint of the owner (voiceprint.Voiceprint), loaded on its own thread: the first run downloads
+    its model, and neither startup nor the mic loop waits for that. Until it's in, follow-ups are judged on Whisper's
+    confidence alone and nothing is enrolled. Why it's off is the Voiceprint's own `why` (voice_report)."""
+    PATH = DATA_DIR / "voiceprint.npz"          # the print (running mean of the enrolled clips' embeddings)
+    MODELS = DATA_DIR / "voices" / "voiceprint"  # the embedding model, fetched on first use
+    RETRY = 600                                  # a print left unavailable (no network?) is tried again after this long
+    vp = None
+    loader = None
+    tried = None
+    lock = threading.Lock()
+
+    @classmethod
+    def start(cls):
+        """Load the voiceprint in the background, unless it's loading or loaded already. → the loader thread."""
+        with cls.lock:
+            due = cls.tried is None or (cls.vp is not None and not cls.vp.available
+                                        and time.monotonic() - cls.tried > cls.RETRY)
+            if due and not (cls.loader and cls.loader.is_alive()):
+                cls.tried = time.monotonic()
+                cls.loader = threading.Thread(target=cls._load, daemon=True)
+                cls.loader.start()
+            return cls.loader
+
+    @classmethod
+    def _load(cls):
+        import voiceprint
+        cls.vp = voiceprint.Voiceprint(cls.PATH, cls.MODELS)
+
+    @classmethod
+    def get(cls):
+        """The voiceprint, or None while it's loading. Waits for the load only when the model is on disk already (a quick
+        load, no download)."""
+        t = cls.start()
+        if cls.vp is None and t is not None and t.is_alive():
+            import voiceprint
+            if (cls.MODELS / voiceprint.MODEL).exists():
+                t.join()
+        return cls.vp
+
+    @classmethod
+    def score_soon(cls, pcm):
+        """Score `pcm` against the owner's voice on its own thread (alongside Whisper). → wait(): the score, or None (no
+        voiceprint yet, too few clips enrolled, or the scoring failed)."""
+        box = [None]
+
+        def run():
+            vp = cls.get()
+            if vp is not None:
+                try:
+                    box[0] = vp.score(pcm)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[void] voiceprint score failed: {e}", file=sys.stderr)
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+
+        def wait():
+            t.join()
+            return box[0]
+        return wait
+
+    @classmethod
+    def enroll(cls, pcm):
+        """Fold one of the owner's own requests (wake-word or Listen, never a follow-up) into the voiceprint."""
+        vp = cls.get()
+        if vp is not None:
+            try:
+                vp.enroll(pcm)
+            except Exception as e:  # noqa: BLE001
+                print(f"[void] voiceprint enrolment failed: {e}", file=sys.stderr)
+
+
+def voice_report(vp) -> str:
+    """What `void doctor` and diagnostics() say about the voiceprint: on (and how far enrolled), or the Voiceprint's own
+    why when it's unavailable."""
+    if vp is None:
+        return "loading (its model downloads on first use)"
+    if not vp.available:
+        return vp.why
+    import voiceprint
+    out = f"on, {vp.enrolled} of your clips enrolled"
+    if vp.enrolled < voiceprint.MIN_ENROLL:
+        out += f" (follow-ups judged on Whisper's confidence alone until {voiceprint.MIN_ENROLL})"
+    if not CFG.get("voice_gate", True):
+        out += "; the follow-up gate is off (voice_gate)"
+    return out
 
 
 class Wake:
@@ -1708,11 +1834,19 @@ class Wake:
         over = cls.speaking() or started < cls.speaking_until + ECHO_TAIL
         if over and cls.ran_on(started, ended):   # …but it ran on long after: your turn, as a follow-up
             follow, over = True, False
+        gated = follow and not over and CFG.get("voice_gate", True)
+        voice = None                             # (a follow-up's voice score: worked out while Whisper transcribes)
+        heard = None
         try:
             ss = speech_seconds(pcm)
             if ss < 0.25 or ss < len(pcm) / (RATE * 2) * 0.2:    # music or noise, not talking: don't let Whisper dream up words
                 return
-            if text is None:
+            if gated:
+                voice = Voice.score_soon(pcm)
+            if gated:                            # (a judged follow-up needs Whisper's confidence, not just words)
+                heard = transcribe_pcm_heard(pcm, sure=True)
+                text = heard.text
+            elif text is None:
                 text = (transcribe_pcm(pcm, sure=True) if follow or over
                         else transcribe_pcm(pcm, beam=1, hint="Hey Void.", sure=True))
         except Exception as e:  # noqa: BLE001
@@ -1750,8 +1884,15 @@ class Wake:
             log("wake word request")
             MicAuto.learn(pcm)                   # (only your requests tune the mic: not noise, not his voice)
             BUS.pub(t="wake", text=rest)
+            Voice.enroll(pcm)                    # (…and teach him your voice: after the request is out, never a follow-up)
         elif follow:
             if len(said.split()) >= 2:           # (a stray word isn't a request)
+                v = gate.judge(heard, voice() if voice else None, CFG)
+                if not v.keep:
+                    what = f"dropped follow-up, {v.why}"
+                    log(what)
+                    BUS.pub(t="gate_drop", text=f"{what}: {said[:80]}")
+                    return
                 log("follow-up request")
                 cls.follow_until = 0.0
                 MicAuto.learn(pcm)
@@ -1785,6 +1926,8 @@ def doctor():
         print()
     print("recorders tried in order:", "sounddevice" if OSYS else (", ".join(c[0] for c in mic_cmds()) or "NONE"))
     print("echo canceller:", echo_report(hearing.Canceller(CFG.get("echo_cancel", True))))
+    import voiceprint
+    print("voiceprint:", voice_report(voiceprint.Voiceprint(Voice.PATH, Voice.MODELS)), flush=True)
     print("recording 3 seconds — keep talking the whole time…", flush=True)
     try:
         if OSYS:                                    # (keep every channel, to see which one your voice is on)
@@ -3267,6 +3410,7 @@ def diagnostics():
         except OSError:
             add("vc++ runtime", "not found")
     add("echo canceller", echo_report(hearing.Canceller(CFG.get("echo_cancel", True))))
+    add("voiceprint", voice_report(Voice.vp))
     add("mic auto-level", f"{'on' if CFG.get('mic_auto', True) else 'off'}, boost {MicAuto.soft:.1f}x, last voice peak "
                           + ("-" if MicAuto.last_peak is None else f"{MicAuto.last_peak:.3f}"))
     add("settings", ", ".join(f"{k}={CFG.get(k)}" for k in ("trust", "wake_word", "barge_in", "follow_up", "tts",
@@ -4018,6 +4162,7 @@ def main():
     _wire_quick()
     resync_launch_agent()
     threading.Thread(target=warm_tts, daemon=True).start()
+    Voice.start()                           # (downloads its model on the first run: off the startup path)
     Wake.ensure()
     Updates.start()
     srv = ThreadingHTTPServer(("127.0.0.1", int(CFG["port"])), Handler)
