@@ -136,7 +136,8 @@ class Voiceprint(unittest.TestCase):
         clips = [pcm(n) for n in ENROLL]
         for i in range(voiceprint.MIN_ENROLL):
             for n in HELD_OUT:
-                v = gate.judge(heard, vp.score(pcm(n)), cfg)
+                b = gate.Burst(heard.text, heard, heard.seconds, heard.seconds, vp.score(pcm(n)), "follow", False)
+                v = gate.judge(b, [], cfg)
                 self.assertTrue(v.keep, f"owner's follow-up {n} dropped ({v.why}) with {vp.enrolled} clips enrolled")
             vp.enroll(clips[i % len(clips)])
         self.assertEqual(vp.enrolled, voiceprint.MIN_ENROLL)
