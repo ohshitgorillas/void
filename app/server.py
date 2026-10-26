@@ -12,7 +12,6 @@ import argparse
 import array
 import atexit
 import collections
-import difflib
 import io
 import json
 import math
@@ -39,6 +38,7 @@ sys.path.insert(0, str(APP_DIR))
 import quick  # noqa: E402
 import agents  # noqa: E402
 import gate  # noqa: E402
+from gate import ECHO_KEEP, ECHO_RUN, ECHO_TAIL, STOP_RE, is_echo, is_noise, stop_said  # noqa: E402
 import hearing  # noqa: E402
 import langmark  # noqa: E402
 import notifier  # noqa: E402
@@ -1097,8 +1097,7 @@ def run_whisper_heard(audio, beam=None, hint=None, sure=False) -> Heard:
             no_speech_threshold=0.5)
         segs = list(segs)                                          # segments are lazy: errors surface here
         if sure:     # (a guess at noise: low log-prob, the same few words looping, or "probably nobody talking")
-            segs = [s for s in segs if s.avg_logprob >= -1.0 and s.compression_ratio <= 2.4
-                    and not (s.no_speech_prob > 0.6 and s.avg_logprob < -0.5)]
+            segs = gate.sure(segs)
         out = " ".join(s.text.strip() for s in segs).strip()
         # whisper sometimes "hears" the hint or filler on near-silence
         if out.strip(" .").lower() in ("", "you", "thank you", "thanks for watching", "bye"):
@@ -1487,7 +1486,7 @@ class Listen:
             emit(t="note", text="your mic is clipping (too loud) — turn the input down to ~65% for better recognition")
         emit(t="transcribing")
         text = transcribe_pcm(bytes(pcm))
-        if is_echo(text):                        # (his own voice through the mic, not you)
+        if is_echo(text, said_lately()):         # (his own voice through the mic, not you)
             print(f"[void] dropped echo of own speech: {text.strip()[:80]}", file=sys.stderr)
             emit(t="cancel", why="echo")
             return
@@ -1520,28 +1519,12 @@ def list_mics():
                 if "\t" in ln and ".monitor" not in ln]
 
 
-STOP_RE = re.compile(r"(?:ok(?:ay)?\W+|void\W+|hey\W+void\W+)?(?:stop|wait|shush|shh+|quiet|be quiet|shut up|hold on|hang on|"
-                     r"enough|stop talking|that's enough|thanks?(?: you)?|got it)(?:\W+(?:void|please|now))?")
-# while he talks only these stop him, and only said as a stop: opening or closing a clause of what the mic caught (his
-# own voice heard back over him may carry the word inside a sentence, "ready to have a stop on, and it's going")
-_STOP_WORDS = r"(?:stop|hold on|hang on|shut up|be quiet|shush|shh+|that's enough)"
-_STOP_FILL = r"(?:ok(?:ay)?|oh|no|hey|void|um+|uh+|please|now|so|well)"
-STOP_IN_RE = re.compile(rf"^\W*(?:{_STOP_FILL}\W+)*{_STOP_WORDS}\b|\b{_STOP_WORDS}(?:\W+{_STOP_FILL})*\W*$")
-
-
-def stop_said(text):
-    """A stop phrase said as one: some clause of the transcript opens or closes with it (filler and his name aside)."""
-    return any(STOP_IN_RE.search(c) for c in re.split(r"[.,!?;]+", (text or "").lower()))
 # sent ahead of a follow-up (said without "hey Void") so Claude can tell if it was even meant for him
 FOLLOW_NOTE = ("(Voice note from Void: the mic picked this up a few seconds after your last reply, without \"hey Void\". "
                "If it is clearly not meant for you, e.g. the user thinking out loud, talking to themselves or to someone "
                "else, reply with exactly [ignore] and nothing else, and use no tools. Otherwise just answer it normally.)\n\n")
 IGNORE = "[ignore]"
 STOP_PEEK = 0.5          # s: a burst begun over him is checked this often for a stop phrase while you're still talking
-ECHO_TAIL = 1.0          # s after he stops talking that the room still rings: a burst starting before then is his own voice
-ECHO_RUN = 2.0           # …unless it runs on this long past the ringing: then it's you, answering as he finished
-ECHO_KEEP, ECHO_RATIO, ECHO_MIN = 60, 0.55, 3    # remember what he said for 60 s · share of heard words matched · fewest words to judge
-ECHO_LIKE, ECHO_SKIP = 0.6, 0.25                 # how alike two words must be to count · cost of each of his words the burst skips
 SPOKEN = collections.deque(maxlen=200)           # (monotonic time, text) of what he said lately
 
 
@@ -1549,54 +1532,14 @@ def note_spoken(text):
     SPOKEN.append((time.monotonic(), langmark.unmark(text)))
 
 
-def word_like(a, b):
-    """How alike two words are, 0 to 1, forgiving speech-to-text slips ("them"/"'em", "long"/"belongs")."""
-    if a == b:
-        return 1.0
-    r = difflib.SequenceMatcher(None, a, b).ratio()
-    if min(len(a), len(b)) >= 2 and (a in b or b in a):
-        r = max(r, 0.8)
-    return r if r >= ECHO_LIKE else 0.0
-
-
-def is_echo(heard):
-    """The mic caught his own voice: most of the heard words, however garbled, line up with a stretch of what he said
-    lately. Words may be misheard, dropped or added, but the stretch must run in his order and mostly unbroken."""
-    h = re.findall(r"[^\W_]+", (heard or "").lower())
-    if len(h) < ECHO_MIN:
-        return False
+def said_lately():
+    """What he said in the last ECHO_KEEP seconds, a line at a time (older lines are forgotten)."""
     now = time.monotonic()
     while SPOKEN and now - SPOKEN[0][0] > ECHO_KEEP:
         SPOKEN.popleft()
-    lines = [said for _t, said in SPOKEN]
-    for said in lines + [" ".join(lines)]:     # (he speaks a sentence at a time; one burst can catch several)
-        s = re.findall(r"[^\W_]+", said.lower())
-        row = [0.0] * (len(s) + 1)           # best alignment of the heard words so far, ending at each of his words
-        for w in h:
-            prev, row = row, [0.0]
-            for j, x in enumerate(s):        # match (by likeness) · drop a heard word · skip one of his, at a cost
-                row.append(max(prev[j] + word_like(w, x), prev[j + 1], row[j] - ECHO_SKIP))
-        if max(row) >= ECHO_RATIO * len(h):
-            return True
-    return False
-
-# what the speech model "hears" in background noise — never treat these as a follow-up request
-NOISE_WORDS = {"you", "thank you", "thanks", "bye", "thanks for watching", "thank you for watching", "uh", "um", "hmm"}
+    return [said for _t, said in SPOKEN]
 
 
-NOISE_LOOP = 4   # a phrase this many words or longer, said twice or more back to back, is Whisper looping on room sound
-
-
-def is_noise(heard):
-    """Nothing, a stock filler, or a whole sentence over and over ("It is a pleasure to be here. It is a pleasure to be
-    here"): Whisper makes up and repeats a sentence on room sound. A short phrase repeated ("Not yet, not yet", "Wait,
-    wait, wait") is you, answering him, and is not noise."""
-    w = re.findall(r"[^\W_]+", (heard or "").lower())
-    if not w or " ".join(w) in NOISE_WORDS:
-        return True
-    # the shortest phrase whose repeats make up the whole (a cut-off last repeat allowed)
-    loop = next(n for n in range(1, len(w) + 1) if all(x == w[i % n] for i, x in enumerate(w)))
-    return loop >= NOISE_LOOP and len(w) >= 2 * loop
 WAKE_RE = re.compile(r"^\W*(?:(?:hey|hi|hay|okay|ok|yo|oi)\W+)?(void|voyd|boyd|voi|vod)\b\W*(.*)$", re.I | re.S)
 
 
@@ -1891,7 +1834,7 @@ class Wake:
         except Exception as e:  # noqa: BLE001
             print(f"[void] stop check stt: {e}", file=sys.stderr)
             return False
-        if is_echo(text):
+        if is_echo(text, said_lately()):
             return False
         said = (text or "").strip(" .,!?")
         if not stop_said(said):
@@ -1954,7 +1897,7 @@ class Wake:
               f"{', follow-up' if follow else ''}{f', after his last word ({cut / (RATE * 2):.1f}s of him cut)' if cut else ''}"
               f"{', wake word' if m else ''}{', while talking' if cls.speaking() else ''}",
               file=sys.stderr)
-        if is_echo(text):
+        if is_echo(text, said_lately()):
             print(f"[void] dropped echo of own speech: {text.strip()[:80]}", file=sys.stderr)
             return
         said = (text or "").strip(" .,!?")

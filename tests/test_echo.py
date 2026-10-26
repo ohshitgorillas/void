@@ -21,6 +21,13 @@ except Exception as e:  # noqa: BLE001
 else:
     IMPORT_ERR = None
 
+try:
+    import gate
+except Exception as e:  # noqa: BLE001
+    gate, GATE_ERR = None, e
+else:
+    GATE_ERR = None
+
 REPLY = "Sure, I moved the meeting to Thursday at three and told Sam about it."
 PCM = bytes(32000)
 
@@ -61,41 +68,18 @@ class Echo(unittest.TestCase):
         server.Wake.talking_until(now - ago)
         server.Wake.follow_until = now + 30
 
-    # the echo match
-    def test_match_repeat_and_partial(self):
-        server.note_spoken(REPLY)
-        self.assertTrue(server.is_echo("I moved the meeting to Thursday at three"))
-        self.assertTrue(server.is_echo("Sure I moved the meeting to thursday, at 3 and told Sam"))
-
-    def test_match_spans_sentences(self):         # one burst can catch several of his sentences
-        for line in ("There are three things going on in Gauntlet.",
-                     "The checkpoint work has two steps committed, and its lead is still running.",
-                     "It fixed the three review findings, and is waiting on the checks before it commits."):
-            server.note_spoken(line)
-        self.assertTrue(server.is_echo("There are three things going on in government. The checkpoint work has two "
-                                       "steps committed, and its lead is still running. It fixed the three review "
-                                       "findings, and is waiting on the checks before it commits"))
-        self.assertFalse(server.is_echo("Can you check on the three review findings for me"))
-
-    def test_match_ignores_real_questions(self):
-        server.note_spoken(REPLY)
-        self.assertFalse(server.is_echo("Can you move the meeting to Friday instead"))
-        self.assertFalse(server.is_echo("meeting Thursday"))          # too short to judge
-        self.assertFalse(server.is_echo("what is the weather like today"))
-
-    def test_match_in_order_and_expires(self):
-        server.note_spoken(REPLY)
-        self.assertFalse(server.is_echo("Sam about told and three at Thursday to meeting the moved"))
-        server.SPOKEN.clear()
+    # the echo match: what is heard against what he said lately (server.py keeps SPOKEN and expires it)
+    def test_match_expires(self):
         server.SPOKEN.append((time.monotonic() - 120, REPLY))
-        self.assertFalse(server.is_echo("I moved the meeting to Thursday at three"))
+        self.after_speech(server.ECHO_TAIL + 0.6)
+        server.Wake.follow_from = 0.0
+        self.assertFollowUp(self.burst("I moved the meeting to Thursday at three"),
+                            "I moved the meeting to Thursday at three")
 
     # what the log showed slipping through just after his echo: his own words, badly misheard
     def test_badly_misheard_echo_after_tail_dropped(self):
         server.note_spoken("Kill 'Em All really belongs in the 30K rolloff folder.")
         server.note_spoken("The other two albums are already sorted, but you might want to check that.")
-        self.assertTrue(server.is_echo("I can kill them all really long in a 30K bonus folder"))
-        self.assertTrue(server.is_echo("But you might want to check me."))
         for heard in ("I can kill them all really long in a 30K bonus folder", "But you might want to check me."):
             self.after_speech(server.ECHO_TAIL + 0.6)
             server.Wake.follow_from = 0.0
@@ -104,9 +88,6 @@ class Echo(unittest.TestCase):
     def test_request_sharing_his_words_gets_through(self):
         server.note_spoken("Kill 'Em All really belongs in the 30K rolloff folder.")
         server.note_spoken("The other two albums are already sorted, but you might want to check that.")
-        for ask in ("please move Reload to the 30K folder too", "can you check the 30K folder for me",
-                    "move all of the other albums to the rolloff folder"):
-            self.assertFalse(server.is_echo(ask), ask)
         self.after_speech(server.ECHO_TAIL + 0.6)
         server.Wake.follow_from = 0.0
         self.assertFollowUp(self.burst("please move Reload to the 30K folder too"),
@@ -116,7 +97,9 @@ class Echo(unittest.TestCase):
         with mock.patch.object(server.Speaker, "_start", classmethod(lambda cls: None)):
             server.Speaker.say(REPLY, 1)
         self.addCleanup(server.Speaker.todo.clear)
-        self.assertTrue(server.is_echo("I moved the meeting to Thursday at three"))
+        self.after_speech(server.ECHO_TAIL + 0.6)
+        server.Wake.follow_from = 0.0
+        self.assertEqual(self.burst("I moved the meeting to Thursday at three"), [])
 
     # the time gate
     def test_follow_window_waits_for_tail(self):
@@ -397,6 +380,48 @@ class Burst(unittest.TestCase):
                 self.assertLess(bursts[0][1] - 7, 2.0)        # within 2 s of your last word
 
 
+ALBUMS = ["Kill 'Em All really belongs in the 30K rolloff folder.",
+          "The other two albums are already sorted, but you might want to check that."]
+
+
+@unittest.skipIf(gate is None, f"app/gate.py doesn't import here: {GATE_ERR}")
+class EchoMatch(unittest.TestCase):
+    """gate.is_echo(heard, spoken): does what the mic heard mostly repeat what he said lately (`spoken`, his lines)?"""
+
+    def test_match_repeat_and_partial(self):
+        self.assertTrue(gate.is_echo("I moved the meeting to Thursday at three", [REPLY]))
+        self.assertTrue(gate.is_echo("Sure I moved the meeting to thursday, at 3 and told Sam", [REPLY]))
+
+    def test_match_spans_sentences(self):         # one burst can catch several of his sentences
+        said = ["There are three things going on in Gauntlet.",
+                "The checkpoint work has two steps committed, and its lead is still running.",
+                "It fixed the three review findings, and is waiting on the checks before it commits."]
+        self.assertTrue(gate.is_echo("There are three things going on in government. The checkpoint work has two "
+                                     "steps committed, and its lead is still running. It fixed the three review "
+                                     "findings, and is waiting on the checks before it commits", said))
+        self.assertFalse(gate.is_echo("Can you check on the three review findings for me", said))
+
+    def test_match_ignores_real_questions(self):
+        self.assertFalse(gate.is_echo("Can you move the meeting to Friday instead", [REPLY]))
+        self.assertFalse(gate.is_echo("meeting Thursday", [REPLY]))          # too short to judge
+        self.assertFalse(gate.is_echo("what is the weather like today", [REPLY]))
+
+    def test_match_in_order(self):
+        self.assertFalse(gate.is_echo("Sam about told and three at Thursday to meeting the moved", [REPLY]))
+
+    def test_nothing_said_lately_is_no_echo(self):
+        self.assertFalse(gate.is_echo("I moved the meeting to Thursday at three", []))
+
+    def test_badly_misheard_echo_matches(self):
+        self.assertTrue(gate.is_echo("I can kill them all really long in a 30K bonus folder", ALBUMS))
+        self.assertTrue(gate.is_echo("But you might want to check me.", ALBUMS))
+
+    def test_request_sharing_his_words_is_no_echo(self):
+        for ask in ("please move Reload to the 30K folder too", "can you check the 30K folder for me",
+                    "move all of the other albums to the rolloff folder"):
+            self.assertFalse(gate.is_echo(ask, ALBUMS), ask)
+
+
 class Seg:
     def __init__(self, text, avg_logprob=-0.3, no_speech_prob=0.1, compression_ratio=1.4):
         self.text, self.avg_logprob, self.no_speech_prob, self.compression_ratio = (text, avg_logprob, no_speech_prob,
@@ -421,6 +446,33 @@ class Sure(unittest.TestCase):
     def test_push_to_talk_keeps_everything(self):
         self.assertEqual(self.run_on([Seg("Please add milk."), Seg("to the list", avg_logprob=-1.4)]),
                          "Please add milk. to the list")
+
+
+@unittest.skipIf(gate is None, f"app/gate.py doesn't import here: {GATE_ERR}")
+class GateSure(unittest.TestCase):
+    """gate.sure(segments), the one Whisper segment filter: keeps only the segments Whisper is sure of, in order."""
+
+    def texts(self, segs):
+        return [s.text for s in gate.sure(segs)]
+
+    def test_unsure_segments_dropped(self):
+        segs = [Seg("Please add milk."), Seg("Oh my god.", avg_logprob=-1.4), Seg("Go go go go go.", compression_ratio=3.1),
+                Seg("Hmm.", avg_logprob=-0.8, no_speech_prob=0.9)]
+        self.assertEqual(self.texts(segs), ["Please add milk."])
+
+    def test_sure_segments_all_kept_in_order(self):
+        segs = [Seg("Please add milk."), Seg("And eggs."), Seg("Thanks.")]
+        self.assertEqual(self.texts(segs), ["Please add milk.", "And eggs.", "Thanks."])
+
+    def test_thresholds_are_gates_own(self):
+        at = [Seg("at the floor", avg_logprob=gate.SEG_LOGPROB),
+              Seg("at the ceiling", compression_ratio=gate.SEG_COMPRESSION)]
+        under = [Seg("under the floor", avg_logprob=gate.SEG_LOGPROB - 0.01),
+                 Seg("over the ceiling", compression_ratio=gate.SEG_COMPRESSION + 0.01)]
+        self.assertEqual(self.texts(at + under), ["at the floor", "at the ceiling"])
+
+    def test_nothing_in_nothing_out(self):
+        self.assertEqual(gate.sure([]), [])
 
 
 if __name__ == "__main__":
