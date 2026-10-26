@@ -10,7 +10,7 @@ from test_page_idle import INIT, NODE_PATH, run_page
 
 SCRIPT = r"""const { chromium } = require('playwright');
 (async () => {
-  const out = {errors: []}, b = await chromium.launch();
+  const out = {errors: []}, b = await chromium.launch(LAUNCH);
   try {
     const p = await b.newPage({viewport: {width: 340, height: 460}});
     p.on('pageerror', e => out.errors.push(String(e && e.message || e)));
