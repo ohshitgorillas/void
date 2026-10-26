@@ -39,6 +39,7 @@ import quick  # noqa: E402
 import agents  # noqa: E402
 import hearing  # noqa: E402
 import langmark  # noqa: E402
+import notifier  # noqa: E402
 import recall  # noqa: E402
 WIN = os.name == "nt"                        # Windows: OS bits go through winsys.py instead of Linux command-line tools
 if WIN:
@@ -220,6 +221,10 @@ DEFAULTS = {
     "mic_device": "",
     # optional custom recorder; must write raw s16le, 16 kHz, mono to stdout
     "mic_cmd": "",
+    # claude-ping alerts arriving close together reach him as one message: sent once no ping has come for this many
+    # seconds, or this many seconds after the first one even if they keep coming
+    "ping_quiet_s": 20,
+    "ping_hold_s": 120,
 }
 
 
@@ -3403,7 +3408,8 @@ def lock_wait():
 
 
 class InboxFollower:
-    """Tail alerts from this run only; the unread file queues them while Claude is busy."""
+    """Tail alerts from this run only; the unread file queues them while Claude is busy, and notifier.PingBatch
+    gathers them so a burst reaches him as one message."""
     def __init__(self, path=None):
         self.path = Path(path) if path is not None else Path.home() / ".local/share/void-watch/inbox.log"
         self.offset = 0
@@ -3420,6 +3426,8 @@ class InboxFollower:
                     self.discard = f.read(1) != b"\n"
         except OSError:
             pass                            # claude-ping may create the inbox later
+        self.batch = notifier.PingBatch(float(CFG.get("ping_quiet_s", DEFAULTS["ping_quiet_s"])),
+                                        float(CFG.get("ping_hold_s", DEFAULTS["ping_hold_s"])))
         self.stop = threading.Event()
         self.thread = threading.Thread(target=self.run, daemon=True)
 
@@ -3474,12 +3482,16 @@ class InboxFollower:
     def run(self):
         while not self.stop.is_set():
             try:
-                for line in self.read_lines():
-                    if self.stop.is_set():
-                        return
-                    self.deliver(line)
-            except FileNotFoundError:
-                pass
+                try:
+                    for line in self.read_lines():
+                        if self.stop.is_set():
+                            return
+                        self.batch.add(line)
+                except FileNotFoundError:
+                    pass
+                batch = self.batch.due()
+                if batch:
+                    self.deliver(notifier.digest(batch))
             except Exception as e:  # noqa: BLE001
                 print(f"[void] inbox: {e}", file=sys.stderr)
             self.stop.wait(0.25)
