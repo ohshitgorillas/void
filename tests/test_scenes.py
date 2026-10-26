@@ -283,6 +283,12 @@ class SlowScenes(FreshRun):
         sc = SCENES["overlap_last_second"]
         self._follows_up("overlap_last_second", seconds(sc["void"]) - LAST_SECOND)
 
+    def test_starting_in_his_last_second_is_a_follow_up_even_when_his_echo_opened_the_burst(self):
+        # (live, what the canceller leaves of him is loud enough to open a burst; with it off here, all of him does)
+        sc = SCENES["overlap_last_second"]
+        with mock.patch.object(server.hearing, "rtc", None):
+            self._follows_up("overlap_last_second", seconds(sc["void"]) - LAST_SECOND)
+
     def test_room_music_with_no_reference_gives_nothing(self):
         t, log = heard(SCENES["room_music"])
         self.assertEqual(did(t), [], f"Void acted on the room's music:{instead(t, log)}")

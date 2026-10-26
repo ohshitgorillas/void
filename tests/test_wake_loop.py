@@ -11,6 +11,7 @@ the gate adds under 100 ms of wall time to a follow-up over Whisper alone, the v
 
     python3 -m unittest discover -s tests
 """
+import collections
 import contextlib
 import http.client
 import io
@@ -551,6 +552,32 @@ class FollowUpGate(unittest.TestCase):
         events, log = self.check_pcm(lead + speech, SAID["you_overlap.wav"], follow=True)
         self.assertEqual(len(self.scored), 1, f"the follow-up was scored {len(self.scored)}x, not once: {log}")
         self.assert_speech_only(bytes(self.scored[0]), lead, speech, "the follow-up's voice score")
+
+    def test_reply_begun_over_him_is_heard_and_scored_on_the_owner_s_voice_alone(self):
+        """You start answering in his last words and carry on (ran on): the burst opened on his echo, as the canceller
+        leaves it, and that opening is neither heard nor scored as you."""
+        import array
+        his = array.array("h", clip("void_question.wav"))
+        his = array.array("h", (x // 10 for x in his)).tobytes()     # his echo 20 dB down: enough to open a burst
+        you = clip("you_overlap.wav")
+        pcm, said = his + you, SAID["you_overlap.wav"]
+        self.heard_text = collections.defaultdict(lambda: said)
+        W, now = server.Wake, time.monotonic()
+        at = now - len(pcm) / (server.RATE * 2)                      # (when the burst's first sample was caught)
+        W.speaking_until = at + len(his) / (server.RATE * 2)
+        W.follow_from = W.speaking_until + server.ECHO_TAIL
+        W.follow_until = W.follow_from + 4
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            W.check(pcm, at + 0.5, ended=now - 0.3, at=at)
+        events = []
+        while not self.q.empty():
+            events.append(self.q.get_nowait())
+        got = self.wakes(events)
+        self.assertTrue(len(got) == 1 and got[0].get("follow"),
+                        f"the owner's reply begun over him was not kept: {events}\n{err.getvalue()}")
+        self.assertEqual(len(self.scored), 1, f"the reply was scored {len(self.scored)}x, not once")
+        self.assert_speech_only(bytes(self.scored[0]), his, you, "the reply's voice score")
 
     def test_wake_word_clip_is_enrolled_without_its_lead_in(self):
         lead, speech = hiss(self.LEAD_IN, 8), clip("you_hey_void.wav")

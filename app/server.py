@@ -1782,6 +1782,7 @@ class Wake:
         fl = Floor()
         floor, voiced, seg, in_speech, last_voice, started = None, 0, bytearray(), False, 0.0, 0.0
         pre, n, vad_at, vad_last, peek_at = bytearray(), 0, 0.0, 0.0, 0.0
+        heard_at, seg_at = time.monotonic(), 0.0     # when buf's last sample was caught · when seg's first was
         req, said = False, None              # req: this burst is a request (a follow-up, or it began "hey Void"), so it
         cls.cut = None                       # runs until you've finished, like a normal listen, not to the first breath
         try:
@@ -1790,8 +1791,10 @@ class Wake:
                     buf += mic.read(0.2)
                 except EOFError:
                     return
+                heard_at = time.monotonic()
                 while len(buf) >= FRAME:
                     fr, buf = buf[:FRAME], buf[FRAME:]
+                    fr_end = heard_at - len(buf) / (RATE * 2)   # (when this frame's last sample was caught)
                     s = memoryview(fr).cast("h")
                     rms = (sum(x * x for x in s) / (len(fr) // 2)) ** 0.5 / 32768.0 * MicAuto.soft
                     # (his own voice, and the first seconds of yours, don't count as background)
@@ -1802,7 +1805,7 @@ class Wake:
                     if cls.cut:                          # clicked (finish now) / Space or Esc (drop it)
                         how, cls.cut = cls.cut, None
                         if in_speech and how == "finish" and len(seg) > RATE * 2 * 0.35:
-                            cls.check(bytes(seg), started)
+                            cls.check(bytes(seg), started, at=seg_at)
                         in_speech, seg, cls.follow_until = False, bytearray(), 0.0
                     # you started talking inside the follow-up window: show him hearing you, ring/eyes move with your voice
                     fol = cls.window_open() or (in_speech and req and not cls.speaking())   # (and stays shown while
@@ -1850,12 +1853,13 @@ class Wake:
                         if done:
                             in_speech = False
                             if len(seg) > RATE * 2 * 0.35:
-                                cls.check(bytes(seg), started, None if req else said, ended=last_voice)
+                                cls.check(bytes(seg), started, None if req else said, ended=last_voice, at=seg_at)
                             seg, req, said = bytearray(), False, None
                     else:
                         pre = (pre + fr)[-FRAME * 8:]
                         if voiced >= 3:
                             in_speech, last_voice, seg, started = True, now, bytearray(pre), now
+                            seg_at = fr_end - len(pre) / (RATE * 2)
                             vad_last = peek_at = now
                             req = cls.window_open() and not cls.speaking()
         finally:
@@ -1907,7 +1911,9 @@ class Wake:
                 and cls.follow_until > cls.speaking_until)       # (and he's open to a follow-up)
 
     @classmethod
-    def check(cls, pcm, started, text=None, ended=None):
+    def check(cls, pcm, started, text=None, ended=None, at=None):
+        """One burst heard out. `at`: when its first sample was caught (monotonic), so a reply begun over him can be cut
+        free of his voice."""
         ended = time.monotonic() if ended is None else ended     # (when you last made a sound)
         # started after he finished talking, inside the follow-up window → it's a request, no "hey Void" needed
         # (Claude may still be working: the page keeps it and sends it once he's done)
@@ -1915,8 +1921,14 @@ class Wake:
         # began while he talked / in his echo: may be his voice (is_echo below) or you answering over him
         over = cls.speaking() or started < cls.speaking_until + ECHO_TAIL
         during = over                            # (kept: "stop" begun over him counts even once his sentence has ended)
+        cut = 0                                  # (bytes of his voice cut off the front)
         if over and cls.ran_on(started, ended):   # …but it ran on long after: your turn, as a follow-up
             follow, over = True, False
+            cut = 0 if at is None else int((cls.speaking_until - at) * RATE) * 2
+            if 0 < cut < len(pcm):               # (only what came after his last word: his echo, however well cancelled,
+                pcm = pcm[cut:]                  # opened the burst, and heard or scored it is his voice, not yours)
+            else:
+                cut = 0
         gated = follow and not over and CFG.get("voice_gate", True)
         voice = None                             # (a follow-up's voice score: worked out while Whisper transcribes)
         heard = None
@@ -1939,7 +1951,8 @@ class Wake:
             return
         m = WAKE_RE.match(text or "")
         print(f"[void] heard {len(pcm) / (RATE * 2):.1f}s, {len((text or '').split())} words"
-              f"{', follow-up' if follow else ''}{', wake word' if m else ''}{', while talking' if cls.speaking() else ''}",
+              f"{', follow-up' if follow else ''}{f', after his last word ({cut / (RATE * 2):.1f}s of him cut)' if cut else ''}"
+              f"{', wake word' if m else ''}{', while talking' if cls.speaking() else ''}",
               file=sys.stderr)
         if is_echo(text):
             print(f"[void] dropped echo of own speech: {text.strip()[:80]}", file=sys.stderr)
