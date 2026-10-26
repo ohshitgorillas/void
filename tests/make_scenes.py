@@ -11,6 +11,12 @@ The user's Void config and data are never touched: app/server.py is imported wit
 pointed at a throwaway folder whose voices/kokoro is a link to the real Kokoro model. ONNX and BLAS are held to
 THREADS threads. Piper's duration noise is off (noise_w_scale=0), and Kokoro has none, so every clip's length is the
 same on every run; --check proves it against the files in the tree.
+
+The room music (music playing in the room that Void didn't play, so it has no echo reference) is made here from
+nothing recorded: a little song in C at 96 bpm, keys, bass and drums synthesized note by note, with a third voice,
+Kokoro's bf_emma (neither Void's nor yours), singing the words in SONG to its melody. Each sung word is Kokoro saying
+it, its spectral envelope stretched over the note (vowels long, consonants kept) and laid on a harmonic tone at the
+note's pitch with vibrato, so it keeps the words' formants but carries the tune. Its length is fixed by the score.
 """
 import argparse
 import io
@@ -50,6 +56,20 @@ LONG_TURN = ("you_long_pauses.wav", ["So what I'd really like you to do is, um,"
                                      "go through all of last week's photos and",
                                      "pick out the ones from the beach, the ones with the dog in them,",
                                      "and then put those in a new folder called summer, on the desktop."])
+ROOM_CLIP = "room_music.wav"
+SINGER = "bf_emma"
+LEVELS = {"keys": 0.35, "bass": 0.4, "drums": 0.35, "voice": 1.0}   # by RMS: the singer up front, as a lead vocal
+BPM, BARS, TAIL = 96, 7, 0.5           # 7 bars of 4/4 at 96 bpm plus a ring-out: 18 s, longer than your longest turn
+CHORDS = ["C", "C", "Am", "C", "Am", "F", "G C"]   # one per bar; "G C" splits the bar
+CHORD_NOTES = {"C": (48, 52, 55, 60), "Am": (45, 48, 52, 57), "F": (41, 45, 48, 53), "G": (43, 47, 50, 55)}
+SONG = [  # (bar it starts in, [(word, MIDI note, beats)]); a word of None is a rest
+    (1, [("take", 64, .5), ("me", 67, .5), ("down", 69, 1), ("to", 67, .5), ("the", 64, .5), ("river", 67, 1.5),
+         ("tonight", 72, 2)]),
+    (3, [("where", 64, .5), ("the", 67, .5), ("summer", 69, 1), ("lights", 72, 1), ("are", 69, .5),
+         ("shining", 67, 1.5), ("bright", 64, 2)]),
+    (5, [("hold", 65, 1), ("my", 65, .5), ("hand", 69, 1), ("and", 67, .5), ("sing", 64, 1), ("along", 62, 1),
+         ("with", 62, .5), ("me", 60, 2)]),
+]
 VOID_CLIP = "void_question.wav"
 SCENES = {
     "void_alone": {"void": VOID_CLIP, "you": None},
@@ -60,6 +80,7 @@ SCENES = {
     "answer_after": {"void": VOID_CLIP, "you": "you_answer.wav"},
     "overlap_last_second": {"void": VOID_CLIP, "you": "you_overlap.wav"},
     "long_pauses": {"void": None, "you": LONG_TURN[0]},
+    "room_music": {"void": None, "room": ROOM_CLIP},
 }
 
 
@@ -139,6 +160,154 @@ def you_voice():
     return say
 
 
+N_FFT, HOP, LIFTER = 512, 128, 30
+
+
+def stft(x):
+    import numpy as np
+    win = np.hanning(N_FFT)
+    x = np.concatenate([x, np.zeros(N_FFT)])
+    idx = np.arange(0, len(x) - N_FFT + 1, HOP)[:, None] + np.arange(N_FFT)
+    return np.fft.rfft(x[idx] * win, axis=1)
+
+
+def istft(spec, length):
+    import numpy as np
+    win = np.hanning(N_FFT)
+    frames = np.fft.irfft(spec, N_FFT, axis=1) * win
+    out, norm = np.zeros(len(frames) * HOP + N_FFT), np.zeros(len(frames) * HOP + N_FFT)
+    for i, f in enumerate(frames):
+        out[i * HOP:i * HOP + N_FFT] += f
+        norm[i * HOP:i * HOP + N_FFT] += win * win
+    return (out / np.maximum(norm, 1e-3))[:length]
+
+
+def envelope(spec):
+    """Log spectral envelope per frame: the cepstrum's first LIFTER coefficients (formants, not harmonics)."""
+    import numpy as np
+    cep = np.fft.irfft(np.log(np.abs(spec) + 1e-6), N_FFT, axis=1)
+    cep[:, LIFTER:N_FFT - LIFTER + 1] = 0
+    return np.fft.rfft(cep, axis=1).real
+
+
+def voicing(x, n_frames):
+    """Per STFT frame, 1 where the speech is voiced (a clear pitch in 70-400 Hz), else 0, lightly smoothed."""
+    import numpy as np
+    x = np.concatenate([x, np.zeros(N_FFT)])
+    lo, hi, peak, v = RATE // 400, RATE // 70, np.abs(x).max(), np.zeros(n_frames)
+    for i in range(n_frames):
+        f = x[i * HOP:i * HOP + N_FFT]
+        f = f - f.mean()
+        ac = np.correlate(f, f, "full")[N_FFT - 1:]
+        v[i] = ac[0] > 0 and np.sqrt(ac[0] / N_FFT) > 0.02 * peak and ac[lo:hi].max() / ac[0] > 0.4
+    return np.convolve(v, np.ones(3) / 3, "same")
+
+
+def sing(word_audio, midi, seconds, rng):
+    """`word_audio` (the word spoken, 16 kHz) sung at `midi` for `seconds`: its envelope over a vibrato tone."""
+    import numpy as np
+    loud = np.flatnonzero(np.abs(word_audio) > 0.02 * np.abs(word_audio).max())
+    x = word_audio[loud[0]:loud[-1] + 1]
+    src = stft(x)
+    env, v = envelope(src), voicing(x, len(src))
+    m = int(seconds * RATE) // HOP + 1
+    step = np.ones(len(src))                        # stretch the voiced frames (the vowels), keep the consonants
+    if v.sum() > 0 and m > (v < 0.5).sum():
+        step[v >= 0.5] = (m - (v < 0.5).sum()) / (v >= 0.5).sum()
+    else:
+        step[:] = m / len(src)
+    pos = np.interp(np.arange(m) + 0.5, np.concatenate([[0], np.cumsum(step)]), np.arange(len(src) + 1)) - 0.5
+    pos = np.clip(pos, 0, len(src) - 1)
+    i0 = np.floor(pos).astype(int)
+    i1, frac = np.minimum(i0 + 1, len(src) - 1), (pos - i0)[:, None]
+    env_t, v_t = env[i0] * (1 - frac) + env[i1] * frac, (v[i0] * (1 - frac[:, 0]) + v[i1] * frac[:, 0])[:, None]
+    n = (m - 1) * HOP
+    t = np.arange(n) / RATE
+    depth = 0.3 * np.clip((t - 0.15) / 0.2, 0, 1)                         # vibrato comes in after the onset
+    f0 = 440 * 2 ** ((midi - 69 + depth * np.sin(2 * np.pi * 5.5 * t)) / 12)
+    phase = 2 * np.pi * np.cumsum(f0) / RATE
+    tone = sum(np.sin(k * phase) * (k * f0 < 7600) for k in range(1, int(7600 / f0.min()) + 1))
+    noise = rng.standard_normal(n)
+    tone_s, noise_s = stft(tone)[:m], stft(noise)[:m]
+    win = np.hanning(N_FFT)              # a unit harmonic peaks at sum(win)/2 in the STFT, unit noise at |win|
+    out = (tone_s / (win.sum() / 2) * v_t + 0.6 * noise_s / np.sqrt((win ** 2).sum()) * (1 - v_t)) * np.exp(env_t)
+    y = istft(out, n)
+    fade = np.minimum(1, np.minimum(np.arange(n), np.arange(n)[::-1]) / (0.012 * RATE))
+    return y * fade
+
+
+def room_tracks(server, rng):
+    """The song's parts, each the clip's full length: {"keys", "bass", "drums", "voice": samples}."""
+    import numpy as np
+    beat = 60 / BPM
+    bar = 4 * beat
+    n = int((BARS * bar + TAIL) * RATE)
+    keys, bass, drums, voice = (np.zeros(n) for _ in range(4))
+
+    def hz(m):
+        return 440 * 2 ** ((m - 69) / 12)
+
+    def put(track, at, x):
+        i = int(at * RATE)
+        x = x[:n - i]
+        track[i:i + len(x)] += x
+
+    def pluck(m, sec, decay):
+        t = np.arange(int(sec * RATE)) / RATE
+        tone = sum(np.sin(2 * np.pi * k * hz(m) * t) * np.exp(-t * decay * k) / k for k in range(1, 7))
+        return tone * np.minimum(1, t / 0.004)
+
+    for b, name in enumerate(CHORDS):
+        parts = name.split()
+        for half, chord in enumerate(parts):
+            notes, start, beats = CHORD_NOTES[chord], b * bar + half * bar / len(parts), 4 // len(parts)
+            for e in range(2 * beats):                                  # eighth-note arpeggio, up and back
+                put(keys, start + e * beat / 2, pluck(notes[(0, 1, 2, 3, 2, 1, 2, 3)[e]] + 12, 0.6, 4.0))
+            for q in range(0, beats, 2):                                # bass on the root, every half bar
+                put(bass, start + q * beat, pluck(notes[0] - 12, beat * 1.9, 1.5))
+    t = np.arange(int(0.25 * RATE)) / RATE
+    kick = np.sin(2 * np.pi * (45 * t + 60 * (1 - np.exp(-t * 30)) / 30)) * np.exp(-t * 14)
+    for q in range(BARS * 4):
+        if q % 2 == 0:
+            put(drums, q * beat, kick)
+        else:
+            put(drums, q * beat, (0.5 * rng.standard_normal(len(t)) + np.sin(2 * np.pi * 185 * t)) * np.exp(-t * 22))
+        for e in (0, 1):
+            hat = np.diff(rng.standard_normal(int(0.05 * RATE) + 1)) * np.exp(-np.arange(int(0.05 * RATE)) / 80)
+            put(drums, q * beat + e * beat / 2, 0.25 * hat)
+    for start_bar, line in SONG:
+        at = start_bar * bar
+        for word, midi, beats in line:
+            if word:
+                x, sr = read_wav(server.kokoro_synth(word, SINGER, 0.9))
+                put(voice, at, sing(resample(x, sr), midi, beats * beat * 0.94, rng))
+            at += beats * beat
+    return {"keys": keys, "bass": bass, "drums": drums, "voice": voice}
+
+
+def room_mix(tracks, rng):
+    """The parts at LEVELS (by RMS over their sounding stretches), in a small room, peaking at 0.6."""
+    import numpy as np
+    mix = sum(LEVELS[k] * x / np.sqrt(np.mean(x[np.abs(x) > 1e-4] ** 2)) for k, x in tracks.items())
+    ir_t = np.arange(int(0.35 * RATE)) / RATE
+    ir = rng.standard_normal(len(ir_t)) * np.exp(-ir_t / 0.07) * 0.08
+    ir[0] = 1.0
+    size = 1 << int(np.ceil(np.log2(len(mix) + len(ir))))
+    wet = np.fft.irfft(np.fft.rfft(mix, size) * np.fft.rfft(ir, size), size)[:len(mix)]
+    return 0.6 * wet / np.abs(wet).max()
+
+
+def room_music(server):
+    """The room-music clip: the song in SONG over synthesized keys, bass and drums, in a small room. → samples."""
+    import numpy as np
+    rng = np.random.default_rng(1996)
+    return room_mix(room_tracks(server, rng), rng)
+
+
+def song_words():
+    return " ".join(w for _, line in SONG for w, _, _ in line if w)
+
+
 def generate(dest):
     """Write every clip and manifest.json into `dest`. → {file: frames}."""
     import numpy as np
@@ -152,18 +321,21 @@ def generate(dest):
         gap = np.zeros(int(PAUSE * RATE))
         parts = [say(t) for t in LONG_TURN[1]]
         audio[LONG_TURN[0]] = np.concatenate([p for part in parts for p in (part, gap)][:-1])
+        audio[ROOM_CLIP] = room_music(server)
         preset = server.VOICES[VOID_PRESET]
-    texts = {**VOID_LINES, **YOU_LINES, LONG_TURN[0]: " ".join(LONG_TURN[1])}
+    texts = {**VOID_LINES, **YOU_LINES, LONG_TURN[0]: " ".join(LONG_TURN[1]), ROOM_CLIP: song_words()}
+    speakers = {**{n: "void" for n in VOID_LINES}, ROOM_CLIP: "room"}
     clips = {}
     for name, x in audio.items():
         (dest / name).write_bytes(to_wav(x))
-        clips[name] = {"speaker": "void" if name in VOID_LINES else "you", "text": texts[name],
+        clips[name] = {"speaker": speakers.get(name, "you"), "text": texts[name],
                        "seconds": round(len(x) / RATE, 4)}
     manifest = {"generator": str(Path(__file__).resolve().relative_to(ROOT)),
                 "rate": RATE,
                 "voices": {"void": {"engine": "kokoro", "preset": VOID_PRESET, "voice": preset["kokoro"],
                                     "kpitch": preset["kpitch"]},
-                           "you": {"engine": "piper", "voice": YOU_VOICE}},
+                           "you": {"engine": "piper", "voice": YOU_VOICE},
+                           "room": {"engine": "kokoro", "voice": SINGER, "sung": True}},
                 "clips": clips, "scenes": SCENES}
     (dest / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return {name: len(x) for name, x in audio.items()}
