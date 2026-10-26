@@ -181,9 +181,12 @@ class FastScenes(FreshRun):
                             you_only=SAID["interrupt_stop"])
         self.assertTrue(t.events, "the scene recorded no events at all")
         for e in t.events:
-            self.assertIn("at", e, f"event carries no scene time: {e}")
-            self.assertIsInstance(e["at"], (int, float), f"scene time is not seconds: {e}")
-            self.assertGreaterEqual(e["at"], 0.0, f"scene time before the scene's start: {e}")
+            self.assertIn("scene_at", e, f"event carries no scene time: {e}")
+            self.assertIsInstance(e["scene_at"], (int, float), f"scene time is not seconds: {e}")
+            self.assertGreaterEqual(e["scene_at"], 0.0, f"scene time before the scene's start: {e}")
+            if e.get("t") == "spk":      # the server's own `at` (ms, where in the playback) is left as it put it
+                self.assertIn("at", e, f"the spk event lost the server's own `at`: {e}")
+                self.assertNotEqual(e["at"], e["scene_at"], f"the scene stamp overwrote the server's `at`: {e}")
 
     @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
     def test_him_talking_alone_does_nothing(self):
