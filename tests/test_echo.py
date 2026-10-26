@@ -36,6 +36,9 @@ class Echo(unittest.TestCase):
         self.text = ""
         for p in (mock.patch.object(server, "speech_seconds", lambda pcm: 2.0),
                   mock.patch.object(server, "transcribe_pcm", lambda pcm, **kw: self.text),
+                  mock.patch.object(server, "transcribe_pcm_heard",
+                                    lambda pcm, **kw: server.Heard(text=self.text, logprob=-0.2, no_speech=0.02,
+                                                                   seconds=2.0)),
                   mock.patch.object(server.MicAuto, "learn", lambda pcm: None),
                   mock.patch.object(server.BUS, "pub", self.pub),
                   mock.patch.object(server.Speaker, "idle", classmethod(lambda cls: True))):
