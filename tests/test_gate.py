@@ -17,6 +17,7 @@ import tempfile
 import unittest
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -46,7 +47,6 @@ MODEL_DIR = suite_data.MODEL_DIR
 ENROLL = ["you_stop.wav", "you_hold_on.wav", "you_shut_up.wav", "you_hey_void.wav", "you_answer.wav"]
 OWNER = ["you_overlap.wav", "you_long_pauses.wav"]      # the owner, never enrolled
 MUSIC = "room_music.wav"
-WHYS = {"low confidence", "no speech", "not your voice", "kept"}
 
 
 def pcm(name):
@@ -70,6 +70,14 @@ def config(**over):
     return cfg
 
 
+def follow_up(clip, heard, voice, text=None):
+    """A follow-up burst of `clip`, all of it speech (so the speech share passes), with Whisper's `heard` (None: not
+    judged) and the voice score `voice` (None: not scored)."""
+    seconds = len(clip) / 32000
+    return gate.Burst(text=heard.text if text is None else text, heard=heard, speech=seconds, seconds=seconds,
+                      voice=voice, kind="follow", talking=False)
+
+
 @unittest.skipIf(server is None, f"server.py / voiceprint.py don't import here: {IMPORT_ERR}")
 class Gate(unittest.TestCase):
     @classmethod
@@ -88,16 +96,17 @@ class Gate(unittest.TestCase):
         self.assertIsNotNone(gate, f"app/gate.py doesn't import: {GATE_ERR}")
         self.assertTrue(self.vp.available, f"voiceprint unavailable: {self.vp.why}")
 
-    def judge(self, heard, voice, cfg=None):
-        v = gate.judge(heard, voice, config() if cfg is None else cfg)
+    def judge(self, b, cfg=None):
+        v = gate.judge(b, [], config() if cfg is None else cfg)
+        self.assertIsInstance(v, gate.Verdict)
         self.assertIsInstance(v.keep, bool)
-        self.assertIn(v.why, WHYS)
+        self.assertIn(v.why, gate.WHY)
         return v
 
     # ---- room music is dropped, the owner is kept
     def test_room_music_follow_up_is_dropped(self):
         clip = pcm(MUSIC)
-        v = self.judge(sure(clip), self.vp.score(clip))
+        v = self.judge(follow_up(clip, sure(clip), self.vp.score(clip)))
         self.assertFalse(v.keep, f"room music kept ({v.why})")
         self.assertEqual(v.why, "not your voice")
 
@@ -105,14 +114,14 @@ class Gate(unittest.TestCase):
         for n in OWNER:
             with self.subTest(n):
                 clip = pcm(n)
-                v = self.judge(sure(clip), self.vp.score(clip))
+                v = self.judge(follow_up(clip, sure(clip), self.vp.score(clip)))
                 self.assertTrue(v.keep, f"the owner's {n} dropped ({v.why})")
                 self.assertEqual(v.why, "kept")
 
-    def test_a_clip_whisper_heard_nothing_in_is_dropped(self):
-        v = self.judge(nothing(), None)
+    def test_a_clip_whisper_heard_nothing_in_is_dropped_as_noise(self):
+        v = self.judge(follow_up(pcm(MUSIC), nothing(), None))
         self.assertFalse(v.keep, "a clip with no kept segment was kept")
-        self.assertNotEqual(v.why, "kept")
+        self.assertEqual(v.why, "noise")
 
     # ---- the voice only counts once five clips are enrolled
     def test_confidence_alone_until_five_clips_are_enrolled(self):
@@ -120,20 +129,22 @@ class Gate(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             vp = voiceprint.Voiceprint(Path(d) / "voiceprint", MODEL_DIR)
             for i, n in enumerate(ENROLL[:5]):
-                v = self.judge(sure(clip), vp.score(clip))
+                v = self.judge(follow_up(clip, sure(clip), vp.score(clip)))
                 self.assertTrue(v.keep, f"room music dropped ({v.why}) with only {i} clips enrolled")
                 vp.enroll(pcm(n))
             self.assertEqual(vp.enrolled, 5)
-            v = self.judge(sure(clip), vp.score(clip))
+            v = self.judge(follow_up(clip, sure(clip), vp.score(clip)))
             self.assertFalse(v.keep, "room music kept with five clips enrolled")
 
     # ---- switched off in the config
-    def test_the_gate_switched_off_keeps_everything(self):
+    def test_the_gate_switched_off_keeps_an_unjudged_follow_up_but_not_nothing(self):
         clip = pcm(MUSIC)
         cfg = config(voice_gate=False)
-        for heard, voice in ((sure(clip), self.vp.score(clip)), (nothing(), None)):
-            v = self.judge(heard, voice, cfg)
-            self.assertTrue(v.keep, f"dropped ({v.why}) with voice_gate off")
+        v = self.judge(follow_up(clip, None, None, text="something was said here"), cfg)
+        self.assertTrue(v.keep, f"dropped ({v.why}) with voice_gate off")
+        v = self.judge(follow_up(clip, nothing(), None), cfg)
+        self.assertFalse(v.keep, "a clip with no kept segment kept with voice_gate off")
+        self.assertEqual(v.why, "noise")
 
 
 @unittest.skipIf(server is None, f"server.py / voiceprint.py don't import here: {IMPORT_ERR}")
@@ -260,6 +271,164 @@ class Homes(unittest.TestCase):
                 if fields:
                     hits.append(f"server.py:{n.lineno} compares {', '.join(sorted(fields))}")
         self.assertEqual(hits, [], "a segment filter or logprob comparison in server.py")
+
+
+KINDS = ("listen", "wake", "follow", "over", "peek")
+
+
+@unittest.skipIf(gate is None, f"app/gate.py doesn't import here: {GATE_ERR}")
+class SpokenEnough(unittest.TestCase):
+    """gate.spoken_enough: every kind needs MIN_SPEECH; every kind but "follow" also needs SPEECH_SHARE of the burst."""
+
+    def test_too_little_speech_is_not_enough_for_any_kind(self):
+        speech = gate.MIN_SPEECH * 0.9
+        for kind in KINDS:
+            with self.subTest(kind):
+                self.assertFalse(gate.spoken_enough(speech, speech, kind), f"{speech}s of speech enough for {kind}")
+
+    def test_enough_speech_and_share_is_enough_for_every_kind(self):
+        for kind in KINDS:
+            with self.subTest(kind):
+                self.assertTrue(gate.spoken_enough(gate.MIN_SPEECH, gate.MIN_SPEECH / gate.SPEECH_SHARE, kind))
+                self.assertTrue(gate.spoken_enough(1.0, 2.0, kind))
+
+    def test_a_small_share_is_enough_for_a_follow_up_only(self):
+        speech, seconds = 1.0, 1.0 / gate.SPEECH_SHARE * 2      # (half the share needed)
+        self.assertTrue(gate.spoken_enough(speech, seconds, "follow"), "a follow-up dropped for its speech share")
+        for kind in set(KINDS) - {"follow"}:
+            with self.subTest(kind):
+                self.assertFalse(gate.spoken_enough(speech, seconds, kind), f"{kind} kept at half the speech share")
+
+
+REQUEST = "please add milk to the shopping list"
+VOICE_MIN = 0.5
+
+
+def whisper(text=REQUEST, logprob=-0.2, no_speech=0.02):
+    """A follow-up's Whisper result, the fields gate reads off server.Heard."""
+    return SimpleNamespace(text=text, logprob=logprob, no_speech=no_speech, seconds=2.0)
+
+
+@unittest.skipIf(gate is None, f"app/gate.py doesn't import here: {GATE_ERR}")
+class Judge(unittest.TestCase):
+    """gate.judge runs its checks in a fixed order and returns at the first drop: speech share, echo, stop phrase,
+    noise, while talking, wake word, stray word, Whisper confidence, voiceprint."""
+
+    def burst(self, **over):
+        b = dict(text=REQUEST, heard=None, speech=2.0, seconds=3.0, voice=0.9, kind="follow", talking=False)
+        b.update(over)
+        if b["kind"] == "follow" and "heard" not in over:
+            b["heard"] = whisper(b["text"])
+        return gate.Burst(**b)
+
+    def judge(self, b, spoken=(), **cfg):
+        v = gate.judge(b, list(spoken), {"voice_gate": True, "voice_min": VOICE_MIN, **cfg})
+        self.assertIsInstance(v, gate.Verdict)
+        self.assertIn(v.why, gate.WHY)
+        return v
+
+    def dropped(self, v, why):
+        self.assertEqual((v.keep, v.why, v.act, v.rest), (False, why, "drop", ""))
+
+    def kept_follow_up(self, v, text):
+        self.assertEqual((v.keep, v.why, v.act, v.rest), (True, "kept", "follow", text))
+
+    # ---- the legacy bridge is gone
+    def test_the_old_follow_up_gate_is_gone(self):
+        self.assertFalse(hasattr(gate, "_follow_legacy"), "gate._follow_legacy is still there")
+
+    # ---- 1. speech share
+    def test_too_little_speech_is_dropped_for_every_kind(self):
+        for kind in KINDS:
+            with self.subTest(kind):
+                self.dropped(self.judge(self.burst(kind=kind, speech=gate.MIN_SPEECH * 0.9)), "no speech")
+
+    def test_a_small_share_drops_every_kind_but_a_follow_up(self):
+        speech, seconds = 1.0, 1.0 / gate.SPEECH_SHARE * 2
+        self.kept_follow_up(self.judge(self.burst(speech=speech, seconds=seconds)), REQUEST)
+        for kind in set(KINDS) - {"follow"}:
+            with self.subTest(kind):
+                self.dropped(self.judge(self.burst(kind=kind, speech=speech, seconds=seconds)), "no speech")
+
+    def test_speech_share_comes_before_echo(self):
+        v = self.judge(self.burst(speech=gate.MIN_SPEECH * 0.9), spoken=[REQUEST])
+        self.dropped(v, "no speech")
+
+    # ---- 2. echo
+    def test_his_own_voice_heard_back_is_dropped_as_echo(self):
+        said = "I have added milk to your shopping list"
+        self.dropped(self.judge(self.burst(text=said), spoken=[said]), "echo")
+
+    def test_echo_comes_before_noise(self):
+        said = "It is a pleasure to be here"
+        v = self.judge(self.burst(text=f"{said}. {said}"), spoken=[said, said])
+        self.dropped(v, "echo")
+
+    # ---- 4. noise
+    def test_empty_text_is_noise_whatever_the_voice(self):
+        for text in ("", " . "):
+            with self.subTest(repr(text)):
+                self.dropped(self.judge(self.burst(text=text, voice=0.99)), "noise")
+
+    def test_a_looping_sentence_is_noise_whatever_the_voice(self):
+        text = "It is a pleasure to be here. It is a pleasure to be here"
+        self.dropped(self.judge(self.burst(text=text, voice=0.99)), "noise")
+
+    def test_filler_without_the_owners_voice_is_noise(self):
+        for voice in (None, VOICE_MIN - 0.01):
+            with self.subTest(voice=voice):
+                self.dropped(self.judge(self.burst(text="Thank you.", voice=voice)), "noise")
+
+    def test_filler_in_the_owners_voice_is_not_noise(self):
+        v = self.judge(self.burst(text="Thank you.", voice=VOICE_MIN))
+        self.assertNotEqual(v.why, "noise", "the owner's own 'thank you' dropped as noise")
+
+    # ---- 5. while talking
+    def test_a_request_heard_while_he_talks_is_dropped(self):
+        self.dropped(self.judge(self.burst(kind="over", talking=True, voice=None)), "while talking")
+
+    def test_noise_comes_before_while_talking(self):
+        self.dropped(self.judge(self.burst(kind="over", talking=True, text="Um.", voice=None)), "noise")
+
+    # ---- 6. wake word
+    def test_a_wake_burst_without_hey_void_is_dropped(self):
+        self.dropped(self.judge(self.burst(kind="wake", voice=None)), "no wake word")
+
+    def test_a_wake_burst_with_hey_void_is_a_request(self):
+        v = self.judge(self.burst(kind="wake", voice=None, text="Hey Void, add milk to the list."))
+        self.assertEqual((v.keep, v.why, v.act), (True, "kept", "request"))
+        self.assertEqual(v.rest.strip(" .,!?"), "add milk to the list")
+
+    # ---- 7. stray word
+    def test_a_one_word_follow_up_is_a_stray_word_without_the_owners_voice(self):
+        for voice, on in ((None, True), (VOICE_MIN - 0.01, True), (0.99, False)):
+            with self.subTest(voice=voice, voice_gate=on):
+                self.dropped(self.judge(self.burst(text="Milk.", voice=voice), voice_gate=on), "stray word")
+
+    def test_a_one_word_follow_up_in_the_owners_voice_is_kept(self):
+        self.kept_follow_up(self.judge(self.burst(text="Milk.", voice=VOICE_MIN)), "Milk.")
+
+    def test_a_one_word_follow_up_in_the_owners_voice_still_needs_whispers_confidence(self):
+        b = self.burst(text="Milk.", voice=VOICE_MIN, heard=whisper("Milk.", logprob=gate.MIN_LOGPROB - 0.5))
+        self.dropped(self.judge(b), "low confidence")
+
+    # ---- 8. Whisper confidence
+    def test_a_follow_up_whisper_guessed_at_is_dropped(self):
+        b = self.burst(heard=whisper(logprob=gate.MIN_LOGPROB - 0.5))
+        self.dropped(self.judge(b), "low confidence")
+
+    def test_whisper_confidence_comes_before_the_voiceprint(self):
+        b = self.burst(voice=VOICE_MIN - 0.3, heard=whisper(logprob=gate.MIN_LOGPROB - 0.5))
+        self.dropped(self.judge(b), "low confidence")
+
+    # ---- 9. voiceprint
+    def test_a_follow_up_not_in_the_owners_voice_is_dropped(self):
+        self.dropped(self.judge(self.burst(voice=VOICE_MIN - 0.01)), "not your voice")
+
+    def test_a_follow_up_in_the_owners_voice_or_unscored_is_kept(self):
+        for voice in (VOICE_MIN, 0.99, None):
+            with self.subTest(voice=voice):
+                self.kept_follow_up(self.judge(self.burst(voice=voice)), REQUEST)
 
 
 if __name__ == "__main__":
