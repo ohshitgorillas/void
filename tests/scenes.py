@@ -12,12 +12,22 @@ earliest moment any of them waits for (ties go in that order). So a scene gives 
 machine is. Only the OS player, the OS mic and the synth are faked (and, with hear=False, the speech detector and
 Whisper): the speakers play what the fake player was handed, when it would play it, and the room is made from that.
 The scene's settings are pinned (SETTINGS), not read from your config file.
+
+The follow-up gate is on, judging with the real voiceprint (server.Voice), and the scene's "you" is its owner: each run
+starts with the print a run of Void would load from disk once you had said "hey Void" to him MIN_ENROLL times, built once
+per process by playing ENROL that many times through the real Wake.session, whose Wake.check enrolls each request
+(Voice.enroll). Void's voice and the room's music are never enrolled. Every run keeps its print in a folder of the
+harness's own, never in Void's data folder. Without the voiceprint model nothing is enrolled, and the gate judges on
+Whisper's confidence alone, as it does in Void then.
 """
+import atexit
 import collections
 import io
 import json
 import math
+import shutil
 import sys
+import tempfile
 import threading
 import time as _time
 import types
@@ -49,7 +59,9 @@ SETTINGS = {              # every setting Wake.session, Wake.check and Speaker r
     "mic_auto": False, "mic_device": "", "mic_cmd": "",         # (no mic levelling; the mic is faked)
     "echo_cancel": True, "voice_out": "auto",
     "language": "en", "whisper_beam": 5, "whisper_model": "base.en", "whisper_device": "cpu",   # (hear=True)
-}                         # (plus stt_hint: server's default, set in play)
+    "voice_gate": True,                                         # (follow-ups judged: Whisper's confidence, your voice)
+}                         # (plus stt_hint and voice_min: server's defaults, set in play)
+ENROL = "you_hey_void.wav"   # what you say to him to enroll your voice: "hey Void" and a request
 
 
 def clip(name: str) -> np.ndarray:
@@ -530,7 +542,7 @@ def _spectra(x):
 
 
 def _whisper(scene, clean, texts, void, you):
-    """Stand-in for server.transcribe_pcm: it makes out the words of whoever's voice the burst mostly sounds like.
+    """Stand-in for server.transcribe_pcm (and transcribe_pcm_heard, sure of whatever it made out): it makes out the words of whoever's voice the burst mostly sounds like.
     Finds where the burst sits on the scene's clock (it is a stretch of what Wake.session read), then, frame by frame,
     asks whose spectrum the burst's is most like there: your voice, Void's echo, or the music, as they reached the
     mic (spectra, not samples: the canceller's suppressor reshapes what it lets through, and hands it back a little
@@ -558,7 +570,12 @@ def _whisper(scene, clean, texts, void, you):
         won = [float(loud[(sims.argmax(0) == i) & (sims.max(0) > 0)].sum()) for i in range(len(votes))]
         texts_ = [v[1] for v in votes.values()]
         return texts_[int(np.argmax(won))] if max(won) > 0 else ""
-    return hear
+
+    def heard(pcm, **kw):
+        text = hear(pcm, **kw)
+        return _server().Heard(text=text, logprob=0.0 if text else -math.inf, no_speech=0.0 if text else 1.0,
+                            seconds=speech_seconds(pcm))
+    return hear, heard
 
 
 # ---------------------------------------------------------------- a scene
@@ -585,6 +602,8 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
     Scenes played one after another are one run of Void: whatever the app keeps across mic sessions in the process
     (a canceller kept warm) carries from one scene to the next. new_run() starts a fresh run."""
     server = _server()
+    if not _ours(server.Voice.PATH):                              # (never Void's own voiceprint)
+        _own_voice(server)
     S, W, P = server.Speaker, server.Wake, server.hearing.PlayRef
     lat, texts = S.LAT, _texts()
     switch_lat = lat if switch_lat is None else switch_lat
@@ -637,7 +656,7 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
         clean.append(first)
         return RecordedMic(m, clean), name, first
 
-    cfg = dict(SETTINGS, stt_hint=server.DEFAULTS["stt_hint"])
+    cfg = dict(SETTINGS, stt_hint=server.DEFAULTS["stt_hint"], voice_min=server.DEFAULTS["voice_min"])
     with ExitStack() as st:
         def patch(obj, name, value):
             st.enter_context(mock.patch.object(obj, name, value))
@@ -655,7 +674,9 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
         if not hear:
             patch(server, "speech_seconds", speech_seconds)
             patch(server, "last_speech_end", last_speech_end)
-            patch(server, "transcribe_pcm", _whisper(scene, clean, texts, void, you))
+            hear_text, hear_heard = _whisper(scene, clean, texts, void, you)
+            patch(server, "transcribe_pcm", hear_text)
+            patch(server, "transcribe_pcm_heard", hear_heard)
         for k, v in (("cv", SimCondition(sim)), ("todo", []), ("ready", []), ("making", False), ("gen", 0),
                      ("epoch", 0), ("proc", None), ("prate", None), ("t0", 0.0), ("written", 0), ("threads", []),
                      ("filled", False), ("stats", {})):
@@ -717,8 +738,62 @@ def _server():
 
 def new_run():
     """Start a fresh run of Void, as a fresh process would: `Canceller.forget()` drops the echo canceller the app
-    keeps across mic sessions. Scenes and tests call this so that none depends on which ran before it."""
-    _server().hearing.Canceller.forget()
+    keeps across mic sessions, and server.Voice drops the voiceprint it loaded and loads, from a file of this run's
+    own, your print as enrolled (_owner). Scenes and tests call this so that none depends on which ran before it."""
+    server = _server()
+    server.hearing.Canceller.forget()
+    _own_voice(server)
+
+
+_VOICE = types.SimpleNamespace(home=None, owner=None)   # the harness's voiceprint folder; your enrolled print (bytes)
+
+
+def _ours(path):
+    return _VOICE.home is not None and _VOICE.home in Path(path).parents
+
+
+def _fresh_voice(server):
+    """Point server.Voice at an empty voiceprint file in a folder of the harness's own (removed at exit), as a fresh
+    process: nothing loaded, nothing loading. → the file's path."""
+    V = server.Voice
+    if V.loader is not None and V.loader.is_alive():
+        V.loader.join()                                           # (a load in flight would land in the new run)
+    if _VOICE.home is None:
+        _VOICE.home = Path(tempfile.mkdtemp(prefix="void-scenes-"))
+        atexit.register(shutil.rmtree, _VOICE.home, True)
+    V.PATH = Path(tempfile.mkdtemp(dir=_VOICE.home)) / "voiceprint.npz"
+    V.vp = V.loader = V.tried = None
+    return V.PATH
+
+
+def _owner():
+    """Your voiceprint as Void keeps it on disk once you have said "hey Void" to him MIN_ENROLL times (b"": nothing
+    was enrolled, without the voiceprint model). Built once per process, in a run of its own: ENROL played that many
+    times with the real Wake.session listening, its Wake.check enrolling each request through Voice.enroll."""
+    if _VOICE.owner is None:
+        import voiceprint
+        server = _server()
+        path = _fresh_voice(server)
+        server.Voice.start().join()                               # (the model's there before you speak: no race)
+        server.hearing.Canceller.forget()
+        try:
+            for _ in range(voiceprint.MIN_ENROLL):
+                play(Room(), you=ENROL)
+        finally:
+            server.hearing.Canceller.forget()
+        vp = server.Voice.vp
+        if vp is not None and vp.available and vp.enrolled < voiceprint.MIN_ENROLL:
+            raise RuntimeError(f"only {vp.enrolled} of {voiceprint.MIN_ENROLL} \"hey Void\" requests enrolled your voice")
+        _VOICE.owner = path.read_bytes() if path.exists() else b""
+    return _VOICE.owner
+
+
+def _own_voice(server):
+    """server.Voice on a fresh file of the harness's own, holding your enrolled print."""
+    owner = _owner()
+    path = _fresh_voice(server)
+    if owner:
+        path.write_bytes(owner)
 
 
 def warm_up(room, void="void_question.wav"):
