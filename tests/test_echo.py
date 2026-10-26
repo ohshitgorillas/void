@@ -225,6 +225,13 @@ class Echo(unittest.TestCase):
         server.Wake.talking_until(time.monotonic() + 5)
         self.assertEqual([e.get("t") for e in self.burst("okay okay hold on a second")], ["barge"])
 
+    def test_stop_begun_while_talking_stops_him_after_his_sentence_ends(self):
+        # what the owner's log showed: "stop" over and over for 12 s, heard once his sentence had finished playing
+        now = time.monotonic()
+        server.Wake.talking_until(now - 1)
+        ev = self.burst("Stop, stop, stop, stop stop, stop Void stop, Void stop, Void, shut the", started=now - 12)
+        self.assertEqual([e.get("t") for e in ev], ["barge"])
+
     def test_stop_while_talking_stops_native_voice(self):
         server.Wake.talking_until(time.monotonic() + 5)
         stop = mock.Mock()
