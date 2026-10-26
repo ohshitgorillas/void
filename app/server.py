@@ -146,6 +146,8 @@ DEFAULTS = {
     # keep the mic at a level he hears well: turn the Windows mic level up when your voice comes in quiet, down when it
     # clips, and boost it himself past 100%
     "mic_auto": True,
+    # take his own voice out of the mic, so he doesn't hear himself as you (WebRTC's echo canceller, via livekit)
+    "echo_cancel": True,
     # ask GitHub twice a day whether a newer Void is out (nothing about you is sent) and offer "Update now"
     "update_check": True,
     # hold this anywhere to talk, let go to send (Windows watches it itself; on Linux bind `void ptt-down` / `ptt-up`)
