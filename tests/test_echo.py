@@ -13,6 +13,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import suite_data  # noqa: E402  (Void's data folder: the suite's own, set before server.py settles it)
+import fakes  # noqa: E402
 
 try:
     import server
@@ -43,12 +44,9 @@ class Echo(unittest.TestCase):
         self.addCleanup(server.SPOKEN.clear)
         self.pub = mock.Mock()
         self.text = ""
-        for p in (mock.patch.object(server, "speech_seconds", lambda pcm: 2.0),
-                  mock.patch.object(server, "transcribe_pcm", lambda pcm, **kw: self.text),
-                  mock.patch.object(server, "transcribe_pcm_heard",
-                                    lambda pcm, **kw: server.Heard(text=self.text, logprob=-0.2, no_speech=0.02,
-                                                                   seconds=2.0)),
-                  mock.patch.object(server.MicAuto, "learn", lambda pcm: None),
+        ears = fakes.ears(server, lambda pcm: self.text, lambda pcm: 2.0)
+        self.addCleanup(ears.close)
+        for p in (mock.patch.object(server.MicAuto, "learn", lambda pcm: None),
                   mock.patch.object(server.BUS, "pub", self.pub),
                   mock.patch.object(server.Speaker, "idle", classmethod(lambda cls: True))):
             p.start()
