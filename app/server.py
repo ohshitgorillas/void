@@ -1166,33 +1166,14 @@ RATE = 16000
 FRAME = RATE * 2 * 40 // 1000               # 40 ms of s16le mono = 1280 bytes
 
 
-class Floor:
-    """The room's noise level: the quiet end (20th percentile) of the last ~3 s. Steady background (music, a fan) lifts
-    it within seconds, and the pauses between words still count as quiet. `hold` skips a frame (you're talking)."""
-
-    def __init__(self):
-        self.h = collections.deque(maxlen=75)
-        self.v = 0.0
-
-    def update(self, rms, hold=False):
-        if not hold or not self.h:
-            self.h.append(rms)
-            self.v = sorted(self.h)[len(self.h) // 5]
-        return self.v
-
-
 def speech_span(pcm: bytes):
     """Where your voice is in `pcm`, for the voiceprint: (start, end) byte offsets, or None (no voice in it). A loud run
     counts once its level rises again, as a voice does and a chime (struck, then only dying away) never does, so the
     lead-in and the listening chime stay out of it. The one cut every enrolment and every follow-up's voice score uses."""
-    fl = Floor()
+    vo = hearing.Voicing(0.012, 3.0)
     voiced, run_at, rose, last_rms, said_from, said_to = 0, None, False, 0.0, None, None
     for at in range(0, len(pcm) - FRAME + 1, FRAME):
-        s = memoryview(pcm[at:at + FRAME]).cast("h")
-        rms = (sum(x * x for x in s) / len(s)) ** 0.5 / 32768.0 * MicAuto.soft
-        floor = fl.update(rms, hold=voiced >= 3)
-        thr = max(0.012, floor * 3.0)
-        voiced = min(4, voiced + 1) if rms > thr else max(0, voiced - 1)
+        rms, _floor, thr, voiced = vo.frame(pcm[at:at + FRAME], MicAuto.soft, hold=voiced >= 3)
         if rms <= thr:
             run_at, rose = None, False
         elif run_at is None:
@@ -1399,11 +1380,11 @@ class Listen:
         self.stop_ev.set()
 
     def run(self, emit):
+        vo = hearing.Voicing(0.012, 3.0)
         mic, name, buf = open_clean_mic()
         emit(t="open", rec=name)
         pcm = bytearray()
         t0 = time.monotonic()
-        fl = Floor()
         floor, spoke, voiced, last_voice, peak, clipped, clip_run = None, False, 0, t0, 0.0, 0, 0
         vad_at = vad_last = 0.0
         reason = "stop"
@@ -1412,9 +1393,8 @@ class Listen:
                 while len(buf) >= FRAME:
                     fr, buf = buf[:FRAME], buf[FRAME:]
                     pcm += fr
-                    n = len(fr) // 2
                     s = memoryview(fr).cast("h")
-                    rms = (sum(x * x for x in s) / n) ** 0.5 / 32768.0 * MicAuto.soft
+                    rms, floor, thr, voiced = vo.frame(fr, MicAuto.soft, hold=voiced >= 3)
                     peak = max(peak, rms)
                     # only sustained clipping counts (≥3 frames in a row): a key click or a bump is a one-frame spike
                     c = sum(1 for x in s if x > 32500 or x < -32500)
@@ -1422,9 +1402,6 @@ class Listen:
                     if clip_run >= 3:
                         clipped += c
                     now = time.monotonic()
-                    floor = fl.update(rms, hold=voiced >= 3)
-                    thr = max(0.012, floor * 3.0)
-                    voiced = min(4, voiced + 1) if rms > thr else max(0, voiced - 1)
                     if voiced >= 3:
                         if not spoke:
                             emit(t="speech")
@@ -1724,8 +1701,8 @@ class Wake:
 
     @classmethod
     def session(cls):
+        vo = hearing.Voicing(0.015, 3.2)
         mic, _name, buf = open_clean_mic()
-        fl = Floor()
         floor, voiced, seg, in_speech, last_voice, started = None, 0, bytearray(), False, 0.0, 0.0
         pre, n, vad_at, vad_last, peek_at = bytearray(), 0, 0.0, 0.0, 0.0
         heard_at, seg_at = time.monotonic(), 0.0     # when buf's last sample was caught · when seg's first was
@@ -1741,12 +1718,9 @@ class Wake:
                 while len(buf) >= FRAME:
                     fr, buf = buf[:FRAME], buf[FRAME:]
                     fr_end = heard_at - len(buf) / (RATE * 2)   # (when this frame's last sample was caught)
-                    s = memoryview(fr).cast("h")
-                    rms = (sum(x * x for x in s) / (len(fr) // 2)) ** 0.5 / 32768.0 * MicAuto.soft
                     # (his own voice, and the first seconds of yours, don't count as background)
-                    floor = fl.update(rms, hold=cls.speaking() or (in_speech and len(seg) < RATE * 2 * 4))
-                    thr = max(0.015, floor * 3.2)
-                    voiced = min(4, voiced + 1) if rms > thr else max(0, voiced - 1)
+                    rms, floor, thr, voiced = vo.frame(fr, MicAuto.soft,
+                                                       hold=cls.speaking() or (in_speech and len(seg) < RATE * 2 * 4))
                     now = time.monotonic()
                     if cls.cut:                          # clicked (finish now) / Space or Esc (drop it)
                         how, cls.cut = cls.cut, None
