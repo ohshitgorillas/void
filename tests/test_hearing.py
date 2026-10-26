@@ -2,17 +2,21 @@
 whatever rate the player itself runs at; and once the speakers are stopped, nothing after that moment plays.
 Canceller takes Void's own voice out of the mic against that record, leaving yours; off, or without livekit, it hands
 the mic back untouched and says so once.
+Speech-to-text hands back what was heard together with Whisper's confidence in it (Heard), while run_whisper still
+hands back just the text.
 
     python3 -m unittest tests.test_hearing -v
 """
 import array
 import contextlib
 import importlib
+import inspect
 import io
 import math
 import random
 import sys
 import unittest
+import wave
 from pathlib import Path
 from unittest import mock
 
@@ -484,6 +488,59 @@ class SessionsOpenTheCleanMicTest(unittest.TestCase):
         with self.assertRaises(Opened) as e:
             server.Wake.session()
         self.assertEqual(str(e.exception), "open_clean_mic")
+
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures" / "scenes"
+try:
+    import faster_whisper  # noqa: F401
+except Exception as e:  # noqa: BLE001
+    WHISPER_ERR = e
+else:
+    WHISPER_ERR = None
+
+
+def fixture(name):
+    """A committed scene clip as raw s16le 16 kHz mono."""
+    with wave.open(str(FIXTURES / name)) as w:
+        assert (w.getframerate(), w.getnchannels(), w.getsampwidth()) == (SR, 1, 2), name
+        return w.readframes(w.getnframes())
+
+
+@unittest.skipIf(server is None, f"server.py doesn't import here: {SERVER_ERR}")
+@unittest.skipIf(WHISPER_ERR is not None, f"faster-whisper doesn't import here: {WHISPER_ERR}")
+class HeardTest(unittest.TestCase):
+    """What was heard comes back with how sure Whisper was of it, on a real clip of you through real Whisper."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.patches = [mock.patch.dict(server.CFG, {"language": "en", "whisper_beam": 5, "whisper_model": "base.en",
+                                                    "whisper_device": "cpu"}),
+                       mock.patch.object(server, "_whisper", None), mock.patch.object(server, "_whisper_err", None)]
+        for p in cls.patches:
+            p.start()
+        cls.pcm = fixture("you_stop.wav")              # "Stop, stop, that's not what I asked for."
+
+    @classmethod
+    def tearDownClass(cls):
+        for p in reversed(cls.patches):
+            p.stop()
+
+    def test_transcribe_pcm_heard_gives_the_words_and_whispers_numbers(self):
+        heard = server.transcribe_pcm_heard(self.pcm)
+        self.assertIsInstance(heard, server.Heard)
+        self.assertIn("stop", heard.text.lower())
+        self.assertTrue(math.isfinite(heard.logprob) and heard.logprob <= 0.0, f"logprob {heard.logprob}")
+        self.assertTrue(0.0 <= heard.no_speech <= 1.0, f"no_speech {heard.no_speech}")
+        self.assertAlmostEqual(heard.seconds, server.speech_seconds(self.pcm), places=3)
+        self.assertGreater(heard.seconds, 1.0)
+
+    def test_run_whisper_keeps_its_signature_and_returns_the_heard_text(self):
+        audio = server.pcm_audio(self.pcm)
+        kw = {"beam": 5, "hint": "", "sure": True}
+        inspect.signature(server.run_whisper).bind(audio, **kw)       # callers' arguments still fit
+        text = server.run_whisper(audio, **kw)
+        self.assertIsInstance(text, str)
+        self.assertEqual(text, server.run_whisper_heard(audio, **kw).text)
 
 
 if __name__ == "__main__":
