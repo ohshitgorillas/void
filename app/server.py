@@ -29,6 +29,7 @@ import tempfile
 import threading
 import time
 import wave
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -1061,9 +1062,18 @@ def whisper():
         return _whisper
 
 
-def run_whisper(audio, beam=None, hint=None, sure=False) -> str:
-    """Transcribe; if the GPU path blows up at run time (missing CUDA libs etc.), drop to CPU for good.
-    `sure`: keep only what Whisper is fairly sure it heard (the always-on mic hears the room all day)."""
+@dataclass
+class Heard:
+    """What Whisper heard and how sure it was: the one place its confidence numbers come out (callers never read segments)."""
+    text: str
+    logprob: float        # mean avg_logprob over kept segments (-inf when none)
+    no_speech: float      # max no_speech_prob over kept segments (1.0 when none)
+    seconds: float        # speech_seconds of the clip
+
+
+def run_whisper_heard(audio, beam=None, hint=None, sure=False) -> Heard:
+    """Transcribe, with Whisper's confidence; if the GPU path blows up at run time (missing CUDA libs etc.), drop to CPU
+    for good. `sure`: keep only what Whisper is fairly sure it heard (the always-on mic hears the room all day)."""
     global _whisper
 
     def go():
@@ -1072,14 +1082,18 @@ def run_whisper(audio, beam=None, hint=None, sure=False) -> str:
             vad_filter=True, vad_parameters={"min_silence_duration_ms": 600, "speech_pad_ms": 300},
             condition_on_previous_text=False, initial_prompt=(hint if hint is not None else CFG.get("stt_hint")) or None,
             no_speech_threshold=0.5)
+        segs = list(segs)                                          # segments are lazy: errors surface here
         if sure:     # (a guess at noise: low log-prob, the same few words looping, or "probably nobody talking")
             segs = [s for s in segs if s.avg_logprob >= -1.0 and s.compression_ratio <= 2.4
                     and not (s.no_speech_prob > 0.6 and s.avg_logprob < -0.5)]
-        out = " ".join(s.text.strip() for s in segs).strip()      # segments are lazy: errors surface here
+        out = " ".join(s.text.strip() for s in segs).strip()
         # whisper sometimes "hears" the hint or filler on near-silence
         if out.strip(" .").lower() in ("", "you", "thank you", "thanks for watching", "bye"):
-            return ""
-        return out
+            out, segs = "", []
+        return Heard(text=out,
+                     logprob=sum(s.avg_logprob for s in segs) / len(segs) if segs else float("-inf"),
+                     no_speech=max((s.no_speech_prob for s in segs), default=1.0),
+                     seconds=_speech_seconds(audio))
     try:
         return go()
     except Exception as e:  # noqa: BLE001
@@ -1089,6 +1103,11 @@ def run_whisper(audio, beam=None, hint=None, sure=False) -> str:
         with _whisper_lock:
             _whisper = _load("cpu")
         return go()
+
+
+def run_whisper(audio, beam=None, hint=None, sure=False) -> str:
+    """Transcribe to text alone (see run_whisper_heard)."""
+    return run_whisper_heard(audio, beam=beam, hint=hint, sure=sure).text
 
 
 def pcm_audio(pcm: bytes):
@@ -1102,18 +1121,28 @@ def pcm_audio(pcm: bytes):
     return audio
 
 
+def transcribe_pcm_heard(pcm: bytes, **kw) -> Heard:
+    """Raw s16le 16 kHz mono → what was heard, with Whisper's confidence."""
+    if len(pcm) < 16000 * 2 * 0.3:          # < 0.3 s: nothing worth sending
+        return Heard(text="", logprob=float("-inf"), no_speech=1.0, seconds=0.0)
+    return run_whisper_heard(pcm_audio(pcm), **kw)
+
+
 def transcribe_pcm(pcm: bytes, **kw) -> str:
     """Raw s16le 16 kHz mono → text."""
-    if len(pcm) < 16000 * 2 * 0.3:          # < 0.3 s: nothing worth sending
-        return ""
-    return run_whisper(pcm_audio(pcm), **kw)
+    return transcribe_pcm_heard(pcm, **kw).text
+
+
+def _speech_seconds(audio) -> float:
+    """How many seconds of `audio` (pcm_audio's float32) Whisper's speech detector thinks are someone talking."""
+    from faster_whisper.vad import VadOptions, get_speech_timestamps
+    ts = get_speech_timestamps(audio, VadOptions(min_silence_duration_ms=300))
+    return sum(t["end"] - t["start"] for t in ts) / 16000
 
 
 def speech_seconds(pcm: bytes) -> float:
     """How many seconds of `pcm` (s16le 16 kHz mono) Whisper's speech detector thinks are someone talking."""
-    from faster_whisper.vad import VadOptions, get_speech_timestamps
-    ts = get_speech_timestamps(pcm_audio(pcm), VadOptions(min_silence_duration_ms=300))
-    return sum(t["end"] - t["start"] for t in ts) / 16000
+    return _speech_seconds(pcm_audio(pcm))
 
 
 def level_db(pcm: bytes) -> float:
