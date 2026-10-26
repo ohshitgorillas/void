@@ -1384,6 +1384,9 @@ class Listen:
         fl = Floor()
         floor, spoke, voiced, last_voice, peak, clipped, clip_run = None, False, 0, t0, 0.0, 0, 0
         vad_at = vad_last = 0.0
+        # where your voice is in `pcm`, for the voiceprint: a loud run counts once its level rises again, as a voice does
+        # and a chime (struck, then only dying away) never does, so the lead-in and the listening chime stay out of it
+        run_at, rose, last_rms, said_from, said_to = None, False, 0.0, None, None
         reason = "stop"
         try:
             while True:
@@ -1403,6 +1406,17 @@ class Listen:
                     floor = fl.update(rms, hold=voiced >= 3)
                     thr = max(0.012, floor * 3.0)
                     voiced = min(4, voiced + 1) if rms > thr else max(0, voiced - 1)
+                    if rms <= thr:
+                        run_at, rose = None, False
+                    elif run_at is None:
+                        run_at = len(pcm) - len(fr)
+                    else:
+                        rose = rose or rms > last_rms * 1.25
+                    last_rms = rms
+                    if voiced >= 3 and rose and said_from is None:
+                        said_from = run_at
+                    if said_from is not None and rms > thr * 0.6:
+                        said_to = len(pcm)
                     if voiced >= 3:
                         if not spoke:
                             emit(t="speech")
@@ -1465,8 +1479,15 @@ class Listen:
             emit(t="cancel", why="echo")
             return
         emit(t="text", text=text)
-        if learned:
-            Voice.enroll(bytes(pcm))             # (beside MicAuto.learn: once it's known to be your request, not echo)
+        # teach him your voice only from a request in words (not nothing, noise or filler; echo is out above), and only
+        # from the stretch you were talking in
+        if learned and not is_noise(text) and said_from is not None:
+            vp = Voice.get()
+            if vp is not None and vp.available:
+                said = bytes(pcm[said_from:said_to])
+                print(f"[void] voiceprint enrolling {len(said) / (RATE * 2):.1f}s of your speech: {text.strip()[:80]}",
+                      file=sys.stderr)
+                Voice.enroll(said)
 
 
 def reset_whisper():
