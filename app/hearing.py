@@ -106,23 +106,43 @@ class PlayRef:
 class Canceller:
     """Takes Void's own voice out of the mic: livekit's WebRTC echo canceller, against what PlayRef says played.
 
-    One per mic session (it keeps the canceller's adaptive state). The APM takes exact 10 ms frames, so mic audio
-    is gathered into them: whatever's left over (< 10 ms) waits for the next chunk, and the first time a chunk can't
-    be answered in full the shortfall is made up once with silence in front, so the output runs at most 159 samples
-    behind from then on (20 ms chunks never add any). Each frame's reference is PlayRef's span for the same moment,
-    fed just before the frame, so the stream delay is 0 and the canceller's own estimator only finds the room's.
+    One Canceller per mic session, but one APM per process: the canceller's adaptive state (what it has learnt of the
+    room) is kept in `Canceller.kept` (by the rtc module that built it) and shared by every session after the first, so a session opened while Void is
+    already talking cancels him from its first frame instead of learning the room again. A mic or speaker device
+    change means it re-learns as it goes. `Canceller.forget()` drops it, as a fresh process would start.
+    `process` holds `Canceller.lock` throughout, so two sessions open at once never drive the shared APM together.
+    A session's first audio is preceded by the PRIME × 10 ms of what played just before it, against a silent mic:
+    without that the APM has none of the echo already in flight when the session opens (the room's delay and
+    tail), and a session opened partway into his voice let most of its first 100 ms through.
+    The APM takes exact 10 ms frames, so mic audio is gathered into them: whatever's left over (< 10 ms) waits for
+    the next chunk, and the first time a chunk can't be answered in full the shortfall is made up once with silence
+    in front, so the framing puts the output at most 159 samples behind (20 ms chunks never add any); the APM adds
+    128 of its own, so measured end to end the output runs at most 287 samples (18 ms) behind the mic, with a first
+    chunk of 159 samples, and 128 when the first chunk is whole frames. Each frame's reference is PlayRef's span
+    for the same moment, fed just before the frame, so the stream delay is 0 and the canceller's own estimator only finds the room's.
     Echo cancelling and the high-pass filter (which AEC3 expects) are on; noise suppression and gain control
     are off, so your voice reaches whisper and the mic levelling as it was. Off, or without livekit, it hands the
     mic back untouched; `available` says which, `on` whether echo_cancel asked for it, and `why` why not (said
     once per process)."""
     F = SR // 100                                                 # the APM's 10 ms frame, in samples
     said = set()
+    PRIME = 10                                                    # 10 ms frames of what played fed in before a session
+    kept = {}                                                     # the process's one APM, warm across sessions, by
+                                                                  # the livekit rtc module that built it
+    lock = threading.Lock()                                       # one session at a time drives the shared APM
+
+    @classmethod
+    def forget(cls) -> None:
+        """Drop the kept APM, as a fresh process would start: the next Canceller learns the room from nothing."""
+        cls.kept.clear()
 
     def __init__(self, on: bool = True):
         self.apm, why = None, "echo_cancel is off" if not on else f"livekit doesn't load ({RTC_ERR})" if rtc is None else ""
         if not why:
             try:
-                self.apm = rtc.AudioProcessingModule(echo_cancellation=True, high_pass_filter=True)
+                if rtc not in Canceller.kept:
+                    Canceller.kept[rtc] = rtc.AudioProcessingModule(echo_cancellation=True, high_pass_filter=True)
+                self.apm = Canceller.kept[rtc]
             except Exception as e:  # noqa: BLE001
                 why = f"livekit's echo canceller doesn't start ({e})"
         self.on, self.available, self.why = on, self.apm is not None, why
@@ -130,23 +150,31 @@ class Canceller:
             Canceller.said.add(why)
             print(f"[void] not cancelling his echo: {why}; the mic goes through as it is", file=sys.stderr)
         self.buf, self.out = b"", b""                             # mic not yet framed; cleaned audio not yet handed back
+        self.fresh = True                                         # nothing of this session processed yet
 
     def process(self, mic: bytes, at: float) -> bytes:            # 16 kHz s16le mono captured from `at`; same length back
         if self.apm is None:
             return mic
-        t = at - len(self.buf) / 2 / SR                           # when the waiting leftover was captured
-        self.buf += mic
-        B, done = 2 * self.F, []
-        for i in range(0, len(self.buf) - B + 1, B):
-            ref = rtc.AudioFrame(bytearray(PlayRef.span(t + i / 2 / SR, self.F)), SR, 1, self.F)
-            frame = rtc.AudioFrame(bytearray(self.buf[i:i + B]), SR, 1, self.F)
-            self.apm.process_reverse_stream(ref)
-            self.apm.set_stream_delay_ms(0)
-            self.apm.process_stream(frame)
-            done.append(frame.data.tobytes())
-        k = len(self.buf) // B * B
-        self.buf, self.out = self.buf[k:], self.out + b"".join(done)
-        if len(self.out) < len(mic):                              # (only ever once, and < 10 ms)
-            self.out = bytes(len(mic) - len(self.out)) + self.out
-        got, self.out = self.out[:len(mic)], self.out[len(mic):]
-        return got
+        with Canceller.lock:
+            t = at - len(self.buf) / 2 / SR                           # when the waiting leftover was captured
+            B, done = 2 * self.F, []
+            if self.fresh:                                            # a session's first audio: what's already in flight
+                self.fresh = False
+                for j in range(self.PRIME, 0, -1):
+                    self.apm.process_reverse_stream(rtc.AudioFrame(bytearray(PlayRef.span(t - j * self.F / SR, self.F)), SR, 1, self.F))
+                    self.apm.set_stream_delay_ms(0)
+                    self.apm.process_stream(rtc.AudioFrame(bytearray(2 * self.F), SR, 1, self.F))
+            self.buf += mic
+            for i in range(0, len(self.buf) - B + 1, B):
+                ref = rtc.AudioFrame(bytearray(PlayRef.span(t + i / 2 / SR, self.F)), SR, 1, self.F)
+                frame = rtc.AudioFrame(bytearray(self.buf[i:i + B]), SR, 1, self.F)
+                self.apm.process_reverse_stream(ref)
+                self.apm.set_stream_delay_ms(0)
+                self.apm.process_stream(frame)
+                done.append(frame.data.tobytes())
+            k = len(self.buf) // B * B
+            self.buf, self.out = self.buf[k:], self.out + b"".join(done)
+            if len(self.out) < len(mic):                              # (only ever once, and < 10 ms)
+                self.out = bytes(len(mic) - len(self.out)) + self.out
+            got, self.out = self.out[:len(mic)], self.out[len(mic):]
+            return got

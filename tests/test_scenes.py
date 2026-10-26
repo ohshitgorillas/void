@@ -1,6 +1,8 @@
 """Scenes replayed through a simulated room into the real mic path: Void talks through the speakers, you talk into the
-room, and Wake.session listens through open_clean_mic. At least 25 dB of Void's echo is removed; your speech after
-Void stops is kept within about 3 dB; with the canceller missing, the mic is passed through unchanged.
+room, and Wake.session listens through open_clean_mic. Once Void has spoken through the clean mic in this run, at least
+25 dB of his echo is removed, from the first second of every later mic session on; your speech after Void stops is
+kept within about 3 dB; with the canceller missing, the mic is passed through unchanged. Every test starts a fresh run
+of Void (scenes.new_run), so none depends on which ran before it.
 
 Fast tier (always runs; speech detection and Whisper stood in for):
     ~/.local/share/void/venv/bin/python -m unittest tests.test_scenes
@@ -48,6 +50,9 @@ SETTLE = 1.0                # seconds the canceller has to learn the room before
 TAIL = 0.1                  # and his echo is measured this far past his voice's end (the room's reflections)
 AFTER = 0.5                 # you answer this long after his voice stops
 SWITCH = 3.0                # the speakers change this long after his voice starts
+DELAYS = (0.010, 0.020, 0.030, 0.040)   # speakers this far off Speaker.LAT: the range real hardware lands in
+FIRST = 1.0                 # the first this-many seconds of every warm mic session must already have his echo out
+MID_VOICE = 2.0             # a session that opens while he is already talking opens this far into his voice
 
 
 def seconds(name):
@@ -70,11 +75,19 @@ def level_db(x):
     return 10 * math.log10(p) if p > 0 else -math.inf
 
 
+class FreshRun(unittest.TestCase):
+    """Each test starts, and leaves behind, a fresh run of Void: no canceller kept from another test's scenes."""
+    def setUp(self):
+        scenes.new_run()
+        self.addCleanup(scenes.new_run)
+
+
 @unittest.skipIf(server is None, f"server.py doesn't import here: {IMPORT_ERR}")
-class FastScenes(unittest.TestCase):
+class FastScenes(FreshRun):
     @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
     def test_removes_at_least_25_db_of_his_echo(self):
         sc = SCENES["void_alone"]
+        scenes.warm_up(scenes.Room())                              # (he has already spoken in this run)
         t = scenes.play(scenes.Room(), void=sc["void"])
         start = None if t.void_start is None else t.void_start + SETTLE
         n = seconds(sc["void"]) - SETTLE + TAIL
@@ -102,6 +115,20 @@ class FastScenes(unittest.TestCase):
         removed = level_db(window(t.raw, t.switched, n)) - level_db(window(t.clean, t.switched, n))
         self.assertGreaterEqual(removed, ECHO_REMOVED_DB,
                                 f"only {removed:.1f} dB of Void's echo removed after the speakers changed")
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_removes_at_least_25_db_of_his_echo_in_the_first_second_of_every_session_once_he_has_spoken(self):
+        sc = SCENES["void_alone"]
+        for delay in DELAYS:
+            for mic_at, when in ((0.0, "as his voice starts"), (MID_VOICE, f"{MID_VOICE} s into his voice")):
+                with self.subTest(delay=delay, opens=when):
+                    scenes.new_run()
+                    scenes.warm_up(scenes.Room(delay=delay))       # (he has spoken through the clean mic in this run)
+                    t = scenes.play(scenes.Room(delay=delay), void=sc["void"], mic_at=mic_at)
+                    removed = level_db(window(t.raw, t.mic_from, FIRST)) - level_db(window(t.clean, t.mic_from, FIRST))
+                    self.assertGreaterEqual(removed, ECHO_REMOVED_DB,
+                                            f"only {removed:.1f} dB of Void's echo removed in the first {FIRST} s of a "
+                                            f"later mic session in the run, opened {when}, speakers {delay * 1000:.0f} ms off Speaker.LAT")
 
     def test_passes_the_mic_through_unchanged_without_the_canceller(self):
         sc = SCENES["interrupt_stop"]
@@ -145,7 +172,7 @@ def instead(t, log):
 @unittest.skipUnless(os.environ.get("VOID_SCENES") == "1", "slow tier: set VOID_SCENES=1")
 @unittest.skipIf(server is None, f"server.py doesn't import here: {IMPORT_ERR}")
 @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
-class SlowScenes(unittest.TestCase):
+class SlowScenes(FreshRun):
     def test_void_talking_alone_produces_nothing(self):
         t, log = heard(SCENES["void_alone"])
         self.assertEqual(did(t), [], f"Void acted on his own voice:{instead(t, log)}")
