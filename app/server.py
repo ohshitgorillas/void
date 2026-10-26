@@ -1833,6 +1833,7 @@ class Wake:
         follow = not cls.speaking() and cls.follow_from <= started < cls.follow_until
         # began while he talked / in his echo: may be his voice (is_echo below) or you answering over him
         over = cls.speaking() or started < cls.speaking_until + ECHO_TAIL
+        during = over                            # (kept: "stop" begun over him counts even once his sentence has ended)
         if over and cls.ran_on(started, ended):   # …but it ran on long after: your turn, as a follow-up
             follow, over = True, False
         gated = follow and not over and CFG.get("voice_gate", True)
@@ -1864,13 +1865,13 @@ class Wake:
 
         def log(what):                           # (what it heard, so the next missed turn shows in the log)
             print(f"[void] {what}: {said[:80]}", file=sys.stderr)
-        if is_noise(said) and not (cls.speaking() and STOP_IN_RE.search(said.lower())):
+        if is_noise(said) and not (during and STOP_IN_RE.search(said.lower())):
             # nothing, filler, or one phrase looping: the room, not you (but "Stop, stop" over him is you stopping him)
             if said:
                 log("dropped as noise")
             return
         low = said.lower()
-        if cls.speaking() and (m or STOP_RE.fullmatch(low) or STOP_IN_RE.search(low)):
+        if (cls.speaking() and (m or STOP_RE.fullmatch(low))) or (during and STOP_IN_RE.search(low)):
             log("barge-in: you told him to stop")
             if not Speaker.idle():
                 Speaker.stop()                   # (also hushes us)
