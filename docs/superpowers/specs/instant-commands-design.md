@@ -58,6 +58,12 @@ def run(argv: list[str], timeout: float = 10, env: dict | None = None, cwd: str 
     # at the timeout the whole group is killed with kill_tree
 def spawn(argv: list[str], env: dict | None = None, cwd: str | None = None): ...
     # -> subprocess.Popen | None: detached (own group, stdio to DEVNULL), not waited on; None when it can't start
+def shell_argv(line: str) -> list[str]: ...
+    # the argv that runs a command line: ["/bin/sh", "-c", line];
+    # Windows: ["powershell", "-NoProfile", "-NonInteractive", "-Command", line]
+def quote(value: str) -> str: ...
+    # value as one word of the shell shell_argv runs: shlex.quote on POSIX; on Windows a PowerShell
+    # single-quoted string, each ' doubled
 ```
 
 Replaces `quick._run` (`app/quick.py:39`), `macsys._run` (`app/macsys.py:22`), the detached Popens at
@@ -114,33 +120,42 @@ the wiring globals (`app/quick.py:28-31`) stay.
 `app/commands.py` (new): the owner's own voice commands, and the one dispatch of every instant command.
 
 ```python
+import re
 from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Command:
-    name: str                 # shown in Settings and in the log line
-    say: tuple[str, ...]      # phrases, spoken.normalize()d at load; () for an override only
-    replaces: str             # a quick.INTENTS name, or ""
-    run: tuple[str, ...]      # argv, no shell; "{field}" filled from the intent's args (only replaces' fields)
-    reply: str                # said on success; "{out}" is the command's stdout, first 300 chars; default "Done."
-    wait: bool                # True (default): run to the end and report; False: procs.spawn and reply at once
-    timeout: float            # seconds when wait, default 10, clamped to 1-60
+    name: str                       # shown in Settings, in the failure reply and in the log line
+    say: tuple[str, ...]            # exact phrases, spoken.normalize()d at load
+    match: tuple[re.Pattern, ...]   # regular expressions, compiled at load, each full-matched against the
+                                    # normalize()d request; their named groups fill {field}s
+    replaces: str                   # a quick.INTENTS name, or ""
+    run: str                        # a command line, run by the shell procs.shell_argv names; each "{field}" is
+                                    # filled with procs.quote(value), so a value from speech is one word
+    reply: str                      # said on success; "{out}" is the command's stdout, first 300 chars; default "Done."
+    wait: bool                      # True (default): run to the end and report; False: procs.spawn and reply at once
+    timeout: float                  # seconds when wait, default 10, clamped to 1-60
 
 def load(cfg: dict) -> tuple[list[Command], list[str]]: ...
-    # cfg["voice_commands"] -> (the commands, one "why" per entry skipped). An entry is skipped when:
-    # run is not a non-empty list of strings; it has neither say nor replaces; replaces is not in quick.INTENTS;
-    # a {field} is not one of replaces' fields; a phrase or a replaces is already taken by an earlier entry
-def find(t: str, cmds: list[Command]) -> Command | None: ...
-    # the command one of whose phrases equals t exactly (t is spoken.normalize()d)
+    # cfg["voice_commands"] -> (the commands, one "why" per entry skipped). A command may carry any of say, match
+    # and replaces at once. An entry is skipped when: run is not a non-empty string; it has none of say, match
+    # and replaces; a pattern does not compile; replaces is not in quick.INTENTS; a {field} is not filled on every
+    # route the entry has (an exact phrase fills none; each pattern must name it as a group; replaces must list
+    # it among its INTENTS fields); a phrase, a pattern or a replaces is already taken by an earlier entry
+def find(t: str, cmds: list[Command]) -> tuple[Command, dict] | None: ...
+    # t is spoken.normalize()d. First a command one of whose phrases equals t, with {}; else the first
+    # command, in entry order, one of whose patterns full-matches t, with that match's named groups
 def override(intent: "quick.Intent", cmds: list[Command]) -> Command | None: ...
 def run(cmd: Command, args: dict | None = None) -> dict: ...
-    # argv[0] ~-expanded and looked up on the server's PATH; fields filled; procs.run or procs.spawn.
-    # -> {"say", "mood", "sfx"?}: success says cmd.reply; not found says "I can't find <argv[0]>.";
-    # failure says "<argv[0]> didn't work" plus the first line of Ran.err. One stderr line per run:
-    # "[void] command <name>: <ok | exit n | timed out | not found>: <err tail>"
+    # fields filled; procs.run(procs.shell_argv(line), cmd.timeout) or procs.spawn(procs.shell_argv(line)).
+    # -> {"say", "mood", "sfx"?}: success says cmd.reply; failure (a non-zero exit, a timeout, or a spawn that
+    # can't start) says "<name> didn't work" plus the first line of Ran.err. One stderr line per run:
+    # "[void] command <name>: <ok | exit n | timed out | can't start>: <err tail>"
 def handle(text: str, cfg: dict) -> dict | None: ...
-    # t = spoken.normalize(text); "" -> None. Then, in order: find(t) -> run; recall.answer(text) ->
-    # {"say": answer, "mood": "happy"}; quick.match(t) -> run(override, intent.args) if override else quick.act
+    # t = spoken.normalize(text); "" -> None. Then, in order: find(t) -> run(cmd, groups);
+    # recall.answer(text) -> {"say": answer, "mood": "happy"}; quick.match(t) -> run(override, intent.args)
+    # if override else quick.act. The first that answers ends the dispatch: an owner's command, override or
+    # not, answers with run's reply whether it worked or failed, and nothing after it is tried
 ```
 
 `app/server.py` (changed): wiring only.
@@ -156,16 +171,18 @@ A config entry, as the owner writes it in `config.json` or the Settings editor s
 
 ```json
 "voice_commands": [
-  {"name": "Roon pause", "replaces": "media.pause", "run": ["roonctl", "pause"], "reply": "Paused."},
-  {"name": "Roon what", "replaces": "media.what", "run": ["roonctl", "now-playing"], "reply": "That's {out}."},
-  {"name": "Projector", "say": ["projector on", "turn on the projector"], "run": ["/Users/atom/bin/projector", "on"]}
+  {"name": "Roon pause", "replaces": "media.pause", "run": "roonctl pause", "reply": "Paused."},
+  {"name": "Roon what", "replaces": "media.what", "run": "roonctl now-playing | head -1", "reply": "That's {out}."},
+  {"name": "Roon volume", "replaces": "volume.set", "match": ["roon volume (?P<n>\\d+)"], "run": "roonctl volume {n}"},
+  {"name": "Projector", "say": ["projector on", "turn on the projector"], "run": "~/bin/projector on"}
 ]
 ```
 
-The server reads `config.json` once at start (`app/server.py:258`), so a hand edit takes effect after `void restart`.
-A Settings save takes effect at once through `save_config` (`app/server.py:2781`). Whether `/opt/homebrew/bin` is on
-the server's PATH when the LaunchAgent starts it (`app/server.py:485`) is unmeasured. `docs/GUIDE.md` tells the owner
-to give an absolute path when the name alone isn't found.
+The owner edits `voice_commands` both ways: by hand in `config.json`, and in the Settings editor. The server reads
+`config.json` once at start (`app/server.py:258`), so a hand edit takes effect after `void restart`. A Settings save
+takes effect at once through `save_config` (`app/server.py:2781`). Whether `/opt/homebrew/bin` is on the server's PATH
+when the LaunchAgent starts it (`app/server.py:485`) is unmeasured. `docs/GUIDE.md` tells the owner to give an absolute
+path when the name alone isn't found, and to double each backslash of a pattern written by hand in JSON.
 
 ## Homes
 
@@ -175,9 +192,10 @@ to give an absolute path when the name alone isn't found.
 | Starting a detached helper | `procs.spawn` | `Popen(..., DEVNULL, start_new_session=True)` outside `procs` |
 | Process groups, stopping them | `procs.own_group_kw`, `procs.kill_tree`, `procs.stop_group` | `os.killpg`, `taskkill`, creationflags `0x200` outside `procs` |
 | A child's UTF-8 locale | `procs.utf8_env` | setting `LANG` for a child anywhere else |
+| Running a command line through a shell, and quoting a value into one | `procs.shell_argv`, `procs.quote` | `shell=True`, `sh -c` or `powershell -Command` built outside `procs`, other than `winsys.ps` (`app/winsys.py:22`); a value filled into a command line without `procs.quote` |
 | Reading a request before matching | `spoken.normalize` | stripping the wake word, "please" or "can you" in Python anywhere else |
 | Built-in instant actions and their names | `quick.INTENTS`, `quick.match`, `quick.act` | a built-in matcher outside `quick`; an intent name not in `INTENTS` |
-| The owner's commands: shape, validation, lookup, running | `commands` (`load`, `find`, `override`, `run`) | reading `cfg["voice_commands"]` except through `commands.load`; storing an entry `load` rejects |
+| The owner's commands: shape, validation, phrase and pattern lookup, running | `commands` (`load`, `find`, `override`, `run`) | reading `cfg["voice_commands"]` except through `commands.load`; compiling an owner's pattern anywhere else; storing an entry `load` rejects |
 | Which instant handler answers, in what order | `commands.handle` | the server choosing between `recall`, the user commands and `quick` itself (`app/server.py:3920-3923`) |
 | The `voice_commands` default | `server.DEFAULTS` | a second default for it |
 | The instant reply shape `{"say","mood","sfx"?,"cd"?}` | `app/quick.py:3-4` | a reply key the page does not read (`app/static/index.html:2147`) |
@@ -205,7 +223,8 @@ Each step has one done-check and one commit. `implementer` writes `app/` and `do
    `act(match(spoken.normalize(text)))` until step 10. Path: `app/quick.py`. Agent: `implementer`. Done: suite green.
 8. Null stubs of `commands`, exactly as in **Modules**. Path: `app/commands.py`. Agent: `implementer`. Done: imports;
    suite green.
-9. Tests of `commands` behavior: loading and its skip reasons, phrase lookup, overrides, running, the dispatch order.
+9. Tests of `commands` behavior: loading and its skip reasons, phrase and pattern lookup, overrides, running a
+   command line with its fields filled, a failed command's reply, the dispatch order.
    Path: `tests/test_commands.py`. Agent: `test-writer`. Done: the new tests fail on the stubs; the rest stays green.
 10. `commands` bodies; the server wiring in **Modules**; `quick.handle` removed; the GUIDE's "Things he does
     instantly" (`docs/GUIDE.md:62-79`) and config table (`docs/GUIDE.md:238-260`) describe `voice_commands`. Paths:
@@ -215,29 +234,20 @@ Each step has one done-check and one commit. `implementer` writes `app/` and `do
 11. A page test of the Settings editor: a command added there is saved through `/api/settings` and listed back; a
     rejected entry shows its why. Path: `tests/test_page_commands.py`. Agent: `test-writer`. Done: the test fails on
     the current page; the other page tests stay green.
-12. The editor in Settings → Brain, beside projects (`app/static/index.html:2706-2708`): name, phrases, an override
-    picker filled from `INTENTS`, the command, the reply; errors from `voice_command_errors`. Path:
+12. The editor in Settings → Brain, beside projects (`app/static/index.html:2706-2708`): name, phrases, patterns, an
+    override picker filled from `INTENTS`, the command line, the reply; errors from `voice_command_errors`. Path:
     `app/static/index.html`. Agent: `implementer`. Done: step 11's test and the other page tests green.
 
 ## Decisions for the owner
 
-1. **How a phrase matches.** Recommend exact phrases, several per command, compared after `spoken.normalize`.
-   Alternative: regular expressions whose named groups fill `{field}`s in the command. Cost of the recommendation: a
-   phrase carries no value ("roon volume forty" needs one entry per value), and it never catches a request meant for
-   Claude. Cost of the alternative: values in phrases, but a loose pattern takes requests from Claude and from the
-   built-ins, and backslashes in JSON need doubling.
-2. **What `run` is.** Recommend an argv list with no shell. Alternative: one string run by `/bin/sh -c`. Cost of the
-   recommendation: a pipeline or `&&` needs its own script file. Cost of the alternative: quoting mistakes, and a field
-   filled from speech (`{app}`) can inject shell syntax.
-3. **An override whose command fails.** Recommend saying it failed (`run`'s failure reply) and stopping. Alternative:
-   fall back to the built-in action. Cost of the recommendation: when Roon is down nothing pauses, and he says why.
-   Cost of the alternative: on this Mac the built-in drives Spotify or Music (`app/macsys.py:197-214`), not the player
-   the owner is listening to.
-4. **Where the owner's phrases sit in the dispatch.** Recommend first, ahead of `recall.answer` and the built-ins.
-   Alternative: after `recall.answer` (`app/server.py:3920`), ahead of the built-ins. Cost of the recommendation: an
-   owner phrase that is also a recall question ("what did I ask") runs the command. Cost of the alternative: recall can
-   shadow an owner phrase.
-5. **The Settings editor (steps 11-12) in this task.** Recommend yes: commands are built within Void, and a save takes
-   effect without a restart. Alternative: `config.json` only, with steps 11-12 dropped. Cost of the recommendation: two
-   more steps in a 3175-line page and one page test; build time unmeasured. Cost of the alternative: every change is a
-   hand edit plus `void restart`, and a rejected entry is visible only in `/api/state`.
+1. **The shell a command line runs in on Windows.** Recommend PowerShell, the shell `winsys.ps` already runs
+   (`app/winsys.py:25`), with values quoted as single-quoted strings. Alternative: `cmd /c`. Cost of the
+   recommendation: PowerShell's start time on each command, unmeasured, and command lines written in PowerShell syntax.
+   Cost of the alternative: cmd has no quoting that holds every value from speech (`%` and `"` stay live), so a field
+   filled from speech can inject.
+2. **When a hand edit of `config.json` takes effect.** Recommend at once: before each `/api/quick` the server rereads
+   `voice_commands` from `config.json` when the file's mtime has changed since its last read or save. Alternative:
+   after `void restart`, as now (`app/server.py:258`). Cost of the recommendation: one `stat` per request, unmeasured,
+   and a reload path in the config home beside `save_config` (`app/server.py:2781`). Cost of the alternative: a
+   restart after every hand edit, and a hand edit of `voice_commands` made while Void runs is overwritten by the next Settings save of the commands, which
+   writes the in-memory list over the file's (`app/server.py:2784-2791`).
