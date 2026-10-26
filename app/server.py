@@ -2540,8 +2540,10 @@ class Speaker:
                 cls.proc.stdin.write(data[i:i + step])
                 cls.proc.stdin.flush()
             except (BrokenPipeError, OSError, AttributeError):
+                if g != cls.gen or cls.proc is None:              # killed by Speaker.stop, which cut PlayRef itself
+                    return False
                 hearing.PlayRef.cut(time.monotonic() + cls.LAT, moved=True)   # its queue died with it: only what was out still plays
-                if not again or g != cls.gen or cls.proc is None:
+                if not again:
                     return False
                 back = int(max(0.0, ahead) * cls.prate) * 2
                 try:
