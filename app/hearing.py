@@ -1,8 +1,16 @@
 """What Void hears of himself: a record of what the speakers play, to tell his own voice from yours."""
 import math
+import sys
 import threading
 
 import numpy as np
+
+try:                                                              # optional: without it the mic goes through as it is
+    from livekit import rtc
+except Exception as e:  # noqa: BLE001
+    rtc, RTC_ERR = None, e
+else:
+    RTC_ERR = None
 
 SR = 16000                                                        # the rate it keeps, which is what the mic runs at
 
@@ -93,3 +101,51 @@ class PlayRef:
         ok = (i >= 0) & (i < len(x))
         y = (w * np.where(ok, x[np.clip(i, 0, len(x) - 1)], 0)).sum(1)
         return np.clip(np.rint(y), -32768, 32767).astype(np.int16)
+
+
+class Canceller:
+    """Takes Void's own voice out of the mic: livekit's WebRTC echo canceller, against what PlayRef says played.
+
+    One per mic session (it keeps the canceller's adaptive state). The APM takes exact 10 ms frames, so mic audio
+    is gathered into them: whatever's left over (< 10 ms) waits for the next chunk, and the first time a chunk can't
+    be answered in full the shortfall is made up once with silence in front, so the output runs at most 159 samples
+    behind from then on (20 ms chunks never add any). Each frame's reference is PlayRef's span for the same moment,
+    fed just before the frame, so the stream delay is 0 and the canceller's own estimator only finds the room's.
+    Echo cancelling and the high-pass filter (which AEC3 expects) are on; noise suppression and gain control
+    are off, so your voice reaches whisper and the mic levelling as it was. Off, or without livekit, it hands the
+    mic back untouched; `available` says which, and why is said once per process."""
+    F = SR // 100                                                 # the APM's 10 ms frame, in samples
+    said = set()
+
+    def __init__(self, on: bool = True):
+        self.apm, why = None, "echo_cancel is off" if not on else f"livekit doesn't load ({RTC_ERR})" if rtc is None else ""
+        if not why:
+            try:
+                self.apm = rtc.AudioProcessingModule(echo_cancellation=True, high_pass_filter=True)
+            except Exception as e:  # noqa: BLE001
+                why = f"livekit's echo canceller doesn't start ({e})"
+        self.available = self.apm is not None
+        if why and why not in Canceller.said:
+            Canceller.said.add(why)
+            print(f"[void] not cancelling his echo: {why}; the mic goes through as it is", file=sys.stderr)
+        self.buf, self.out = b"", b""                             # mic not yet framed; cleaned audio not yet handed back
+
+    def process(self, mic: bytes, at: float) -> bytes:            # 16 kHz s16le mono captured from `at`; same length back
+        if self.apm is None:
+            return mic
+        t = at - len(self.buf) / 2 / SR                           # when the waiting leftover was captured
+        self.buf += mic
+        B, done = 2 * self.F, []
+        for i in range(0, len(self.buf) - B + 1, B):
+            ref = rtc.AudioFrame(bytearray(PlayRef.span(t + i / 2 / SR, self.F)), SR, 1, self.F)
+            frame = rtc.AudioFrame(bytearray(self.buf[i:i + B]), SR, 1, self.F)
+            self.apm.process_reverse_stream(ref)
+            self.apm.set_stream_delay_ms(0)
+            self.apm.process_stream(frame)
+            done.append(frame.data.tobytes())
+        k = len(self.buf) // B * B
+        self.buf, self.out = self.buf[k:], self.out + b"".join(done)
+        if len(self.out) < len(mic):                              # (only ever once, and < 10 ms)
+            self.out = bytes(len(mic) - len(self.out)) + self.out
+        got, self.out = self.out[:len(mic)], self.out[len(mic):]
+        return got
