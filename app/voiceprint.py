@@ -7,7 +7,9 @@ blocked. It runs on onnxruntime, which faster-whisper already installed. Its inp
 (80 bins, 25 ms frames every 10 ms, mean-normalised per clip), computed here in numpy.
 
 The print is the running mean of the enrolled clips' unit embeddings, at most 30 clips' worth (after that each new clip
-moves it by 1/30), saved to `path` after every enrolment. `score` is the cosine between a clip and the print, or None
+moves it by 1/30), saved to `path` after every enrolment together with FORMAT, the print's format version. A saved print whose version is
+missing or isn't FORMAT is treated as absent: the load starts from zero and says so once on stderr, so a print made by an
+older embedding or averaging is never scored against. Change FORMAT whenever the saved print's meaning changes. `score` is the cosine between a clip and the print, or None
 until MIN_ENROLL clips are in. Without the model, `available` is False, `why` says why, and nothing is enrolled or scored.
 """
 import io
@@ -20,6 +22,7 @@ import numpy as np
 SR = 16000
 MIN_ENROLL = 5           # no score below this many clips
 MAX_ENROLL = 30          # the running mean counts at most this many clips
+FORMAT = 1               # the saved print's format version; a print saved under another (or none) is not used
 MODEL = "wespeaker_en_voxceleb_resnet34.onnx"
 SOURCES = ["https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/",
            "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/"]
@@ -102,6 +105,11 @@ class Voiceprint:
     def _load(self):
         try:
             with np.load(io.BytesIO(self.path.read_bytes())) as f:
+                if "version" not in f.files or int(f["version"]) != FORMAT:
+                    found = int(f["version"]) if "version" in f.files else "none"
+                    print(f"[void] voiceprint at {self.path} is format version {found}, not {FORMAT}: starting over",
+                          file=sys.stderr)
+                    return
                 self.print, self.enrolled = f["print"].astype(np.float32), int(f["enrolled"])
         except FileNotFoundError:
             pass
@@ -111,7 +119,7 @@ class Voiceprint:
     def _save(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         buf = io.BytesIO()
-        np.savez(buf, print=self.print, enrolled=np.int64(self.enrolled))   # a file object: no ".npz" tacked on
+        np.savez(buf, print=self.print, enrolled=np.int64(self.enrolled), version=np.int64(FORMAT))   # a file object: no ".npz" tacked on
         part = self.path.with_name(self.path.name + ".part")
         part.write_bytes(buf.getvalue())
         part.replace(self.path)
