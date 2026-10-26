@@ -113,7 +113,8 @@ class Canceller:
     fed just before the frame, so the stream delay is 0 and the canceller's own estimator only finds the room's.
     Echo cancelling and the high-pass filter (which AEC3 expects) are on; noise suppression and gain control
     are off, so your voice reaches whisper and the mic levelling as it was. Off, or without livekit, it hands the
-    mic back untouched; `available` says which, and why is said once per process."""
+    mic back untouched; `available` says which, `on` whether echo_cancel asked for it, and `why` why not (said
+    once per process)."""
     F = SR // 100                                                 # the APM's 10 ms frame, in samples
     said = set()
 
@@ -124,7 +125,7 @@ class Canceller:
                 self.apm = rtc.AudioProcessingModule(echo_cancellation=True, high_pass_filter=True)
             except Exception as e:  # noqa: BLE001
                 why = f"livekit's echo canceller doesn't start ({e})"
-        self.available = self.apm is not None
+        self.on, self.available, self.why = on, self.apm is not None, why
         if why and why not in Canceller.said:
             Canceller.said.add(why)
             print(f"[void] not cancelling his echo: {why}; the mic goes through as it is", file=sys.stderr)
