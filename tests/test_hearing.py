@@ -357,6 +357,19 @@ class SpeakerFeedsPlayRefTest(unittest.TestCase):
         self.assertTrue(server.Speaker._write(bytes(range(256)) * 19, 7))
         self.assertEqual(self.ref.moved, [True], "the old speakers dying wasn't told to PlayRef as a change of speakers")
 
+    def test_a_write_killed_by_stop_isnt_taken_for_the_speakers_changing(self):
+        player, take = self.player, self.player.write
+
+        def write(b):                                       # stopped while this chunk is going in: the pipe breaks
+            if len(player.got) // SPK_STEP >= 5:
+                server.Speaker.stop()
+                raise BrokenPipeError("killed by the stop")
+            take(b)
+        player.write = write
+        self.assertFalse(server.Speaker._write(bytes(range(256)) * 19, 7))
+        self.assertEqual(self.made, [], "a stopped write started a new player")
+        self.assertNotIn(True, self.ref.moved, "a write killed by stopping him was taken for the speakers changing")
+
 
 MIC_RATE = 16000
 
