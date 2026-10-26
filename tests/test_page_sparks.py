@@ -26,6 +26,20 @@ SCRIPT = r"""const { chromium } = require('playwright');
       for (let k = 0; k < 40; k++) { await new Promise(r => setTimeout(r, 100)); seen.push(orbN);
         for (const o of ORBS) if (o.pr > 0 && o.pr < 1 && o.back === false) over.push(o.p.slice()); }
       return {seen, over: over.filter(q => Math.hypot(q[0], q[1]) < 76).length}; });
+    // a dropped clip: one faint spark that fades (any element the page adds to the document and not one of the ORBS)
+    out.drop = await p.evaluate(async () => { const known = new Set(ORBS.map(o => o.el));
+      const seen = new Set(document.querySelectorAll('*')); const fresh = [];
+      const watch = new MutationObserver(ms => { for (const m of ms) for (const n of m.addedNodes)
+        if (n.nodeType === 1 && !known.has(n)) fresh.push(n); });
+      watch.observe(document.documentElement, {childList: true, subtree: true});
+      const op = n => { let o = 1; for (let e = n; e && e.nodeType === 1; e = e.parentElement) o *= parseFloat(getComputedStyle(e).opacity); return o; };
+      const orbsBefore = ORBS.length, nBefore = orbN;
+      onEvent({t: 'gate_drop'});
+      const samples = [];
+      for (let k = 0; k < 30; k++) { await new Promise(r => setTimeout(r, 100));
+        samples.push(fresh.length ? Math.max(...fresh.map(n => n.isConnected ? op(n) : 0)) : 0); }
+      watch.disconnect();
+      return {added: fresh.length, samples, orbsAfter: ORBS.length, orbsBefore, nBefore, nAfter: orbN}; });
   } catch (e) { out.fatal = String(e && e.stack || e); }
   await b.close(); process.stdout.write(JSON.stringify(out));
 })();"""
@@ -62,6 +76,15 @@ class Sparks(unittest.TestCase):
         self.assertTrue(all(b - a in (0, 1) for a, b in zip(seen, seen[1:])), seen)
         self.assertGreater(seen[-1], seen[0])
         self.assertEqual(self.r["ramp"]["over"], 0)
+
+    def test_a_dropped_clip_draws_one_faint_spark_that_fades(self):
+        d = self.r["drop"]
+        self.assertEqual(d["added"], 1, d)                             # (one spark, drawn on the event)
+        peak = max(d["samples"])
+        self.assertGreater(peak, 0, d)                                 # (it shows)
+        self.assertLessEqual(peak, 0.5, d)                             # (faintly)
+        self.assertEqual(d["samples"][-1], 0, d)                       # (and fades away)
+        self.assertEqual(d["orbsAfter"], d["orbsBefore"])           # (it is no context spark; those are still ramping in, so orbN is not compared)
 
 
 if __name__ == "__main__":

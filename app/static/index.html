@@ -1010,6 +1010,17 @@ const ORBS=[]; (()=>{ for(let i=0;i<ORB_MAX;i++){
   ORBS.push({el, R0, p:[Math.cos(th)*Math.sin(ph)*R0, Math.cos(ph)*R0*.7, Math.sin(th)*Math.sin(ph)*R0], v:[0,0,0],
     f:[rnd(),rnd(),rnd()], a:[ang(),ang(),ang()], size:.8+Math.random()*1.6, back:null, spin:Math.random()<.5?-1:1, pr:0}); } })();
 let orbT=0, swoosh=0, orbN=0, orbClk=0;
+// a clip the follow-up gate dropped (bus event `gate_drop`): one faint spark off to his side that drifts out and fades.
+// Its own element, never one of the ORBS, so the context cloud is untouched; gone from the page once it has faded.
+function gateSpark(){ const a=Math.random()*Math.PI*2, r=100+Math.random()*20, c=Math.cos(a), s=Math.sin(a);
+  const el=document.createElementNS(NS,'line');
+  el.setAttribute('x1',(c*r).toFixed(1)); el.setAttribute('y1',(s*r).toFixed(1));
+  el.setAttribute('x2',(c*(r+6)).toFixed(1)); el.setAttribute('y2',(s*(r+6)).toFixed(1)); el.setAttribute('stroke-width','1.4');
+  el.style.opacity='0'; E.orbFront.appendChild(el);
+  const dx=(c*16).toFixed(1), dy=(s*16).toFixed(1), gone=()=>el.remove();
+  if(el.animate){ el.animate([{opacity:.4,transform:'translate(0,0)'},{opacity:0,transform:`translate(${dx}px,${dy}px)`}],
+      {duration:1600,easing:'ease-out',fill:'forwards'}).onfinish=gone; }
+  setTimeout(gone,1800); }
 
 let lx=0,ly=0,tx=0,ty=0, lvl=0, micLvl=0, blinkAt=-1e9, nextBlink=2500, prevMood='idle', saccadeAt=0, lastTs=0, lastMouse=-1e9;
 let perfAcc=0, perfN=0, lowFx=false;   // if frames get slow, drop the blur-glow filters
@@ -1891,6 +1902,7 @@ function onEvent(ev){
   if(ev.t==='followup'){ if(transient==='thinking') transient=null; followQ.push(ev); followTry(); return; }
   if(ev.t==='saw'){ poke('looking',1800); wake(); return; }   // Claude took a look at your screen (`void see`)
   if(ev.t==='ctx'){ onContext(ev); return; }
+  if(ev.t==='gate_drop'){ gateSpark(); return; }      // the follow-up gate dropped a clip: a faint spark, nothing more
   if(ev.t==='follow'){ follow=!!ev.on; hearRaw=0; if(follow) wake(); return; }
   if(ev.t==='hear'){ hearRaw=ev.v; return; }
   if(ev.t==='wake'){ if(rec||transcribing) return;
