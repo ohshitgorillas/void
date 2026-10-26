@@ -211,6 +211,7 @@ class FastScenes(FreshRun):
 # BUS events Wake.check publishes ("barge": you stopped him; "wake": a request, follow=True when no "hey Void").
 
 OVER = 2.0                  # you cut in this long after his voice starts
+PROMPT = 1.5                # a stop word said over him stops him this soon, though you go on talking
 LAST_SECOND = 0.5           # and start this long before his voice ends to talk over his last second
 
 
@@ -251,6 +252,14 @@ class SlowScenes(FreshRun):
 
     def test_stop_over_void_interrupts_him(self):
         self._interrupts("interrupt_stop")
+
+    def test_stop_over_void_stops_him_while_you_are_still_talking(self):
+        t, log = heard(SCENES["interrupt_stop"], you_at=OVER)
+        barge = [e for e in did(t) if e["t"] == "barge"]
+        self.assertTrue(barge and t.you_start is not None and barge[0]["scene_at"] - t.you_start <= PROMPT,
+                        "interrupt_stop: Void wasn't stopped within " + f"{PROMPT} s of you starting"
+                        + (f" (stopped {barge[0]['scene_at'] - t.you_start:.1f} s in)" if barge and t.you_start is not None else "")
+                        + instead(t, log))
 
     def test_shut_up_over_void_interrupts_him(self):
         self._interrupts("interrupt_shut_up")
