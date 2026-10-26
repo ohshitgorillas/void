@@ -9,6 +9,7 @@ the network.
 
     python3 -m unittest tests.test_gate -v
 """
+import ast
 import contextlib
 import io
 import sys
@@ -180,6 +181,85 @@ class DoctorVoiceprint(unittest.TestCase):
         with mock.patch.object(voiceprint, "fetch", mock.Mock(side_effect=RuntimeError(why))):
             lines = self.doctor_lines()
         self.assertTrue(any(why in ln for ln in lines), f"doesn't say the voiceprint is unavailable because {why!r}: {lines}")
+
+
+@unittest.skipIf(gate is None, f"app/gate.py doesn't import here: {GATE_ERR}")
+class Noise(unittest.TestCase):
+    """gate.is_noise: nothing, a stock filler, or a whole sentence Whisper repeats on room sound; a short phrase you
+    say over and over is you, answering him."""
+
+    def test_nothing_is_noise(self):
+        for heard in ("", "   ", " . "):
+            self.assertTrue(gate.is_noise(heard), repr(heard))
+
+    def test_filler_is_noise(self):
+        for heard in sorted(gate.NOISE_WORDS) + ["Thank you for watching.", "Um."]:
+            self.assertTrue(gate.is_noise(heard), heard)
+
+    def test_whispers_looping_sentence_is_noise(self):
+        for heard in ("The two of them were the two of them. The two of them were the two of them",
+                      "It is a pleasure to be here. It is a pleasure to be here"):
+            self.assertTrue(gate.is_noise(heard), heard)
+
+    def test_your_repeated_phrase_is_not_noise(self):
+        for heard in ("Not yet, not yet", "Wait, wait, wait, wait, wait, wait"):
+            self.assertFalse(gate.is_noise(heard), heard)
+
+    def test_a_request_is_not_noise(self):
+        for heard in ("please add milk to the shopping list", "thank you, now add eggs"):
+            self.assertFalse(gate.is_noise(heard), heard)
+
+
+@unittest.skipIf(gate is None, f"app/gate.py doesn't import here: {GATE_ERR}")
+class StopSaid(unittest.TestCase):
+    """gate.stop_said: a stop phrase said as one, opening or closing a clause of what was heard."""
+
+    def test_stop_phrases_said_as_stops(self):
+        for heard in ("Stop", "Shut up", "Hold on", "Void, stop", "okay okay hold on a second",
+                      "Stop, stop, stop, stop stop, stop Void stop, Void stop, Void, shut the"):
+            self.assertTrue(gate.stop_said(heard), heard)
+
+    def test_stop_word_inside_a_sentence_is_not_a_stop(self):
+        self.assertFalse(gate.stop_said("It goes to the time to realize that it's ready to have a stop on, and it's going."))
+
+    def test_no_stop_phrase(self):
+        for heard in ("please add milk to the shopping list", ""):
+            self.assertFalse(gate.stop_said(heard), repr(heard))
+
+
+SERVER_PY = ROOT / "app" / "server.py"
+MOVED = ("is_echo", "is_noise", "stop_said")
+SEGMENT_FIELDS = {"avg_logprob", "compression_ratio", "no_speech_prob", "logprob", "no_speech"}
+
+
+class Homes(unittest.TestCase):
+    """The echo, noise and stop-phrase tests and Whisper's confidence thresholds live in gate; server.py imports them."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tree = ast.parse(SERVER_PY.read_text(encoding="utf-8"))
+
+    def test_server_defines_no_echo_noise_or_stop_test(self):
+        defined = sorted({n.name for n in ast.walk(self.tree)
+                          if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in MOVED})
+        self.assertEqual(defined, [], f"still defined in server.py: {defined}")
+
+    @unittest.skipIf(server is None or gate is None, f"server.py / gate.py don't import here: {IMPORT_ERR or GATE_ERR}")
+    def test_server_names_are_gates_own(self):
+        for name in MOVED:
+            with self.subTest(name):
+                if hasattr(server, name):
+                    self.assertIs(getattr(server, name), getattr(gate, name), f"server.{name} is not gate.{name}")
+
+    def test_server_compares_no_whisper_confidence(self):
+        hits = []
+        for n in ast.walk(self.tree):
+            if isinstance(n, ast.Compare):
+                fields = {a.attr for side in [n.left, *n.comparators] for a in ast.walk(side)
+                          if isinstance(a, ast.Attribute) and a.attr in SEGMENT_FIELDS}
+                if fields:
+                    hits.append(f"server.py:{n.lineno} compares {', '.join(sorted(fields))}")
+        self.assertEqual(hits, [], "a segment filter or logprob comparison in server.py")
 
 
 if __name__ == "__main__":
