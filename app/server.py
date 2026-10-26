@@ -1943,13 +1943,16 @@ class Wake:
             Voice.enroll(pcm)                    # (…and teach him your voice: after the request is out, never a follow-up)
         elif follow:
             if len(said.split()) >= 2:           # (a stray word isn't a request)
-                v = gate.judge(heard, voice() if voice else None, CFG)
+                score = voice() if voice else None
+                v = gate.judge(heard, score, CFG)
+                # (the voice score on every verdict, kept or dropped, so the next wrong call can be read off the log)
+                vs = "voice n/a" if score is None else f"voice {score:.2f}"
                 if not v.keep:
-                    what = f"dropped follow-up, {v.why}"
+                    what = f"dropped follow-up, {v.why} ({vs})"
                     log(what)
                     BUS.pub(t="gate_drop", text=f"{what}: {said[:80]}")
                     return
-                log("follow-up request")
+                log(f"follow-up request ({vs})")
                 cls.follow_until = 0.0
                 MicAuto.learn(pcm)
                 BUS.pub(t="wake", text=said, follow=True)

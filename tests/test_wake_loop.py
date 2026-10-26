@@ -15,6 +15,7 @@ import contextlib
 import http.client
 import io
 import json
+import re
 import sys
 import tempfile
 import threading
@@ -390,6 +391,17 @@ class FollowUpGate(unittest.TestCase):
         self.check("you_overlap.wav", follow=True)
         self.assertEqual(len(calls), 1, f"gate.judge called {len(calls)}x on one follow-up")
         self.assertIsInstance(calls[0][1], float, "judged without the clip's voice score")
+
+    def test_every_follow_up_verdict_logs_its_voice_score(self):
+        for name in ("you_overlap.wav", "room_music.wav"):     # (one kept, one dropped)
+            with self.subTest(name):
+                pcm, events, log = self.check(name, follow=True)
+                score = self.vp.score(pcm)
+                verdict = [ln for ln in log if SAID[name][:30] in ln]
+                self.assertEqual(len(verdict), 1, f"{name}: no single verdict line in the log:\n{log}")
+                numbers = [float(n) for n in re.findall(r"\d+\.\d+", verdict[0])]
+                self.assertTrue(any(abs(n - score) < 0.01 for n in numbers),
+                                f"{name}: the verdict doesn't log its voice score {score:.2f}: {verdict[0]}")
 
     def test_wake_word_clip_is_never_judged(self):
         calls = self.judged()
