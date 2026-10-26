@@ -509,7 +509,7 @@ class RecordedMic:
 
 
 class Events:
-    """BUS during a scene: keeps every event published, each with `at`, the scene time it was published at (seconds
+    """BUS during a scene: keeps every event published, each with `scene_at`, the scene time it was published at (seconds
     from the scene's start)."""
 
     def __init__(self, sim):
@@ -517,7 +517,7 @@ class Events:
         self.got = []
 
     def pub(self, **ev):
-        self.got.append(dict(ev, at=self.sim.now - T0))
+        self.got.append(dict(ev, scene_at=self.sim.now - T0))
 
     def sub(self):
         import queue
