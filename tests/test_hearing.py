@@ -1,6 +1,7 @@
 """PlayRef keeps what the speakers play, by monotonic time, at 16 kHz mono s16le, with silence where nothing plays,
 whatever rate the player itself runs at; and once the speakers are stopped, nothing after that moment plays.
-Canceller takes Void's own voice out of the mic against that record, leaving yours; off, or without livekit, it hands
+Canceller takes Void's own voice out of the mic against that record, leaving yours, whole from its first moment
+even when you talk over him; off, or without livekit, it hands
 the mic back untouched and says so once.
 Speech-to-text hands back what was heard together with Whisper's confidence in it (Heard), while run_whisper still
 hands back just the text.
@@ -221,6 +222,18 @@ class CancellerTest(unittest.TestCase):
         self.assertLess(after, before / 4, f"his echo in the last second: {after:.0f} RMS out of {before:.0f} in")
 
     @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_leaves_your_voice_whole_from_its_start_when_you_talk_over_him(self):
+        far = noise(4.0, 4000, 5)
+        hearing.PlayRef.played(pcm(far), SR, T0)
+        d, at = SR // 200, 3 * SR                                    # the room: 5 ms later, at half the level
+        you = [0] * at + voice(1.0, 1500)
+        mic = [e + y for e, y in zip([0] * d + [v // 2 for v in far[:-d]], you)]
+        out = self.run_mic(hearing.Canceller(on=True), mic)
+        n, u = 3 * SR // 10, you[at:at + 3 * SR // 10]              # your first 0.3 s
+        g = max(sum(a * b for a, b in zip(out[at + k:at + k + n], u)) for k in range(0, 400, 2)) / sum(v * v for v in u)
+        self.assertGreater(g, 10 ** (-3 / 20), f"your first 0.3 s over him came through at {g:.2f} of how you said it")
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
     def test_leaves_your_voice_in_when_he_is_quiet(self):
         mic = voice(3.0, 3000)
         out = self.run_mic(hearing.Canceller(on=True), mic)
@@ -241,13 +254,14 @@ SPK_STEP = 320                                              # bytes Speaker._wri
 class FakeRef:
     """Stands in for hearing.PlayRef: records what it is told played, and where it was cut."""
     def __init__(self):
-        self.calls, self.cuts = [], []
+        self.calls, self.cuts, self.moved = [], [], []
 
     def played(self, pcm, rate, at):
         self.calls.append((bytes(pcm), rate, at))
 
-    def cut(self, at):
+    def cut(self, at, moved=False):
         self.cuts.append(at)
+        self.moved.append(moved)
 
 
 class FakePlayer:
@@ -336,6 +350,12 @@ class SpeakerFeedsPlayRefTest(unittest.TestCase):
         self.assertEqual(len(self.ref.cuts), 1, f"Speaker.stop cut PlayRef {len(self.ref.cuts)} times")
         self.assertGreaterEqual(self.ref.cuts[0], 123.0 - 1e-6)
         self.assertLessEqual(self.ref.cuts[0], 123.0 + server.Speaker.LAT + 1e-6)
+        self.assertEqual(self.ref.moved, [False], "stopping him was taken for the speakers changing")
+
+    def test_a_dead_player_cuts_playref_as_the_speakers_changing(self):
+        self.player.dies = 5
+        self.assertTrue(server.Speaker._write(bytes(range(256)) * 19, 7))
+        self.assertEqual(self.ref.moved, [True], "the old speakers dying wasn't told to PlayRef as a change of speakers")
 
 
 MIC_RATE = 16000

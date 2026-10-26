@@ -1864,7 +1864,8 @@ class Wake:
 
         def log(what):                           # (what it heard, so the next missed turn shows in the log)
             print(f"[void] {what}: {said[:80]}", file=sys.stderr)
-        if is_noise(said):                       # nothing, filler, or one phrase looping: the room, not you
+        if is_noise(said) and not (cls.speaking() and STOP_IN_RE.search(said.lower())):
+            # nothing, filler, or one phrase looping: the room, not you (but "Stop, stop" over him is you stopping him)
             if said:
                 log("dropped as noise")
             return
@@ -2538,7 +2539,7 @@ class Speaker:
                 cls.proc.stdin.write(data[i:i + step])
                 cls.proc.stdin.flush()
             except (BrokenPipeError, OSError, AttributeError):
-                hearing.PlayRef.cut(time.monotonic() + cls.LAT)   # its queue died with it: only what was out still plays
+                hearing.PlayRef.cut(time.monotonic() + cls.LAT, moved=True)   # its queue died with it: only what was out still plays
                 if not again or g != cls.gen or cls.proc is None:
                     return False
                 back = int(max(0.0, ahead) * cls.prate) * 2

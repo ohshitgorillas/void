@@ -52,6 +52,16 @@ WALL = 120.0              # real seconds a scene may take before it is called st
 SPEAKER_TAPS = 65         # the laptop speaker's high-pass (no bass from a small driver), as an FIR this long
 SPEAKER_CUT = 250.0       # Hz, roughly where that speaker stops making sound
 VOICED = 300.0            # hear=False: a 30 ms frame this loud (int16 RMS, about -41 dBFS) counts as someone talking
+HEARD = 30.0              # hear=False: and someone talking comes through to the speech detector this loud (about -61 dBFS)
+OPENING = 0.3             # hear=False: the first this-many seconds of your voice, in what Wake.session read,
+OPENING_LOST_DB = 5.0     # turned down more than this under how you said them (opening_db), and Whisper loses
+OPENING_WORDS = 2         # your first this-many words (heard as words of its own, or nothing). Real Whisper, warm canceller,
+                          # each stop phrase alone 1, 2, 3 and 4 s into his voice: "Stop, stop", "Hold on" and "Shut up"
+                          # came through 5.8-21 dB down and were lost at 2, 1 and 1 of the 4 moments (nothing at all,
+                          # "Soft stuff"; "How old are you"; "Shings out"), every loss 5.8 dB down or more; "Hey Void"
+                          # came through 3.2-4.1 dB down and was heard at all 4. (This loses every one Whisper lost, and
+                          # more: Whisper heard the other 7, some as far as 20 dB down.)
+OPENING_LAG = 0.04        # (the canceller hands your voice back up to this late)
 
 
 SETTINGS = {              # every setting Wake.session, Wake.check and Speaker read from server.CFG, pinned for a scene
@@ -149,12 +159,13 @@ class Take:
     opened (0 unless play's mic_at put it later). Plus void_start/void_end and you_start/you_end in seconds (None when
     absent) and events: the BUS events published during the scene. switched: when the speakers changed mid-sentence
     (play's switch_at), in seconds on the scene's clock: the moment the old speakers fell silent and the new ones took
-    over (None: no switch happened)."""
+    over (None: no switch happened). opening_db: how far under how you said them the first OPENING seconds of your
+    voice came through in clean (opening_db; None when you didn't speak)."""
 
     def __init__(self):
         empty = np.zeros(0, np.int16)
         self.raw = self.clean = self.echo = self.you = self.music = empty
-        self.void_start = self.void_end = self.you_start = self.you_end = None
+        self.void_start = self.void_end = self.you_start = self.you_end = self.opening_db = None
         self.events = []
         self.switched = None
         self.mic_from = 0.0
@@ -326,7 +337,7 @@ class Scene:
         self.out = np.zeros(pad)                                  # what the speakers played, by scene sample
         self.h = room.impulse()
         self.played = []                                          # where any player put sound: scene sample numbers
-        self.you_clip = None if you is None else clip(you).astype(np.float64) * 10 ** (room.you_db / 20)
+        self.you_clip = None if you is None else you.astype(np.float64) * 10 ** (room.you_db / 20)
         self.you_at, self.has_void, self.you_from = you_at, has_void, None
         self.music_part = np.zeros(pad)
         if room.music:
@@ -521,11 +532,6 @@ def _voiced(pcm):
     return np.sqrt((x ** 2).mean(1)) > VOICED if len(x) else np.zeros(0, bool)
 
 
-def speech_seconds(pcm):
-    """Stand-in for server.speech_seconds: 30 ms frames loud enough to be someone talking."""
-    return float(_voiced(pcm).sum()) * 0.03
-
-
 def last_speech_end(pcm):
     """Stand-in for server.last_speech_end: the end of the last loud 30 ms frame, in seconds (None: nobody)."""
     v = np.flatnonzero(_voiced(pcm))
@@ -541,26 +547,70 @@ def _spectra(x):
     return np.sqrt(np.abs(np.fft.rfft(x[idx] * np.hanning(512), axis=1)))
 
 
-def _whisper(scene, clean, texts, void, you):
+def opening_db(read, you, start):
+    """How far under how you said them (dB, negative: turned down) the first OPENING seconds of your voice, from the
+    first 30 ms frame of it loud enough to be talking, came through in `read` (int16 samples on the scene's clock, as
+    Wake.session read them; `you`, your voice as it reached the mic, the same way; `start`, the sample you start
+    at): the least-squares gain of your voice in what was read, at the lag up to OPENING_LAG that gives the most of it.
+    None: no voice of yours, or not all of its opening read yet."""
+    v = np.flatnonzero(_voiced(you[start:].tobytes()))
+    if not len(v):
+        return None
+    s = start + int(v[0]) * 480
+    n, lags = round(OPENING * SR), round(OPENING_LAG * SR)
+    if len(read) < s + n + lags:
+        return None
+    u = you[s:s + n].astype(np.float64)
+    g = max(float(read[s + k:s + k + n].astype(np.float64) @ u) for k in range(lags + 1)) / float(u @ u)
+    return 20 * math.log10(g) if g > 0 else -math.inf
+
+
+def _whisper(scene, clean, void_text, you_text):
     """Stand-in for server.transcribe_pcm (and transcribe_pcm_heard, sure of whatever it made out): it makes out the words of whoever's voice the burst mostly sounds like.
     Finds where the burst sits on the scene's clock (it is a stretch of what Wake.session read), then, frame by frame,
     asks whose spectrum the burst's is most like there: your voice, Void's echo, or the music, as they reached the
     mic (spectra, not samples: the canceller's suppressor reshapes what it lets through, and hands it back a little
-    late). Each frame votes by its loudness. Your words if you win, his if he does, else nothing."""
-    def hear(pcm, **_kw):
-        if len(pcm) < SR * 2 * 0.3:
-            return ""
+    late). Each frame votes by its loudness. His words if he wins, nothing if the music does. If you win, your words,
+    less your first OPENING_WORDS when your opening came through more than OPENING_LOST_DB under how you said it
+    (opening_db): real Whisper mishears a turned-down opening under his voice as words of its own, or as nothing."""
+    def yours(got):
+        if scene.you_from is None:
+            return you_text
+        d = opening_db(np.frombuffer(got, np.int16), scene.you, scene.you_from)
+        if d is not None and d < -OPENING_LOST_DB:
+            return " ".join(you_text.split()[OPENING_WORDS:])
+        return you_text
+
+    def where(pcm):
+        """→ what Wake.session has read so far, and where the burst `pcm` sits in it: [a, b) on the scene's clock."""
         got = b"".join(clean)
         e = len(got)
         for back in range(0, 4 * CHUNK * 2 + 1, 2):
             if len(got) - back >= len(pcm) and got[len(got) - back - len(pcm):len(got) - back] == pcm:
                 e = len(got) - back
                 break
-        b, a = e // 2, max(0, e // 2 - len(pcm) // 2)
+        return got, max(0, e // 2 - len(pcm) // 2), e // 2
+
+    def speech(pcm):
+        """Stand-in for server.speech_seconds on a burst Wake.session read: its 30 ms frames that are someone
+        talking (you, his echo or the music loud enough to be, as they reached the mic) and that came through above
+        HEARD. (Whisper's speech detector hears a voice turned down under his, as an absolute level does not.)"""
+        got, a, b = where(pcm)
+        n = (b - a) // 480 * 480
+        if n <= 0:
+            return 0.0
+        rms = lambda x: np.sqrt((x[:n].astype(np.float64).reshape(-1, 480) ** 2).mean(1))   # noqa: E731
+        talking = (rms(scene.you[a:b]) > VOICED) | (rms(scene.echo[a:b]) > VOICED) | (rms(scene.music[a:b]) > VOICED)
+        return float((talking & (rms(np.frombuffer(got[2 * a:2 * b], np.int16)) > HEARD)).sum()) * 0.03
+
+    def hear(pcm, **_kw):
+        if len(pcm) < SR * 2 * 0.3:
+            return ""
+        got, a, b = where(pcm)
         c = _spectra(np.frombuffer(got[2 * a:2 * b], np.int16).astype(np.float64))
         votes = {}
-        for who, part, text in (("you", scene.you, texts.get(you, "") if you else ""),
-                                ("void", scene.echo, texts.get(void, "") if void else ""),
+        for who, part, text in (("you", scene.you, yours(got) if you_text else ""),
+                                ("void", scene.echo, void_text),
                                 ("music", scene.music, "")):
             m = _spectra(part[a:b].astype(np.float64))
             sim = (c * m).sum(1) / np.maximum(1e-9, np.linalg.norm(c, axis=1) * np.linalg.norm(m, axis=1))
@@ -574,17 +624,18 @@ def _whisper(scene, clean, texts, void, you):
     def heard(pcm, **kw):
         text = hear(pcm, **kw)
         return _server().Heard(text=text, logprob=0.0 if text else -math.inf, no_speech=0.0 if text else 1.0,
-                            seconds=speech_seconds(pcm))
-    return hear, heard
+                            seconds=speech(pcm))
+    return hear, heard, speech
 
 
 # ---------------------------------------------------------------- a scene
 
 def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch_at=None, switch_lat=None,
-         mic_at=None) -> Take:
+         mic_at=None, you_only=None) -> Take:
     """Play a scene on a simulated clock: `void` (a clip name) goes through the real Speaker player path into PlayRef
     and out of the room's speakers; `you` (a clip name) speaks into the room at `you_at` seconds after Void's voice
-    starts coming out of the speakers; the real Wake.session listens through open_clean_mic. hear=False stands in
+    starts coming out of the speakers; `you_only`: (words, seconds) to say only the opening of your clip, its first
+    `seconds`, whose words are `words` (None: all of it); the real Wake.session listens through open_clean_mic. hear=False stands in
     for speech detection and Whisper; hear=True runs the real ones. `seconds`: how long the scene runs (default:
     until everything has played, plus a little). `switch_at`: seconds after Void's voice starts coming out of the
     speakers at which the speakers change mid-sentence (the player he is writing to dies and a new one takes over, as
@@ -608,13 +659,18 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
     lat, texts = S.LAT, _texts()
     switch_lat = lat if switch_lat is None else switch_lat
     void_pcm = clip(void) if void else None
+    you_pcm = clip(you) if you else None
+    you_text = texts.get(you, "") if you else ""
+    if you_only is not None:
+        you_text, n = you_only
+        you_pcm = you_pcm[:round(n * SR)]
     if seconds is None:
         ref = LEAD_IN + lat if void else LEAD_IN
         ends = [LEAD_IN]
         if void:
             ends.append(ref + len(void_pcm) / SR)
         if you:
-            ends.append(ref + you_at + len(clip(you)) / SR)
+            ends.append(ref + you_at + len(you_pcm) / SR)
         if room.music:
             ends.append(len(clip(room.music)) / SR)
         seconds = max(ends) + AFTER + (max(0.0, switch_lat - lat) if switch_at is not None else 0.0)
@@ -642,7 +698,7 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
             scene.players[-1].gone()
         scene.lat = switch_lat
 
-    scene = Scene(sim, room, n, lat, you, you_at, bool(void),
+    scene = Scene(sim, room, n, lat, you_pcm, you_at, bool(void),
                   first if switch_at is not None or mic_at is not None else None)
     events, clean = Events(), []
     real_open_clean_mic = server.open_clean_mic
@@ -672,9 +728,9 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
             wav = _wav(resample(void_pcm.astype(np.float64), SR, np.arange(m) * SR / VOICE_SR), VOICE_SR)
             patch(server, "synth", lambda text: (wav, 1.0))
         if not hear:
-            patch(server, "speech_seconds", speech_seconds)
+            hear_text, hear_heard, hear_speech = _whisper(scene, clean, texts.get(void, "") if void else "", you_text)
+            patch(server, "speech_seconds", hear_speech)
             patch(server, "last_speech_end", last_speech_end)
-            hear_text, hear_heard = _whisper(scene, clean, texts, void, you)
             patch(server, "transcribe_pcm", hear_text)
             patch(server, "transcribe_pcm_heard", hear_heard)
         for k, v in (("cv", SimCondition(sim)), ("todo", []), ("ready", []), ("making", False), ("gen", 0),
@@ -723,6 +779,7 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
     if scene.you_from is not None and scene.you_from < k:
         t.you_start = scene.you_from / SR
         t.you_end = min(k, scene.you_from + len(scene.you_clip)) / SR
+        t.opening_db = opening_db(t.clean, t.you, scene.you_from)
     return t
 
 
