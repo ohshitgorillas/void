@@ -31,6 +31,7 @@ STOP_RE = re.compile(r"(?:ok(?:ay)?\W+|void\W+|hey\W+void\W+)?(?:stop|wait|shush
 _STOP_WORDS = r"(?:stop|hold on|hang on|shut up|be quiet|shush|shh+|that's enough)"
 _STOP_FILL = r"(?:ok(?:ay)?|oh|no|hey|void|um+|uh+|please|now|so|well)"
 STOP_IN_RE = re.compile(rf"^\W*(?:{_STOP_FILL}\W+)*{_STOP_WORDS}\b|\b{_STOP_WORDS}(?:\W+{_STOP_FILL})*\W*$")
+WAKE_RE = re.compile(r"^\W*(?:(?:hey|hi|hay|okay|ok|yo|oi)\W+)?(void|voyd|boyd|voi|vod)\b\W*(.*)$", re.I | re.S)
 WHY = ("kept", "no speech", "echo", "noise", "while talking", "stray word",
        "no wake word", "low confidence", "not your voice")
 
@@ -55,7 +56,9 @@ class Verdict:
 
 
 def spoken_enough(speech: float, seconds: float, kind: str) -> bool:
-    raise NotImplementedError
+    """Enough detected speech to be worth transcribing: MIN_SPEECH seconds for every kind, and for every kind but a
+    follow-up also SPEECH_SHARE of the burst (music or noise, not talking, otherwise: Whisper would dream up words)."""
+    return speech >= MIN_SPEECH and (kind == "follow" or speech >= seconds * SPEECH_SHARE)
 
 
 def sure(segments: list) -> list:                              # the one Whisper segment filter
@@ -121,11 +124,62 @@ def stop_said(text: str) -> bool:
 
 
 def judge(b: Burst, spoken: list[str], cfg: dict) -> Verdict:
+    """Keep or drop one heard burst, and what to do with a kept one. `spoken`: his lines lately, oldest first (for the
+    echo test) · `cfg`: voice_gate (off: follow-ups are not judged on Whisper's confidence or the voiceprint),
+    voice_min (the lowest voice score that is still the owner)."""
     if not isinstance(b, Burst):
         # TEMPORARY bridge, gone when Wake.check builds a Burst (design Order step 2): the old follow-up call
         # judge(heard, voice, cfg) from server.py still lands here.
         return _follow_legacy(b, spoken, cfg)
-    raise NotImplementedError
+
+    def drop(why):
+        return Verdict(False, why, "drop", "")
+    text = b.text or ""
+    said = text.strip(" .,!?")
+    gated = bool(cfg.get("voice_gate", True))
+    owner = b.voice is not None and b.voice >= float(cfg.get("voice_min", 0.5))
+    # 1. speech share: music or noise, not talking
+    if not spoken_enough(b.speech, b.seconds, b.kind):
+        return drop("no speech")
+    # 2. echo: his own voice through the mic
+    if is_echo(text, spoken):
+        return drop("echo")
+    # 3. stop phrase, said over him or while he talks (a filler "thanks" heard while he talks is the room: 4 has it)
+    if b.kind in ("over", "peek") or b.talking:
+        if ((b.kind in ("over", "peek") and stop_said(said))
+                or (b.talking and STOP_RE.fullmatch(said.lower()) and not is_filler(said))):
+            return Verdict(True, "kept", "barge", "")
+    # 4. noise: nothing, or a sentence looping, always; filler unless it is the owner's own voice
+    if is_noise(text) and not (is_filler(text) and owner):
+        return drop("noise")
+    # 5. while talking: a peek only ever stops him; anything else begun over him without his name is most likely his
+    # own voice, garbled
+    m = WAKE_RE.match(text) if b.kind != "listen" else None
+    if b.kind == "peek" or (b.kind == "over" and not m):
+        return drop("while talking")
+    # 6. wake word ("listen" is push-to-talk: no wake word needed)
+    if b.kind == "listen":
+        return Verdict(True, "kept", "request", text)
+    if m:
+        if b.talking:
+            return Verdict(True, "kept", "barge", "")
+        return Verdict(True, "kept", "request", m.group(2).strip(" .,!?"))
+    if b.kind != "follow":
+        return drop("no wake word")
+    # 7. stray word: one word is not a request, unless the voiceprint says it is the owner
+    if len(said.split()) < 2 and not (gated and owner):
+        return drop("stray word")
+    if gated:
+        # 8. Whisper confidence
+        if b.heard is not None:
+            if b.heard.no_speech >= NO_SPEECH:
+                return drop("no speech")
+            if b.heard.logprob < MIN_LOGPROB:
+                return drop("low confidence")
+        # 9. voiceprint
+        if b.voice is not None and not owner:
+            return drop("not your voice")
+    return Verdict(True, "kept", "follow", text)
 
 
 def _follow_legacy(heard, voice: float | None, cfg: dict) -> Verdict:

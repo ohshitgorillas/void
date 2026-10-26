@@ -38,7 +38,7 @@ sys.path.insert(0, str(APP_DIR))
 import quick  # noqa: E402
 import agents  # noqa: E402
 import gate  # noqa: E402
-from gate import ECHO_KEEP, ECHO_RUN, ECHO_TAIL, STOP_RE, is_echo, is_noise, stop_said  # noqa: E402
+from gate import ECHO_KEEP, ECHO_RUN, ECHO_TAIL, STOP_RE, WAKE_RE, is_echo, is_noise, stop_said  # noqa: E402
 import hearing  # noqa: E402
 import langmark  # noqa: E402
 import notifier  # noqa: E402
@@ -1538,9 +1538,6 @@ def said_lately():
     while SPOKEN and now - SPOKEN[0][0] > ECHO_KEEP:
         SPOKEN.popleft()
     return [said for _t, said in SPOKEN]
-
-
-WAKE_RE = re.compile(r"^\W*(?:(?:hey|hi|hay|okay|ok|yo|oi)\W+)?(void|voyd|boyd|voi|vod)\b\W*(.*)$", re.I | re.S)
 
 
 class Voice:
