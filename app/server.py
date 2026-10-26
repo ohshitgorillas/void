@@ -1755,6 +1755,12 @@ class Wake:
             log("ignored: no \"hey Void\"")
 
 
+def echo_report(c: "hearing.Canceller") -> str:
+    """What `void doctor` and diagnostics() say about the echo canceller: on, off by echo_cancel, or unavailable
+    and why — as the Canceller itself found it."""
+    return "on" if c.available else f"off — {c.why}" if not c.on else f"unavailable — {c.why}"
+
+
 def doctor():
     print(f"Void doctor (version {VERSION})\n")
     if OSYS:
@@ -1771,6 +1777,7 @@ def doctor():
                 print("  " + ln + ("   <- default" if dflt and dflt in ln else ""))
         print()
     print("recorders tried in order:", "sounddevice" if OSYS else (", ".join(c[0] for c in mic_cmds()) or "NONE"))
+    print("echo canceller:", echo_report(hearing.Canceller(CFG.get("echo_cancel", True))))
     print("recording 3 seconds — keep talking the whole time…", flush=True)
     try:
         if OSYS:                                    # (keep every channel, to see which one your voice is on)
@@ -3252,6 +3259,7 @@ def diagnostics():
             add("vc++ runtime", winreg.QueryValueEx(k, "Version")[0])
         except OSError:
             add("vc++ runtime", "not found")
+    add("echo canceller", echo_report(hearing.Canceller(CFG.get("echo_cancel", True))))
     add("mic auto-level", f"{'on' if CFG.get('mic_auto', True) else 'off'}, boost {MicAuto.soft:.1f}x, last voice peak "
                           + ("-" if MicAuto.last_peak is None else f"{MicAuto.last_peak:.3f}"))
     add("settings", ", ".join(f"{k}={CFG.get(k)}" for k in ("trust", "wake_word", "barge_in", "follow_up", "tts",
