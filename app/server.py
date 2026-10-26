@@ -1500,6 +1500,7 @@ FOLLOW_NOTE = ("(Voice note from Void: the mic picked this up a few seconds afte
                "If it is clearly not meant for you, e.g. the user thinking out loud, talking to themselves or to someone "
                "else, reply with exactly [ignore] and nothing else, and use no tools. Otherwise just answer it normally.)\n\n")
 IGNORE = "[ignore]"
+STOP_PEEK = 0.5          # s: a burst begun over him is checked this often for a stop phrase while you're still talking
 ECHO_TAIL = 1.0          # s after he stops talking that the room still rings: a burst starting before then is his own voice
 ECHO_RUN = 2.0           # …unless it runs on this long past the ringing: then it's you, answering as he finished
 ECHO_KEEP, ECHO_RATIO, ECHO_MIN = 60, 0.55, 3    # remember what he said for 60 s · share of heard words matched · fewest words to judge
@@ -1731,7 +1732,7 @@ class Wake:
         mic, _name, buf = open_clean_mic()
         fl = Floor()
         floor, voiced, seg, in_speech, last_voice, started = None, 0, bytearray(), False, 0.0, 0.0
-        pre, n, vad_at, vad_last = bytearray(), 0, 0.0, 0.0
+        pre, n, vad_at, vad_last, peek_at = bytearray(), 0, 0.0, 0.0, 0.0
         req, said = False, None              # req: this burst is a request (a follow-up, or it began "hey Void"), so it
         cls.cut = None                       # runs until you've finished, like a normal listen, not to the first breath
         try:
@@ -1777,6 +1778,14 @@ class Wake:
                                 vad_last = now
                         if not req and cls.ran_on(started, last_voice):
                             req = True                    # you started answering as he finished: hear your turn out
+                        # begun over him: don't wait for you to finish to hear a stop phrase at its start ("Stop, stop,
+                        # that's not what I…" stops him as you say it, not once you've said the rest)
+                        if (not req and started < cls.speaking_until + ECHO_TAIL and now - peek_at >= STOP_PEEK
+                                and len(seg) >= RATE * 2 * STOP_PEEK):
+                            peek_at = now
+                            if cls.stop_in(bytes(seg)):
+                                in_speech, seg, said = False, bytearray(), None
+                                continue
                         if req:
                             done = (now - last_voice > TURN_QUIET or now - vad_last > TURN_VAD
                                     or len(seg) > RATE * 2 * TURN_MAX)
@@ -1798,7 +1807,7 @@ class Wake:
                         pre = (pre + fr)[-FRAME * 8:]
                         if voiced >= 3:
                             in_speech, last_voice, seg, started = True, now, bytearray(pre), now
-                            vad_last = now
+                            vad_last = peek_at = now
                             req = cls.window_open() and not cls.speaking()
         finally:
             if cls.follow_on:
@@ -1817,6 +1826,29 @@ class Wake:
         except Exception as e:  # noqa: BLE001
             print(f"[void] wake word stt: {e}", file=sys.stderr)
             return None
+
+    @classmethod
+    def stop_in(cls, pcm):
+        """A burst begun over him, still going: if what's said so far holds a stop phrase, stop him now (True)."""
+        try:
+            ss = speech_seconds(pcm)
+            if ss < 0.25 or ss < len(pcm) / (RATE * 2) * 0.2:
+                return False
+            text = transcribe_pcm(pcm, beam=1, sure=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"[void] stop check stt: {e}", file=sys.stderr)
+            return False
+        if is_echo(text):
+            return False
+        said = (text or "").strip(" .,!?")
+        if not STOP_IN_RE.search(said.lower()):
+            return False
+        print(f"[void] barge-in mid-burst: you told him to stop: {said[:80]}", file=sys.stderr)
+        if not Speaker.idle():
+            Speaker.stop()                       # (also hushes us)
+        BUS.pub(t="barge", listen=False, text="")
+        cls.hush()
+        return True
 
     @classmethod
     def ran_on(cls, started, ended):
