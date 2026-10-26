@@ -136,11 +136,20 @@ class ListenEnrolTest(unittest.TestCase):
                 self.assertEqual(len(self.enrolled), 0, f"enrolled a recording heard as {heard!r}")
 
     def test_noise_and_filler_enrol_nothing(self):
-        for heard in ("Thank you.", "Thanks for watching!", "Um.", "Uh", "Hmm.", "Go. Go. Go."):
+        # A sentence Whisper hallucinates and repeats on room sound is still noise.
+        for heard in ("Thank you.", "Thanks for watching!", "Um.", "Uh", "Hmm.",
+                      "The two of them were the two of them. The two of them were the two of them."):
             with self.subTest(heard=heard):
                 self.enrolled.clear()
                 self.listen(heard)
                 self.assertEqual(len(self.enrolled), 0, f"enrolled a recording heard as {heard!r}")
+
+    def test_a_short_real_phrase_he_repeats_is_him_speaking(self):
+        for heard in ("Not yet, not yet.", "Go. Go. Go."):
+            with self.subTest(heard=heard):
+                self.enrolled.clear()
+                self.listen(heard)
+                self.assertEqual(len(self.enrolled), 1, f"a short real phrase heard as {heard!r} was not enrolled once")
 
     def test_an_echo_of_his_own_voice_enrols_nothing(self):
         said = "The build finished and all forty tests passed on the first run."

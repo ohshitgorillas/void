@@ -276,14 +276,20 @@ class Echo(unittest.TestCase):
         self.assertEqual(self.burst("thank you for watching"), [])
         self.assertEqual(self.burst("okay"), [])
 
-    # noise in the follow-up window (what the log showed turning into requests)
-    def test_repeated_phrase_is_noise(self):
-        for junk in ("Oh my god, oh my god", "Go. Go. Go.", "", "   "):
+    # "void is still dropping my responses": a short phrase you say over and over is you, answering him; only the
+    # sentence Whisper makes up and repeats on room sound (and nothing at all) is noise in the follow-up window
+    def test_your_repeated_phrase_reaches_void_and_whispers_repeat_is_noise(self):
+        for said in ("Not yet, not yet", "Wait, wait, wait, wait, wait, wait"):
+            self.pub.reset_mock()
+            self.after_speech(server.ECHO_TAIL + 0.6)
+            server.Wake.follow_from = 0.0
+            self.assertFollowUp(self.burst(said), said)
+        for junk in ("The two of them were the two of them. The two of them were the two of them",
+                     "It is a pleasure to be here. It is a pleasure to be here", "", "   "):
+            self.pub.reset_mock()
             self.after_speech(server.ECHO_TAIL + 0.6)
             server.Wake.follow_from = 0.0
             self.assertEqual(self.burst(junk), [], junk)
-        self.assertFalse(server.is_noise("please add milk to the shopping list"))
-        self.assertFalse(server.is_noise("very very good"))
 
     def test_mic_gain_learns_only_from_your_requests(self):
         learn = mock.Mock()
@@ -291,7 +297,7 @@ class Echo(unittest.TestCase):
             self.after_speech(server.ECHO_TAIL + 0.6)
             server.Wake.follow_from = 0.0
             self.burst("")                                   # "heard 2.0s, 0 words"
-            self.burst("Go. Go. Go.")
+            self.burst("It is a pleasure to be here. It is a pleasure to be here")
             learn.assert_not_called()
             self.assertFollowUp(self.burst("please add milk to the shopping list"))
             learn.assert_called_once()
