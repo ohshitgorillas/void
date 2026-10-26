@@ -122,6 +122,8 @@ RunUv pip install --python $VPY -U PySide6 sounddevice pillow pycaw comtypes fas
 if ($LASTEXITCODE -ne 0) { Warn "some Python libraries failed to install - see above"; exit 1 }
 RunUv pip install --python $VPY -U piper-tts
 if ($LASTEXITCODE -ne 0) { Warn "piper-tts failed to install - Void will use Kokoro only" }
+RunUv pip install --python $VPY -U livekit==1.1.21
+if ($LASTEXITCODE -ne 0) { Warn "livekit failed to install - Void will run without echo cancelling" }
 
 Say "Copying Void's files..."
 $APP = Join-Path $ROOT "app"
