@@ -1,0 +1,92 @@
+{
+  "generator": "tests/make_scenes.py",
+  "rate": 16000,
+  "voices": {
+    "void": {
+      "engine": "kokoro",
+      "preset": "cute",
+      "voice": "af_bella",
+      "kpitch": 1.12
+    },
+    "you": {
+      "engine": "piper",
+      "voice": "en_GB-alan-medium"
+    }
+  },
+  "clips": {
+    "void_question.wav": {
+      "speaker": "void",
+      "text": "Okay, I found three photos from last summer in your Downloads folder. Do you want me to move them into Pictures, or leave them where they are?",
+      "seconds": 7.6571
+    },
+    "you_stop.wav": {
+      "speaker": "you",
+      "text": "Stop, stop, that's not what I asked for.",
+      "seconds": 2.8909
+    },
+    "you_hold_on.wav": {
+      "speaker": "you",
+      "text": "Hold on, I need to check something first.",
+      "seconds": 3.1928
+    },
+    "you_shut_up.wav": {
+      "speaker": "you",
+      "text": "Shut up for a second, please.",
+      "seconds": 2.0085
+    },
+    "you_hey_void.wav": {
+      "speaker": "you",
+      "text": "Hey Void, open my Downloads folder instead.",
+      "seconds": 3.4249
+    },
+    "you_answer.wav": {
+      "speaker": "you",
+      "text": "Move them into Pictures, please.",
+      "seconds": 2.4265
+    },
+    "you_overlap.wav": {
+      "speaker": "you",
+      "text": "Yeah, move them, and while you're at it, make a new folder called summer for them.",
+      "seconds": 4.853
+    },
+    "you_long_pauses.wav": {
+      "speaker": "you",
+      "text": "So what I'd really like you to do is, um, go through all of last week's photos and pick out the ones from the beach, the ones with the dog in them, and then put those in a new folder called summer, on the desktop.",
+      "seconds": 15.2801
+    }
+  },
+  "scenes": {
+    "void_alone": {
+      "void": "void_question.wav",
+      "you": null
+    },
+    "interrupt_stop": {
+      "void": "void_question.wav",
+      "you": "you_stop.wav"
+    },
+    "interrupt_hold_on": {
+      "void": "void_question.wav",
+      "you": "you_hold_on.wav"
+    },
+    "interrupt_shut_up": {
+      "void": "void_question.wav",
+      "you": "you_shut_up.wav"
+    },
+    "interrupt_hey_void": {
+      "void": "void_question.wav",
+      "you": "you_hey_void.wav"
+    },
+    "answer_after": {
+      "void": "void_question.wav",
+      "you": "you_answer.wav"
+    },
+    "overlap_last_second": {
+      "void": "void_question.wav",
+      "you": "you_overlap.wav"
+    },
+    "long_pauses": {
+      "void": null,
+      "you": "you_long_pauses.wav"
+    }
+  }
+}
