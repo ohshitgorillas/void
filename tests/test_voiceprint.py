@@ -155,6 +155,25 @@ class Voiceprint(unittest.TestCase):
         self.assertEqual(vp.enrolled, 0, "a print saved in another format version was loaded and used")
         self.assertIsNone(vp.score(pcm(HELD_OUT[0])))
 
+    def test_a_clip_with_under_1_5_s_of_speech_is_not_enrolled(self):
+        vp = self.ready()
+        speech = pcm("you_hold_on.wav")[int(0.6 * 16000) * 2:int(1.4 * 16000) * 2]    # 0.8 s of the owner talking
+        self.assertIsNotNone(vp.embed(speech), "0.8 s of speech: no embedding at all, so the test proves nothing")
+        vp.enroll(speech)
+        self.assertEqual(vp.enrolled, 0, "0.8 s of speech was enrolled into the voiceprint")
+        self.assertFalse(self.path.exists(), "0.8 s of speech was saved into the voiceprint")
+        vp.enroll(pcm(ENROLL[0]))
+        self.assertEqual(vp.enrolled, 1, "a clip with over 2 s of speech wasn't enrolled")
+
+    def test_a_print_saved_before_short_clips_were_refused_is_not_used(self):
+        # a print as Void saved it while it still enrolled clips under 1.5 s of speech: format version 1
+        stale = self.ready().embed(pcm(ENROLL[0]))
+        self.assertIsNotNone(stale)
+        resave(self.path, print=stale, enrolled=np.int64(voiceprint.MAX_ENROLL), version=np.int64(1))
+        vp = self.ready()
+        self.assertEqual(vp.enrolled, 0, "a print that learned from clips under 1.5 s of speech was loaded and used")
+        self.assertIsNone(vp.score(pcm(HELD_OUT[0])), "scored against a print that learned from too-short clips")
+
 
 if __name__ == "__main__":
     unittest.main()

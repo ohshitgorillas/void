@@ -10,7 +10,8 @@ The print is the running mean of the enrolled clips' unit embeddings, at most 30
 moves it by 1/30), saved to `path` after every enrolment together with FORMAT, the print's format version. A saved print whose version is
 missing or isn't FORMAT is treated as absent: the load starts from zero and says so once on stderr, so a print made by an
 older embedding or averaging is never scored against. Change FORMAT whenever the saved print's meaning changes. `score` is the cosine between a clip and the print, or None
-until MIN_ENROLL clips are in. Without the model, `available` is False, `why` says why, and nothing is enrolled or scored.
+until MIN_ENROLL clips are in. Clips under 1.5 s (MIN_ENROLL_SAMPLES) are never enrolled: measurement with the model showed
+shorter clips embed unreliably. FORMAT 2 discards prints that learned from them. Without the model, `available` is False, `why` says why, and nothing is enrolled or scored.
 """
 import io
 import sys
@@ -22,12 +23,13 @@ import numpy as np
 SR = 16000
 MIN_ENROLL = 5           # no score below this many clips
 MAX_ENROLL = 30          # the running mean counts at most this many clips
-FORMAT = 1               # the saved print's format version; a print saved under another (or none) is not used
+FORMAT = 2               # the saved print's format version; a print saved under another (or none) is not used
 MODEL = "wespeaker_en_voxceleb_resnet34.onnx"
 SOURCES = ["https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/",
            "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/"]
 MAX_SAMPLES = 3 * SR     # embed at most the first 3 s of a clip
 MIN_SAMPLES = SR // 4    # shorter than this, there's too little voice to embed
+MIN_ENROLL_SAMPLES = SR * 3 // 2   # clips under 1.5 s are never enrolled: they embed unreliably (measured); FORMAT 2 drops prints that learned from them
 
 _said = set()            # why-not lines already printed this process
 
@@ -134,6 +136,8 @@ class Voiceprint:
         return e / norm if norm > 0 else None
 
     def enroll(self, pcm: bytes) -> None:
+        if len(pcm) // 2 < MIN_ENROLL_SAMPLES:   # too short to embed reliably; never learned from
+            return
         e = self.embed(pcm)
         if e is None:
             return
