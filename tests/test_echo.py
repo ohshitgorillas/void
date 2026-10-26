@@ -225,6 +225,28 @@ class Echo(unittest.TestCase):
         server.Wake.talking_until(time.monotonic() + 5)
         self.assertEqual([e.get("t") for e in self.burst("okay okay hold on a second")], ["barge"])
 
+    # mid-burst: a burst begun over him is peeked at while it's still going (Wake.stop_in), then heard out (Wake.check)
+    def test_owner_stop_over_him_stops_him_mid_burst(self):
+        for said in ("Stop", "Shut up", "Hold on"):
+            with self.subTest(said=said):
+                self.pub.reset_mock()
+                server.Wake.talking_until(time.monotonic() + 5)
+                self.text = said
+                self.assertTrue(server.Wake.stop_in(PCM), f"{said!r} over him didn't stop him mid-burst")
+                self.assertEqual([c.kwargs.get("t") for c in self.pub.call_args_list], ["barge"])
+                self.assertEqual(server.Wake.speaking_until, 0.0)          # hushed
+
+    def test_stop_word_buried_in_his_own_speech_heard_over_him_never_stops_him(self):
+        # the live log: "barge-in mid-burst: you told him to stop: It goes to the time to realize that it's ready to
+        # have a stop on, and it's going" (his own voice heard back over him; the owner said no stop)
+        heard = "It goes to the time to realize that it's ready to have a stop on, and it's going."
+        server.Wake.talking_until(time.monotonic() + 5)
+        started = time.monotonic()
+        self.text = heard
+        self.assertFalse(server.Wake.stop_in(PCM), "stopped mid-burst by a stop word inside his own speech")
+        self.assertEqual(self.burst(heard, started), [])
+        self.assertGreater(server.Wake.speaking_until, time.monotonic())   # still talking
+
     def test_stop_begun_while_talking_stops_him_after_his_sentence_ends(self):
         # what the owner's log showed: "stop" over and over for 12 s, heard once his sentence had finished playing
         now = time.monotonic()
