@@ -32,6 +32,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import suite_data  # noqa: E402  (Void's data folder: the suite's own, set before server.py settles it)
+from fakes import hiss, pieces, ears  # noqa: E402
 
 try:
     import server
@@ -289,20 +290,6 @@ def clip(name):
         return w.readframes(w.getnframes())
 
 
-def hiss(seconds, seed):
-    """Quiet room hiss, `seconds` long: the lead-in a burst carries before you start talking."""
-    import random
-    rnd = random.Random(seed)
-    return b"".join(int(max(-32768, min(32767, round(rnd.gauss(0.0, 0.003) * 32768)))).to_bytes(2, "little", signed=True)
-                    for _ in range(int(seconds * 16000)))
-
-
-def pieces(pcm, ms=20):
-    """Every `ms`-long piece of `pcm`, back to back."""
-    n = 16000 * 2 * ms // 1000
-    return [pcm[i:i + n] for i in range(0, len(pcm) - n + 1, n)]
-
-
 @unittest.skipIf(server is None, f"server.py doesn't import here: {IMPORT_ERR}")
 class FollowUpGate(unittest.TestCase):
     @classmethod
@@ -340,15 +327,11 @@ class FollowUpGate(unittest.TestCase):
         self.heard_text = {}
         self.whisper_s = 0.0
 
-        def heard(pcm, **kw):
+        def said(pcm):
             time.sleep(test.whisper_s)
-            return server.Heard(text=test.heard_text[pcm], logprob=-0.2, no_speech=0.02,
-                                seconds=len(pcm) / (server.RATE * 2))
+            return test.heard_text[pcm]
         gate_cfg = {k: server.DEFAULTS[k] for k in ("voice_gate", "voice_min") if k in server.DEFAULTS}
         for p in (mock.patch.dict(server.CFG, gate_cfg),     # (the defaults, whatever this machine's config says)
-                  mock.patch.object(server, "speech_seconds", lambda pcm: len(pcm) / (server.RATE * 2)),
-                  mock.patch.object(server, "transcribe_pcm_heard", heard),
-                  mock.patch.object(server, "transcribe_pcm", lambda pcm, **kw: heard(pcm, **kw).text),
                   mock.patch.object(server, "SPOKEN", type(server.SPOKEN)()),
                   mock.patch.object(server.Speaker, "idle", classmethod(lambda cls: True)),
                   mock.patch.object(server.MicAuto, "learn", classmethod(lambda cls, pcm: test.learned.append(pcm))),
@@ -357,6 +340,7 @@ class FollowUpGate(unittest.TestCase):
                   mock.patch.object(voiceprint.Voiceprint, "score", score)):
             p.start()
             self.addCleanup(p.stop)
+        self.addCleanup(ears(server, said).close)
         self.q = server.BUS.sub()
         self.addCleanup(server.BUS.unsub, self.q)
 
@@ -595,8 +579,8 @@ class FollowUpGate(unittest.TestCase):
                 return ""
 
         events = []
+        self.heard_text = collections.defaultdict(lambda: "Move them into Pictures, please.")
         with mock.patch.object(server, "open_clean_mic", lambda: (FakeMic(), "fake mic", b"")), \
-                mock.patch.object(server, "transcribe_pcm", lambda b, **kw: "Move them into Pictures, please."), \
                 contextlib.redirect_stderr(io.StringIO()):
             server.Listen("ptt").run(lambda **ev: events.append(ev))
         self.assertEqual(len(self.learned), 1, f"MicAuto.learn not called once on the Listen clip: {events[-3:]}")
@@ -713,8 +697,8 @@ class FollowUpGate(unittest.TestCase):
             def err(self):
                 return ""
 
+        self.heard_text = collections.defaultdict(lambda: said)
         with mock.patch.object(server, "open_clean_mic", lambda: (FakeMic(), "fake mic", b"")), \
-                mock.patch.object(server, "transcribe_pcm", lambda b, **kw: said), \
                 contextlib.redirect_stderr(io.StringIO()):
             server.Listen("ptt").run(lambda **ev: None)
         self.assertEqual(len(self.enrolled), 1, f"Listen enrolled {len(self.enrolled)} clip(s), not one")

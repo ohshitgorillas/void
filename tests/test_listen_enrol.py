@@ -13,7 +13,6 @@ replaced by what it "hears", so the tests need neither a microphone nor the spee
 import contextlib
 import io
 import math
-import random
 import re
 import sys
 import time
@@ -28,6 +27,7 @@ sys.path.insert(0, str(ROOT / "app"))
 sys.path.insert(0, str(ROOT / "tests"))
 import suite_data  # noqa: E402,F401  (Void's data folder: the suite's own, set before server.py settles it)
 import gate  # noqa: E402
+from fakes import hiss, pieces, ears  # noqa: E402
 
 try:
     import server
@@ -52,11 +52,6 @@ def fixture(name):
 def s16(samples):
     return b"".join(int(max(-32768, min(32767, round(x * 32768)))).to_bytes(2, "little", signed=True)
                     for x in samples)
-
-
-def hiss(seconds, seed):
-    rnd = random.Random(seed)
-    return s16(rnd.gauss(0.0, 0.003) for _ in range(int(seconds * SR)))
 
 
 def chime(seconds):
@@ -96,12 +91,6 @@ class FakeMic:
         return ""
 
 
-def pieces(pcm, ms):
-    """Every `ms`-long piece of `pcm`, back to back."""
-    n = SR * 2 * ms // 1000
-    return [pcm[i:i + n] for i in range(0, len(pcm) - n + 1, n)]
-
-
 @unittest.skipIf(server is None, f"server.py doesn't import here: {SERVER_ERR}")
 class ListenEnrolTest(unittest.TestCase):
 
@@ -111,13 +100,12 @@ class ListenEnrolTest(unittest.TestCase):
         vp = types.SimpleNamespace(available=True, enrolled=0, enroll=self.enrolled.append)
         self.heard = REQUEST
         for p in (mock.patch.object(server, "open_clean_mic", lambda: (FakeMic(self.rec.pcm), "fake mic", b"")),
-                  mock.patch.object(server, "run_whisper_heard", lambda *a, **k: server.Heard(
-                      text=self.heard, logprob=-0.2, no_speech=0.05, seconds=2.0)),
                   mock.patch.object(server.MicAuto, "learn", lambda pcm: None),
                   mock.patch.object(server.Voice, "get", lambda: vp),
                   mock.patch.object(server, "SPOKEN", type(server.SPOKEN)(maxlen=200))):
             p.start()
             self.addCleanup(p.stop)
+        self.addCleanup(ears(server, lambda pcm: self.heard).close)
 
     def listen(self, heard):
         """Run one Listen session that Whisper hears as `heard`. → what it logged to stderr."""
@@ -242,9 +230,7 @@ class ListenEnrolTest(unittest.TestCase):
 
     def test_a_recording_with_too_little_speech_is_dropped_untranscribed(self):
         whispered = []
-        with mock.patch.object(server, "speech_seconds", lambda pcm: 0.1), \
-                mock.patch.object(server, "run_whisper_heard", lambda *a, **k: whispered.append(a) or server.Heard(
-                    text=REQUEST, logprob=-0.2, no_speech=0.05, seconds=0.1)):
+        with ears(server, lambda pcm: whispered.append(pcm) or REQUEST, speech_for=lambda pcm: 0.1):
             events, log = self.run_listen(REQUEST)
         self.assertEqual(self.sent(events), [], "a push-to-talk recording with 0.1 s of speech was sent on as a request")
         self.assertEqual(whispered, [], "a recording with too little speech was still sent to Whisper")
