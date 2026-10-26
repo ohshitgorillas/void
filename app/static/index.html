@@ -110,19 +110,24 @@ body.bar #chip,body.bar #moreB{display:none}
 /* what he says and what he runs show INSIDE the notch: it opens up to hold them, one black shape, no separate box.
    When both are out they stack — his terminal next to his eyes, his words after it — and dropSync() places them and
    sizes the notch to fit both. They fade in just after the notch starts to open, out just before it closes. */
-body.bar #cap,body.bar #code{position:absolute;right:auto;bottom:auto;margin:0;background:none;border:0;box-shadow:none;
+body.bar #cap,body.bar #prop{position:absolute;right:auto;bottom:auto;margin:0;background:none;border:0;box-shadow:none;
   -webkit-mask-image:none;mask-image:none;text-shadow:none;overflow:hidden;transform:none!important;translate:none;
   transition:opacity .26s var(--apple) .08s,filter .32s var(--apple) .08s,scale .32s var(--apple) .08s,top .5s var(--apple),left .5s var(--apple)}
 body.bar #cap{height:auto;max-height:150px;padding:0 12px;justify-content:flex-start;scale:1;font-family:system-ui,"Inter",sans-serif}
-body.bar #cap.off,body.bar.pnl #cap,body.bar.appr #cap,body.bar #code:not(.on){opacity:0;filter:blur(6px);scale:.96;
+body.bar #cap.off,body.bar.pnl #cap,body.bar.appr #cap,body.bar #prop:not(.on){opacity:0;filter:blur(6px);scale:.96;
   transition:opacity .15s linear,filter .15s linear,scale .15s linear,top .5s var(--apple),left .5s var(--apple)}
 body.bar.e-left #cap,body.bar.e-right #cap{max-height:200px}
-body.bar #code{height:auto;padding:0 12px;font:12.5px/1.45 system-ui,"Inter",sans-serif;color:#eaeaea;filter:none}
-body.bar #code .tb{height:auto;padding:0 0 3px;border:0;color:var(--dim);font:12px "Inter",system-ui,sans-serif;justify-content:center}
-body.bar #code .tb b{flex:0 1 auto;font-weight:400} body.bar #code .tb span{margin-left:6px}
-body.bar #code .lines{height:auto;padding:0}
-body.bar #code .l{height:auto;white-space:pre-wrap;word-break:break-word;font:12.5px/1.45 var(--mono);text-align:left}
-body.bar #code .l.out{color:#b5b5b5}
+body.bar #prop{height:auto;padding:0 12px;font:12.5px/1.45 system-ui,"Inter",sans-serif;color:#eaeaea;filter:none}
+body.bar #prop>.pk{height:auto;padding:0;background:none;border:0;border-radius:0;box-shadow:none}
+body.bar #prop .tb{height:auto;padding:0 0 3px;border:0;color:var(--dim);font:12px "Inter",system-ui,sans-serif;justify-content:center}
+body.bar #prop .tb b{flex:0 1 auto;font-weight:400} body.bar #prop .tb span{margin-left:6px}
+body.bar #prop .lines{height:auto;padding:0}
+body.bar #prop .l{height:auto;white-space:pre-wrap;word-break:break-word;font:12.5px/1.45 var(--mono);text-align:left}
+body.bar #prop .l.out{color:#b5b5b5}
+body.bar #prop.swap{animation:none}
+/* the notebook in the notch: the same flat text as the terminal, a little notebook in the title, no book drawn */
+body.bar #prop .nb-read .book{display:none} body.bar #prop .nb-read .tb,body.bar #prop .nb-read .flat{display:flex}
+body.bar #prop .nb-read .flat{flex-direction:column}
 #guy{width:330px;height:330px;overflow:visible;pointer-events:none}
 #body{pointer-events:visiblePainted;cursor:pointer}
 #pL{fill:var(--whiteL);stroke:var(--lineL,none)} #pR{fill:var(--whiteR);stroke:var(--lineR,none)}
@@ -411,31 +416,61 @@ body.hover #moreB,body.pnl #moreB,body.appr #moreB{display:none}
 .md h1,.md h2,.md h3{font-size:13.5px;margin:10px 0 6px}
 /* ===== the terminal: a small flat sheet he holds under his eyes while he works ===== */
 #stage{z-index:2}
-#code{position:fixed;left:0;top:0;width:136px;height:80px;z-index:3;pointer-events:none;border-radius:10px;
-  background:#0b0b0bf2;border:1px solid var(--edge2);box-shadow:0 8px 18px #000b;font:8.5px/12px var(--mono);color:#d6d6d6;
-  opacity:0;scale:.5;transition:opacity .3s,scale .4s cubic-bezier(.3,1.5,.5,1)}
-#code.on{opacity:1;scale:1}
-#code .tb{display:flex;align-items:center;gap:6px;height:17px;padding:0 8px;border-bottom:1px solid #1d1d1d;color:var(--hot);font-weight:600}
-#code .tb b{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
-#code .tb span{color:#777} #code .tb span.ok{color:var(--hot)} #code .tb span.bad{color:#ff6b6b}
-#code.root{border-color:#7a1414} #code.root .tb b::before{content:"root · ";color:#ff5a5a}
-#code .lines{padding:3px 8px;height:60px;overflow:hidden}
+/* #prop is what he holds: one holder (placed, turned and shown by CP), one child per kind, only the held one drawn */
+#prop{position:fixed;left:0;top:0;width:var(--pw,136px);height:var(--ph,80px);z-index:3;pointer-events:none;
+  font:8.5px/12px var(--mono);color:#d6d6d6;opacity:0;scale:.5;transition:opacity .3s,scale .4s cubic-bezier(.3,1.5,.5,1)}
+#prop.on{opacity:1;scale:1}
+#prop>.pk{display:none;width:100%;height:100%;box-sizing:border-box} #prop>.pk.held{display:block}
+/* a change of what he holds: one squishy wobble, the swap at the bottom of it */
+#prop.swap{animation:propSwap .44s cubic-bezier(.3,1.2,.5,1)}
+@keyframes propSwap{0%{scale:1}32%{scale:.62 .8}62%{scale:1.07 .97}82%{scale:.98 1.02}100%{scale:1}}
+#prop .terminal{border-radius:10px;background:#0b0b0bf2;border:1px solid var(--edge2);box-shadow:0 8px 18px #000b}
+#prop .tb{display:flex;align-items:center;gap:6px;height:17px;padding:0 8px;border-bottom:1px solid #1d1d1d;color:var(--hot);font-weight:600}
+#prop .tb b{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+#prop .tb span{color:#777} #prop .tb span.ok{color:var(--hot)} #prop .tb span.bad{color:#ff6b6b}
+#prop .terminal.root{border-color:#7a1414} #prop .terminal.root .tb b::before{content:"root · ";color:#ff5a5a}
+#prop .lines{padding:3px 8px;height:60px;overflow:hidden}
 /* root mode: a red sticker on the side of the paper you see — so it reads the right way round even though the page is
    turned toward him */
 #liveDot{animation:liveBeat 1.6s ease-in-out infinite} @keyframes liveBeat{50%{opacity:.25}} body.hover #liveTag{display:none}
-#code .rootb{display:none;position:absolute;top:-13px;left:-9px;transform:rotateY(180deg);font:700 9px var(--mono);letter-spacing:.12em;
+#prop .rootb{display:none;position:absolute;top:-13px;left:-9px;transform:rotateY(180deg);font:700 9px var(--mono);letter-spacing:.12em;
   color:#fff;background:#9a0000;border-radius:6px;padding:3px 6px;box-shadow:0 0 10px #ff000066,0 2px 6px #000a}
-#code.rootmode .rootb{display:block}
-body.faceyou #code .rootb{transform:none;left:auto;right:-9px}
-#code .l{height:12px;white-space:pre;overflow:hidden}
-#code .l.add{color:#bfe8d3} #code .l.del{color:#ff8b8b}
-#code .l.out{color:#9a9a9a} #code .l.bad{color:#ff8b8b}
-#code .l.img{height:auto} #code .l.img img{display:block;max-width:100%;max-height:44px;border-radius:3px}
-#code i{font-style:normal} #code .k{color:var(--hot)} #code .s{color:var(--whiteL,#f3dccf)} #code .c{color:#5f5f5f}
-#code .pr,#code .ok{color:var(--hot)} #code .rt{color:#ff5a5a}
-#code .cur{display:inline-block;width:5px;height:9px;margin-left:1px;vertical-align:-1px;background:var(--hot);animation:cpBlink .9s steps(1) infinite}
+#prop .terminal.rootmode .rootb{display:block}
+body.faceyou #prop .rootb{transform:none;left:auto;right:-9px}
+#prop .l{height:12px;white-space:pre;overflow:hidden}
+#prop .l.add{color:#bfe8d3} #prop .l.del{color:#ff8b8b}
+#prop .l.out{color:#9a9a9a} #prop .l.bad{color:#ff8b8b}
+#prop .l.img{height:auto} #prop .l.img img{display:block;max-width:100%;max-height:44px;border-radius:3px}
+#prop i{font-style:normal} #prop .k{color:var(--hot)} #prop .s{color:var(--whiteL,#f3dccf)} #prop .c{color:#5f5f5f}
+#prop .pr,#prop .ok{color:var(--hot)} #prop .rt{color:#ff5a5a}
+#prop .cur{display:inline-block;width:5px;height:9px;margin-left:1px;vertical-align:-1px;background:var(--hot);animation:cpBlink .9s steps(1) infinite}
 @keyframes cpBlink{50%{opacity:0}}
-body.hover #code{display:none}
+/* the notebook he reads: a soft black cover open on a cream, ruled two-page spread of the file's real lines, a leaf
+   turning over for each new spread. Turned toward him you see the outside of the cover and the leaves going over. */
+#prop .nb-read{position:relative}
+#prop .nb-read .tb,#prop .nb-read .flat{display:none}
+#prop .nbg{flex:none;width:11px;height:12px;margin-right:5px;vertical-align:-2px}
+#prop .book{position:relative;width:100%;height:100%;border-radius:6px 6px 7px 7px;background:radial-gradient(120% 140% at 50% 0,#2a282c,#121113);
+  box-shadow:0 8px 16px #000b,inset 0 0 0 1px #ffffff10;perspective:300px}
+#prop .pg{position:absolute;top:3px;width:calc(50% - 4px);height:calc(100% - 6px);box-sizing:border-box;padding:8px 4px 0 5px;overflow:hidden;
+  background:repeating-linear-gradient(#0000 0 8.4px,#9db3c766 8.4px 9px) 0 8px/100% calc(100% - 8px) no-repeat,#f3ead6;
+  font:5.4px/9px var(--mono);color:#3b352f}
+#prop .pg.l{left:3px;border-radius:4px 1px 1px 4px;box-shadow:inset -6px 0 7px -5px #6b5a3f55}
+#prop .pg.r{right:3px;border-radius:1px 4px 4px 1px;box-shadow:inset 6px 0 7px -5px #6b5a3f55}
+#prop .pg .ln{height:9px;white-space:pre;overflow:hidden;text-overflow:clip}
+#prop .pg .ln.h{color:#16120e;font-weight:700}
+#prop .spine{position:absolute;left:50%;top:1px;bottom:1px;width:2px;margin-left:-1px;background:#0d0c0e;border-radius:1px;z-index:1}
+#prop .back{position:absolute;inset:0;z-index:2;border-radius:inherit;background:radial-gradient(130% 120% at 30% 20%,#2c2a2f,#111012 70%);
+  box-shadow:inset 0 0 0 1px #ffffff12}
+#prop .back::before{content:"";position:absolute;left:50%;top:0;bottom:0;width:3px;margin-left:-1.5px;background:#08080a}
+#prop .back::after{content:"";position:absolute;right:13%;top:-1px;bottom:-1px;width:3px;background:#1d1c20;box-shadow:0 0 2px #000}
+body.faceyou #prop .back{display:none}
+#prop .leaf{position:absolute;right:3px;top:3px;width:calc(50% - 4px);height:calc(100% - 6px);z-index:3;transform-origin:0 50%;
+  transform-style:preserve-3d;animation:nbFlip .62s cubic-bezier(.45,.05,.35,1.12) forwards}
+#prop .leaf>.pg{top:0;left:0;right:auto;width:100%;height:100%;backface-visibility:hidden}
+#prop .leaf>.pg.bk{transform:rotateY(180deg)}
+@keyframes nbFlip{0%{transform:rotateY(0)}45%{transform:rotateY(-78deg) skewY(-4deg)}100%{transform:rotateY(-180deg)}}
+body.hover #prop{display:none}
 body.term #chip.work{opacity:0}          /* the terminal already says what he's doing */
 
 /* his helpers (subagents): little Voids that bud out of him and orbit; in the notch, beads on its lip */
@@ -543,7 +578,7 @@ body.hover #miniTip{display:none}
   </svg>
 </div>
 
-<div id="code"><div class="tb"><b></b><span></span></div><div class="lines"></div><i class="rootb" title="Root mode: Claude can run anything, incl. sudo">ROOT</i></div>
+<div id="prop"></div>
 <div id="chip"></div>
 <div id="cap" class="off"><div id="you"></div><div id="him"></div></div>
 <div id="atts"></div>
@@ -2561,7 +2596,7 @@ $('#barPill').addEventListener('contextmenu',e=>{ e.preventDefault(); E.body.dis
 // next to his eyes, words after it) — and lays them out inside: one black shape that always fits everything
 const NOTCH={w:260,h:52,wide:260,sw:68,sh:210,pad:12,gap:8};   // (wide = w: its glow must fit the window)
 function dropSync(){
-  const p=$('#barPill'), code=$('#code'), capEl=$('#cap'), edge=barEdge(); if(!edge) return;
+  const p=$('#barPill'), code=$('#prop'), capEl=$('#cap'), edge=barEdge(); if(!edge) return;
   const showCode=code.classList.contains('on'), showCap=!capEl.classList.contains('off')&&!!capEl.textContent.trim();
   const any=showCode||showCap, horiz=edge==='top'||edge==='bottom';
   const cw=horiz?NOTCH.wide-16:220;                               // the content column
@@ -2589,7 +2624,7 @@ function convoCheck(){
   if(!document.body.classList.contains('bar')){ const p=$('#barPill');
     if(p.style.height||p.style.width||p.classList.contains('big')){ p.style.height=p.style.width=p.style.marginTop=p.style.marginLeft=''; p.classList.remove('big'); }
     // (on its own: the top notch with nothing showing leaves the pill unsized, but dropSync placed these anyway)
-    for(const el of [$('#code'),$('#cap')]) if(el.style.top) el.style.width=el.style.left=el.style.top='';
+    for(const el of [$('#prop'),$('#cap')]) if(el.style.top) el.style.width=el.style.left=el.style.top='';
     return; }
   dropSync();
   const hearing=!!(rec||follow), b=document.body;
@@ -3027,9 +3062,60 @@ addEventListener('blur',()=>{ spaceHeld=false; if(rec&&rec.mode==='ptt') stopRec
    Keep it simple: a small flat terminal that slowly circles around him while Claude works and shows what's really
    happening — the code going into a file, the command and its output, the file being read, search hits, the to-do list.
    His eyes keep an eye on it. */
+// ---- what he holds for a tool event: the one place a file's kind is told from its name. ev: a 'tool' event; res:
+// its 'toolres' when known. Agent and Task never get this far (NO_TERMINAL).
+const IMG_FILE=/\.(?:png|jpe?g|gif|webp)$/i, MD_FILE=/\.(?:md|markdown|mdx)$/i;
+function propFor(ev,res){
+  const n=ev&&ev.name, f=String(((ev&&ev.input)||{}).file_path||'');
+  if((res&&res.images&&res.images.length)||(n==='Read'&&IMG_FILE.test(f))) return 'image';
+  if(MD_FILE.test(f)){ if(n==='Read') return 'nb-read'; if(n==='Write'||n==='Edit'||n==='MultiEdit') return 'nb-write'; }
+  return 'terminal';
+}
+// ---- the props: each one's size and how it draws into its own child of the holder. CP keeps the holder (where it
+// is, which way it faces, showing / hiding, the wider window, the notch); a prop only fills its child.
+const NB_SVG='<svg class="nbg" viewBox="0 0 11 12"><rect x=".5" y=".5" width="10" height="11" rx="1.6" fill="#f3ead6" stroke="#1a191c"/><path d="M2.6 .5v11" stroke="#1a191c"/><path d="M4.4 4h4.4M4.4 6.2h4.4M4.4 8.4h3" stroke="#9db3c7" stroke-width=".8"/></svg>';
+const PROPS={
+  terminal:{w:136, h:80, ROWS:5,
+    mount(root){ root.innerHTML='<div class="tb"><b></b><span></span></div><div class="lines"></div><i class="rootb" title="Root mode: Claude can run anything, incl. sudo">ROOT</i>';
+      this.root=root; this.out=root.querySelector('.lines'); this.title=root.querySelector('.tb b'); this.st=root.querySelector('.tb span'); },
+    open(title,o={}){ this.title.textContent=title; this.st.textContent='…'; this.st.className='';
+      this.root.classList.toggle('root',!!o.root); this.root.classList.toggle('rootmode',!!info.root); this.out.innerHTML=''; },
+    line(html,cls=''){ const d=document.createElement('div'); d.className='l '+cls; d.innerHTML=html; this.out.appendChild(d);
+      while(this.out.children.length>this.ROWS) this.out.firstChild.remove(); return d; },
+    done(ok){ this.st.textContent=ok?'✓':'✕'; this.st.className=ok?'ok':'bad'; },
+  },
+  // reading: an open spread, ROWS lines a page; each page(lines) turns a leaf over onto the next spread. His eyes scan
+  // along the lines while it's up (gaze), left page then right as he sees them.
+  'nb-read':{w:156, h:96, ROWS:9, FLAT:5,
+    mount(root){ root.innerHTML='<div class="tb">'+NB_SVG+'<b></b><span></span></div><div class="flat"></div>'+
+      '<div class="book"><div class="pg l"></div><div class="pg r"></div><i class="spine"></i><i class="back"></i></div>';
+      this.book=root.querySelector('.book'); this.pl=root.querySelector('.pg.l'); this.pr=root.querySelector('.pg.r');
+      this.flat=root.querySelector('.flat'); this.title=root.querySelector('.tb b'); this.st=root.querySelector('.tb span'); },
+    sheet(lines){ return lines.map(t=>{ t=String(t).replace(/\t/g,' '); return `<div class="ln${/^#/.test(t)?' h':''}">${esc(t)}</div>`; }).join(''); },
+    open(title){ this.land(); this.title.textContent=title; this.st.textContent='…'; this.st.className='';
+      this.pl.innerHTML=this.pr.innerHTML=this.flat.innerHTML=''; this.t0=null; },
+    land(){ if(this.landing){ clearTimeout(this.landT); const f=this.landing; this.landing=null; f(); } },
+    page(lines){ this.land(); const n=this.ROWS, L=this.sheet(lines.slice(0,n)), R=this.sheet(lines.slice(n,2*n));
+      this.flat.innerHTML=lines.filter(t=>String(t).trim()).slice(0,this.FLAT).map(t=>`<div class="l out">${esc(String(t).replace(/\t/g,' '))}</div>`).join('');
+      const leaf=document.createElement('div'); leaf.className='leaf';
+      leaf.innerHTML=`<div class="pg fr">${this.pr.innerHTML}</div><div class="pg bk">${L}</div>`;
+      this.pr.innerHTML=R; this.book.appendChild(leaf);              // the next right page lies under the turning leaf
+      this.landing=()=>{ this.pl.innerHTML=L; leaf.remove(); }; this.landT=setTimeout(()=>this.land(),640);
+      this.t0=performance.now(); this.n=Math.min(lines.length,2*n); },
+    done(ok){ this.st.textContent=ok?'✓':'✕'; this.st.className=ok?'ok':'bad'; },
+    gaze(ts){ if(this.t0==null) return [Math.sin(ts/2600)*1.2,4.2];
+      const per=420, k=Math.max(0,ts-this.t0-600)/per, i=Math.min(Math.floor(k),Math.max(0,this.n-1)), ph=i<this.n-1?k%1:1;
+      const side=i<this.ROWS?-1:1, row=i%this.ROWS, x=side*3.2-1.5+ph*3, mirror=info.code_face==='you'?1:-1;
+      return [x*mirror,3.4+row/this.ROWS*1.8]; },
+  },
+  'nb-write':{w:120, h:96, mount(root){}},                 // writing (step 3)
+  image:{w:136, h:96, mount(root){}},                      // a picture (step 4)
+};
+
 const CP=(()=>{
-  const el=$('#code'), out=el.querySelector('.lines'), titleEl=el.querySelector('.tb b'), stEl=el.querySelector('.tb span');
-  const W=136, H=80, ROWS=5;                       // size, visible lines
+  const el=$('#prop');
+  for(const k in PROPS){ const c=document.createElement('div'); c.className='pk '+k; c.dataset.kind=k; el.appendChild(c); PROPS[k].mount(c); }
+  let W=136, H=80, held=null, swapT=null, swapEndT=null;   // the held prop and its size
   let on=false, last=0, wide=false, offT=null, pos=null;
   const sp={x:0,y:0,vx:0,vy:0,r:0};                // held in a "hand": follows where he looks, with a little lag and tilt
   let look=[0,4.5], lookUntil=0, glancing=false;
@@ -3052,14 +3138,18 @@ const CP=(()=>{
         look=opts[Math.random()*opts.length|0]; lookUntil=ts+1600+Math.random()*1200;
       } else lookUntil=ts+6000+Math.random()*5000;
     }
-    return glancing?look:[Math.sin(ts/2600)*1.2,4.2];     // reading: eyes down on the page, a slow small drift
+    if(glancing) return look;
+    const p=PROPS[held]; return p&&p.gaze?p.gaze(ts):[Math.sin(ts/2600)*1.2,4.2];   // reading: eyes down on the page, a slow small drift
   };
   function tick(ts){
     requestAnimationFrame(tick);
     const dt=Math.min(.05,(ts-(last||ts))/1000); last=ts;
     if(!on&&!el.classList.contains('on')) return;
+    place(dt,ts);
+  }
+  function place(dt,ts){
     const edge=barEdge();
-    if(edge){ pos={x:170,y:230,cx:170,cy:230}; return; }  // the notch: CSS puts it inside the notch (see body.bar #code)
+    if(edge){ pos={x:170,y:230,cx:170,cy:230}; return; }  // the notch: CSS puts it inside the notch (see body.bar #prop)
     const {cx,cy,r}=geo();
     // the paper only goes where he's *looking away to* — not with every flick of his eyes
     const gx=glancing?look[0]:0, gy=glancing?look[1]:4.2, half=W/2+14;
@@ -3080,16 +3170,30 @@ const CP=(()=>{
   }
   requestAnimationFrame(tick);
 
+  // ---- changing what's in his hand: nothing held (or the notch) swaps at once; otherwise one squishy wobble with the
+  // swap at the bottom of it, so the holder never leaves his hand
+  function propSwap(kind){
+    if(kind===held) return; const was=held; held=kind;
+    const put=()=>{ W=PROPS[kind].w; H=PROPS[kind].h; el.style.setProperty('--pw',W+'px'); el.style.setProperty('--ph',H+'px');
+      for(const c of el.children) c.classList.toggle('held',c.dataset.kind===kind); };
+    clearTimeout(swapT); clearTimeout(swapEndT);
+    if(!was||!el.classList.contains('on')||barEdge()){ el.classList.remove('swap'); put(); return; }
+    el.classList.remove('swap'); void el.offsetWidth; el.classList.add('swap');
+    swapT=setTimeout(put,140); swapEndT=setTimeout(()=>el.classList.remove('swap'),460);
+  }
+  propSwap('terminal');
+  function hold(kind){ propSwap(kind); show(); }
+
   // ---- show / hide (the window gets a bit wider while it's out, so it has room to go round)
   function show(){ if(info.code_panel===false||document.body.classList.contains('hover')) return; clearTimeout(offT);
-    if(!wide){ wide=true; native('code:on'); } if(!on&&!el.classList.contains('on')){ pos=null; glancing=false; lookUntil=performance.now()+4500; } on=true; el.classList.add('on'); document.body.classList.add('term'); }
+    if(!wide){ wide=true; native('code:on'); } if(!on&&!el.classList.contains('on')){ pos=null; glancing=false; lookUntil=performance.now()+4500; } on=true; el.classList.add('on'); document.body.classList.add('term');
+    if(!barEdge()) place(0,performance.now()); }           // (turned the right way from its very first frame)
   function hide(){ on=false; el.classList.remove('on'); document.body.classList.remove('term'); clearTimeout(offT); offT=setTimeout(()=>{ if(!on&&wide){ wide=false; native('code:off'); } },400); }
 
   // ---- writing to it
   const KW=/\b(def|return|if|elif|else|for|while|in|not|and|or|import|from|try|except|with|as|const|let|var|function|async|await|new|null|None|True|False|true|false|fn|pub|use|match|export|raise|throw)\b/g;
   const hl=t=>esc(t).replace(/(&quot;.*?&quot;|"[^"]*"|'[^']*')/g,'<i class="s">$1</i>').replace(KW,'<i class="k">$1</i>').replace(/(#.*|\/\/.*)$/,'<i class="c">$1</i>');
-  function line(html,cls=''){ const d=document.createElement('div'); d.className='l '+cls; d.innerHTML=html; out.appendChild(d);
-    while(out.children.length>ROWS) out.firstChild.remove(); return d; }
+  const line=(html,cls)=>PROPS.terminal.line(html,cls);
   const wait=ms=>new Promise(r=>setTimeout(r,ms));
   let q=[], running=false, answering=false; const RES={};
   const hurry=()=>q.length>0||!busy;              // more waiting (or he's done)? skip the typing
@@ -3099,12 +3203,13 @@ const CP=(()=>{
     for(let i=1;i<=text.length;i++){ d.innerHTML=pre+hl(text.slice(0,i))+'<i class="cur"></i>'; await wait(1000/cps); if(hurry()) break; }
     d.innerHTML=pre+hl(text);
   }
-  function open(title,root){ titleEl.textContent=title; stEl.textContent='…'; stEl.className=''; el.classList.toggle('root',!!root); el.classList.toggle('rootmode',!!info.root); out.innerHTML=''; show(); }
-  function done(ok){ stEl.textContent=ok?'✓':'✕'; stEl.className=ok?'ok':'bad'; }
+  function open(title,root){ hold('terminal'); PROPS.terminal.open(title,{root}); }
+  const done=ok=>PROPS.terminal.done(ok);
   async function result(id){ for(let i=0;i<1200&&!RES[id]&&busy;i++){ if(q.length&&i>20) break; await wait(50); } return RES[id]; }
   function pics(r){ for(const src of (r&&r.images)||[]){ const d=line('','out img'), im=new Image(); im.src=src; d.appendChild(im); } }
   const rows=(t,n)=>String(t||'').replace(/\r/g,'').split('\n').filter(x=>x.trim()).slice(0,n);
   const name=p=>String(p||'').split('/').pop();
+  const readRows=(r,n)=>rows(r&&r.text,n).filter(t=>t.trim()!=='[image]').map(t=>t.replace(/^\s*\d+[\t→]/,'')).filter(t=>t.trim());
   const P=()=>info.root?'<i class="rt">#</i> ':'<i class="pr">$</i> ';
 
   const VIEWS={
@@ -3122,9 +3227,15 @@ const CP=(()=>{
       const r=await result(ev.id);
       if(r){ for(const t of rows(r.text,30)){ line(esc(t),r.is_error?'bad':'out'); await wait(hurry()?0:60); } done(!r.is_error); }
       await wait(hurry()?200:1000); },
-    async Read(ev){ const x=ev.input||{}; open('reading '+name(x.file_path));
+    async Read(ev){ const x=ev.input||{};
+      if(propFor(ev,RES[ev.id])==='nb-read'){ const nb=PROPS['nb-read'], per=2*nb.ROWS;
+        hold('nb-read'); nb.open('reading '+name(x.file_path));
+        const r=await result(ev.id), ls=readRows(r,90).slice(0,4*per);
+        for(let i=0;i===0||i<ls.length;i+=per){ PROPS['nb-read'].page(ls.slice(i,i+per)); await wait(hurry()?0:i+per<ls.length?1300:900); }
+        nb.done(!(r&&r.is_error)); await wait(hurry()?100:500); return; }
+      open('reading '+name(x.file_path));
       const r=await result(ev.id); pics(r);
-      for(const t of rows(r&&r.text,40).filter(t=>t.trim()!=='[image]').map(t=>t.replace(/^\s*\d+[\t→]/,'')).filter(t=>t.trim()).slice(0,24)){ line(hl(t),'out'); await wait(hurry()?0:90); }
+      for(const t of readRows(r,40).slice(0,24)){ line(hl(t),'out'); await wait(hurry()?0:90); }
       await wait(hurry()?100:500); },
     async Grep(ev){ const x=ev.input||{}; open('searching');
       await type('<i class="pr">⌕</i> ',x.pattern||x.glob||x.path||'','',50);
