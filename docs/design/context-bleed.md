@@ -94,8 +94,9 @@ the batch.
 
 The echo canceller is untouched: the gate runs on the same cleaned PCM `Wake.check` already gets, after `is_echo`.
 
-Latency: the follow branch already waits for one Whisper pass; the embedding runs on the same clip once (unmeasured;
-target under 100 ms on the Mac CPU, checked by step 4's test).
+Latency: `Voiceprint.score` embeds at most the first 3 s of the clip, and `Wake.check` runs it on its own thread
+while Whisper transcribes the same clip, so the gate adds under 100 ms of wall time over Whisper alone (checked by
+step 3's test). Uncapped, a warm score took 312 ms on a 4.9 s clip and 1.2 s on an 18 s clip.
 
 ## Order
 
@@ -108,10 +109,15 @@ Gate stream:
 2. `voiceprint.py` with model fetch and `why`. Files: `app/voiceprint.py`, `tests/test_voiceprint.py`,
    installers only if the model must ship. Done: the owner-voice fixtures score above the Kokoro and room-music
    fixtures.
-3. `gate.judge` wired into `Wake.check`'s follow branch; enrollment beside the three `MicAuto.learn` calls; confidence
-   only until 5 clips are enrolled; config keys; doctor line; `gate_drop` published with the log line. Files:
-   `app/gate.py`, `app/server.py`, `tests/test_gate.py`, `tests/test_wake_loop.py`. Done: room-music follow-up
-   dropped, owner follow-up kept, wake-word clip never judged, judge+score under budget.
+2a. `Voiceprint.score` and `enroll` embed at most the first 3 s of a clip. Files: `app/voiceprint.py`,
+   `tests/test_voiceprint.py`. Done: a warm score of the 18 s room-music fixture takes under 250 ms, and the
+   owner-voice fixtures still score above the Kokoro and room-music fixtures.
+3. `gate.judge` wired into `Wake.check`'s follow branch, with the score computed on its own thread alongside Whisper;
+   enrollment beside the wake-word and Listen `MicAuto.learn` calls only (`app/server.py:1405, 1744`), never the
+   follow-up one; confidence only until 5 clips are enrolled; config keys; doctor line; `gate_drop` published with
+   the log line. Files: `app/gate.py`, `app/server.py`, `tests/test_gate.py`, `tests/test_wake_loop.py`. Done:
+   room-music follow-up dropped, owner follow-up kept, wake-word clip never judged, the gate adds under 100 ms of
+   wall time over Whisper alone.
 4. The faint spark on `gate_drop`. Files: `app/static/index.html`, `tests/test_page_sparks.py`. Done: a `gate_drop`
    event draws one faint spark that fades; existing spark tests green.
 
