@@ -578,5 +578,153 @@ class HeardTest(unittest.TestCase):
         self.assertEqual(text, server.run_whisper_heard(audio, **kw).text)
 
 
+VFRAME = 640                                                # samples in one of the mic loops' 40 ms frames
+
+
+def level(rms_wanted):
+    """One 40 ms frame whose level is `rms_wanted` (full scale 1.0): a square wave, so its rms is exactly its height."""
+    a = round(rms_wanted * 32768)
+    return pcm([a if i % 2 else -a for i in range(VFRAME)])
+
+
+def feed(v, fr, times, soft=1.0, hold=False):
+    out = None
+    for _ in range(times):
+        out = v.frame(fr, soft, hold)
+    return out
+
+
+QUIET, ROOM, LOUD = 0.002, 0.02, 0.1
+
+
+@unittest.skipIf(hearing is None, f"hearing.py doesn't import here: {IMPORT_ERR}")
+class VoicingTest(unittest.TestCase):
+    """Voicing hears, frame by frame, whether someone is talking: the frame's level, the room's noise level (the quiet
+    end, 20th percentile, of the last ~3 s), the threshold a voice must clear (never under `low`, else `over` times the
+    room), and how many recent frames cleared it, counted up to 4 and back down to 0."""
+
+    def test_a_frame_gives_back_its_level_the_room_the_threshold_and_the_count(self):
+        out = hearing.Voicing(0.012, 3.0).frame(level(QUIET), 1.0)
+        self.assertEqual(len(out), 4)
+        self.assertIsInstance(out[3], int)
+
+    def test_the_level_is_the_frames_rms_scaled_by_soft(self):
+        v = hearing.Voicing(0.012, 3.0)
+        self.assertAlmostEqual(v.frame(level(LOUD), 1.0)[0], LOUD, places=4)
+        self.assertAlmostEqual(hearing.Voicing(0.012, 3.0).frame(level(LOUD), 2.5)[0], LOUD * 2.5, places=4)
+        self.assertEqual(hearing.Voicing(0.012, 3.0).frame(pcm([0] * VFRAME), 1.0)[0], 0.0)
+
+    def test_in_a_silent_room_the_threshold_is_low(self):
+        for low, over in ((0.012, 3.0), (0.015, 3.2)):
+            _rms, floor, thr, _n = feed(hearing.Voicing(low, over), level(0.0), 30)
+            self.assertEqual(floor, 0.0)
+            self.assertAlmostEqual(thr, low)
+
+    def test_in_a_noisy_room_the_threshold_is_over_times_the_room(self):
+        _rms, floor, thr, _n = feed(hearing.Voicing(0.012, 3.0), level(ROOM), 75)
+        self.assertAlmostEqual(floor, ROOM, places=4)
+        self.assertAlmostEqual(thr, ROOM * 3.0, places=4)
+        _rms, floor, thr, _n = feed(hearing.Voicing(0.015, 3.2), level(ROOM), 75)
+        self.assertAlmostEqual(thr, ROOM * 3.2, places=4)
+
+    def test_pauses_that_fill_a_fifth_of_the_last_three_seconds_keep_the_room_quiet(self):
+        v = hearing.Voicing(0.012, 3.0)
+        feed(v, level(QUIET), 20)
+        _rms, floor, _thr, _n = feed(v, level(ROOM), 55)
+        self.assertAlmostEqual(floor, QUIET, places=4)
+
+    def test_pauses_under_a_fifth_of_the_last_three_seconds_do_not(self):
+        v = hearing.Voicing(0.012, 3.0)
+        feed(v, level(QUIET), 10)
+        _rms, floor, _thr, _n = feed(v, level(ROOM), 65)
+        self.assertAlmostEqual(floor, ROOM, places=4)
+
+    def test_a_steady_noise_lifts_the_room_within_three_seconds(self):
+        v = hearing.Voicing(0.012, 3.0)
+        feed(v, level(QUIET), 200)
+        _rms, floor, thr, _n = feed(v, level(ROOM), 75)            # 75 frames of 40 ms: 3 s
+        self.assertAlmostEqual(floor, ROOM, places=4)
+        self.assertAlmostEqual(thr, ROOM * 3.0, places=4)
+
+    def test_a_held_frame_leaves_the_room_alone(self):
+        v = hearing.Voicing(0.012, 3.0)
+        feed(v, level(QUIET), 75)
+        _rms, floor, _thr, _n = feed(v, level(ROOM), 200, hold=True)
+        self.assertAlmostEqual(floor, QUIET, places=4)
+
+    def test_a_held_first_frame_still_sets_the_room(self):
+        _rms, floor, _thr, _n = hearing.Voicing(0.012, 3.0).frame(level(ROOM), 1.0, hold=True)
+        self.assertAlmostEqual(floor, ROOM, places=4)
+
+    def test_the_count_climbs_to_four_over_the_threshold_and_falls_to_nought_under_it(self):
+        v = hearing.Voicing(0.012, 3.0)
+        feed(v, level(0.0), 10)
+        up = [v.frame(level(LOUD), 1.0, hold=True)[3] for _ in range(6)]
+        down = [v.frame(level(0.0), 1.0)[3] for _ in range(6)]
+        self.assertEqual(up, [1, 2, 3, 4, 4, 4])
+        self.assertEqual(down, [3, 2, 1, 0, 0, 0])
+
+    def test_soft_decides_whether_a_frame_clears_the_threshold(self):
+        v = hearing.Voicing(0.012, 3.0)
+        feed(v, level(0.0), 10)
+        self.assertEqual(v.frame(level(0.008), 1.0, hold=True)[3], 0)    # 0.008 is under 0.012
+        self.assertEqual(v.frame(level(0.008), 2.0, hold=True)[3], 1)    # 0.016 is over it
+
+    def test_two_detectors_keep_their_own_rooms(self):
+        a, b = hearing.Voicing(0.012, 3.0), hearing.Voicing(0.012, 3.0)
+        feed(a, level(ROOM), 75)
+        _rms, floor, _thr, n = b.frame(level(0.0), 1.0)
+        self.assertEqual((floor, n), (0.0, 0))
+
+
+class Built(Exception):
+    pass
+
+
+class MicRead(Exception):
+    pass
+
+
+class DeafMic:
+    def read(self, timeout):
+        raise MicRead
+
+    def close(self):
+        pass
+
+
+@unittest.skipIf(server is None, f"server.py doesn't import here: {SERVER_ERR}")
+@unittest.skipIf(hearing is None, f"hearing.py doesn't import here: {IMPORT_ERR}")
+class LoopsUseVoicingTest(unittest.TestCase):
+    """speech_span, Listen.run and Wake.session hear voice through hearing.Voicing, and server.py keeps no Floor."""
+
+    def setUp(self):
+        def spy(*a, **k):
+            raise Built
+        for target, name, value in ((hearing, "Voicing", spy),
+                                    (server, "open_clean_mic", lambda: (DeafMic(), "deafmic", bytearray()))):
+            p = mock.patch.object(target, name, value, create=True)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_server_keeps_no_floor_of_its_own(self):
+        self.assertFalse(hasattr(server, "Floor"))
+
+    def test_speech_span_builds_a_voicing(self):
+        with self.assertRaises(Built):
+            server.speech_span(level(LOUD) * 10)
+
+    def test_listen_builds_a_voicing_before_it_reads_the_mic(self):
+        with self.assertRaises(Built):
+            server.Listen("auto").run(lambda **k: None)
+
+    def test_wake_session_builds_a_voicing_before_it_reads_the_mic(self):
+        cut = server.Wake.cut
+        self.addCleanup(setattr, server.Wake, "cut", cut)
+        with mock.patch.object(server.Wake, "should_run", lambda *a: True):
+            with self.assertRaises(Built):
+                server.Wake.session()
+
+
 if __name__ == "__main__":
     unittest.main()
