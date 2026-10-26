@@ -1514,8 +1514,16 @@ def list_mics():
 
 STOP_RE = re.compile(r"(?:ok(?:ay)?\W+|void\W+|hey\W+void\W+)?(?:stop|wait|shush|shh+|quiet|be quiet|shut up|hold on|hang on|"
                      r"enough|stop talking|that's enough|thanks?(?: you)?|got it)(?:\W+(?:void|please|now))?")
-# while he talks only these stop him, anywhere in what the mic caught (his own voice, however garbled, says none of them)
-STOP_IN_RE = re.compile(r"\b(?:stop|hold on|hang on|shut up|be quiet|shush|shh+|that's enough)\b")
+# while he talks only these stop him, and only said as a stop: opening or closing a clause of what the mic caught (his
+# own voice heard back over him may carry the word inside a sentence, "ready to have a stop on, and it's going")
+_STOP_WORDS = r"(?:stop|hold on|hang on|shut up|be quiet|shush|shh+|that's enough)"
+_STOP_FILL = r"(?:ok(?:ay)?|oh|no|hey|void|um+|uh+|please|now|so|well)"
+STOP_IN_RE = re.compile(rf"^\W*(?:{_STOP_FILL}\W+)*{_STOP_WORDS}\b|\b{_STOP_WORDS}(?:\W+{_STOP_FILL})*\W*$")
+
+
+def stop_said(text):
+    """A stop phrase said as one: some clause of the transcript opens or closes with it (filler and his name aside)."""
+    return any(STOP_IN_RE.search(c) for c in re.split(r"[.,!?;]+", (text or "").lower()))
 # sent ahead of a follow-up (said without "hey Void") so Claude can tell if it was even meant for him
 FOLLOW_NOTE = ("(Voice note from Void: the mic picked this up a few seconds after your last reply, without \"hey Void\". "
                "If it is clearly not meant for you, e.g. the user thinking out loud, talking to themselves or to someone "
@@ -1871,7 +1879,7 @@ class Wake:
         if is_echo(text):
             return False
         said = (text or "").strip(" .,!?")
-        if not STOP_IN_RE.search(said.lower()):
+        if not stop_said(said):
             return False
         print(f"[void] barge-in mid-burst: you told him to stop: {said[:80]}", file=sys.stderr)
         if not Speaker.idle():
@@ -1927,13 +1935,13 @@ class Wake:
 
         def log(what):                           # (what it heard, so the next missed turn shows in the log)
             print(f"[void] {what}: {said[:80]}", file=sys.stderr)
-        if is_noise(said) and not (during and STOP_IN_RE.search(said.lower())):
+        if is_noise(said) and not (during and stop_said(said)):
             # nothing, filler, or a sentence looping: the room, not you (but a stop said over him is you stopping him)
             if said:
                 log("dropped as noise")
             return
         low = said.lower()
-        if (cls.speaking() and (m or STOP_RE.fullmatch(low))) or (during and STOP_IN_RE.search(low)):
+        if (cls.speaking() and (m or STOP_RE.fullmatch(low))) or (during and stop_said(low)):
             log("barge-in: you told him to stop")
             if not Speaker.idle():
                 Speaker.stop()                   # (also hushes us)
