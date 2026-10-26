@@ -11,7 +11,6 @@ the network.
 """
 import contextlib
 import io
-import os
 import sys
 import tempfile
 import unittest
@@ -22,6 +21,8 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 SCENES = ROOT / "tests" / "fixtures" / "scenes"
 sys.path.insert(0, str(ROOT / "app"))
+sys.path.insert(0, str(ROOT / "tests"))
+import suite_data  # noqa: E402  (Void's data folder: the suite's own, set before server.py settles it)
 
 try:
     import server
@@ -39,8 +40,7 @@ except Exception as e:  # noqa: BLE001
 else:
     GATE_ERR = None
 
-DATA_DIR = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "void"
-MODEL_DIR = DATA_DIR / "voices" / "voiceprint"
+MODEL_DIR = suite_data.MODEL_DIR
 
 ENROLL = ["you_stop.wav", "you_hold_on.wav", "you_shut_up.wav", "you_hey_void.wav", "you_answer.wav"]
 OWNER = ["you_overlap.wav", "you_long_pauses.wav"]      # the owner, never enrolled

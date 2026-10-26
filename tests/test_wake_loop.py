@@ -24,6 +24,8 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import suite_data  # noqa: E402  (Void's data folder: the suite's own, set before server.py settles it)
 
 try:
     import server
@@ -259,7 +261,7 @@ class WakeLoop(unittest.TestCase):
 
 ROOT = Path(__file__).resolve().parent.parent
 SCENES = ROOT / "tests" / "fixtures" / "scenes"
-VP_MODEL_DIR = Path(server.DATA_DIR if server else ".") / "voices" / "voiceprint"
+VP_MODEL_DIR = suite_data.MODEL_DIR
 ENROLL = ["you_stop.wav", "you_hold_on.wav", "you_shut_up.wav", "you_hey_void.wav", "you_answer.wav"]
 SAID = {"room_music.wav": "take me down to the river tonight where the summer lights are shining bright",
         "you_overlap.wav": "Yeah, move them, and while you're at it, make a new folder called summer for them.",

@@ -6,7 +6,6 @@ The model is fetched on first use into Void's data folder, so the first run need
 
     python3 -m unittest tests.test_voiceprint -v
 """
-import os
 import sys
 import tempfile
 import time
@@ -17,6 +16,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SCENES = ROOT / "tests" / "fixtures" / "scenes"
 sys.path.insert(0, str(ROOT / "app"))
+sys.path.insert(0, str(ROOT / "tests"))
+import suite_data  # noqa: E402  (Void's data folder: the suite's own, set before server.py settles it)
 
 try:
     import voiceprint
@@ -25,8 +26,7 @@ except Exception as e:  # noqa: BLE001
 else:
     IMPORT_ERR = None
 
-DATA_DIR = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "void"
-MODEL_DIR = DATA_DIR / "voices" / "voiceprint"     # shared with the app, so the model is fetched once
+MODEL_DIR = suite_data.MODEL_DIR                  # the app's, read from the real data folder, so it is fetched once
 
 ENROLL = ["you_stop.wav", "you_hold_on.wav", "you_shut_up.wav", "you_hey_void.wav", "you_answer.wav"]
 HELD_OUT = ["you_overlap.wav", "you_long_pauses.wav"]   # the owner, never enrolled

@@ -13,6 +13,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "app"))
+sys.path.insert(0, str(HERE))
+import suite_data  # noqa: E402  (Void's data folder: the suite's own, set before server.py settles it)
 import winsys  # noqa: E402
 
 
