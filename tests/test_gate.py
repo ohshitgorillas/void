@@ -25,6 +25,7 @@ SCENES = ROOT / "tests" / "fixtures" / "scenes"
 sys.path.insert(0, str(ROOT / "app"))
 sys.path.insert(0, str(ROOT / "tests"))
 import suite_data  # noqa: E402  (Void's data folder: the suite's own, set before server.py settles it)
+import fakes  # noqa: E402
 
 try:
     import server
@@ -52,16 +53,6 @@ MUSIC = "room_music.wav"
 def pcm(name):
     with wave.open(str(SCENES / name), "rb") as w:
         return w.readframes(w.getnframes())
-
-
-def sure(pcm_bytes, text="something was said here"):
-    """What Whisper reports for a clip it is sure of: the confidence filters alone would let it through."""
-    return server.Heard(text=text, logprob=-0.2, no_speech=0.02, seconds=len(pcm_bytes) / 32000)
-
-
-def nothing():
-    """What Whisper reports when it kept no segment at all (Heard's documented 'none' values)."""
-    return server.Heard(text="", logprob=float("-inf"), no_speech=1.0, seconds=0.0)
 
 
 def config(**over):
@@ -106,7 +97,7 @@ class Gate(unittest.TestCase):
     # ---- room music is dropped, the owner is kept
     def test_room_music_follow_up_is_dropped(self):
         clip = pcm(MUSIC)
-        v = self.judge(follow_up(clip, sure(clip), self.vp.score(clip)))
+        v = self.judge(follow_up(clip, fakes.heard(seconds=len(clip) / 32000), self.vp.score(clip)))
         self.assertFalse(v.keep, f"room music kept ({v.why})")
         self.assertEqual(v.why, "not your voice")
 
@@ -114,12 +105,12 @@ class Gate(unittest.TestCase):
         for n in OWNER:
             with self.subTest(n):
                 clip = pcm(n)
-                v = self.judge(follow_up(clip, sure(clip), self.vp.score(clip)))
+                v = self.judge(follow_up(clip, fakes.heard(seconds=len(clip) / 32000), self.vp.score(clip)))
                 self.assertTrue(v.keep, f"the owner's {n} dropped ({v.why})")
                 self.assertEqual(v.why, "kept")
 
     def test_a_clip_whisper_heard_nothing_in_is_dropped_as_noise(self):
-        v = self.judge(follow_up(pcm(MUSIC), nothing(), None))
+        v = self.judge(follow_up(pcm(MUSIC), fakes.heard("", sure=False), None))
         self.assertFalse(v.keep, "a clip with no kept segment was kept")
         self.assertEqual(v.why, "noise")
 
@@ -129,11 +120,11 @@ class Gate(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             vp = voiceprint.Voiceprint(Path(d) / "voiceprint", MODEL_DIR)
             for i, n in enumerate(ENROLL[:5]):
-                v = self.judge(follow_up(clip, sure(clip), vp.score(clip)))
+                v = self.judge(follow_up(clip, fakes.heard(seconds=len(clip) / 32000), vp.score(clip)))
                 self.assertTrue(v.keep, f"room music dropped ({v.why}) with only {i} clips enrolled")
                 vp.enroll(pcm(n))
             self.assertEqual(vp.enrolled, 5)
-            v = self.judge(follow_up(clip, sure(clip), vp.score(clip)))
+            v = self.judge(follow_up(clip, fakes.heard(seconds=len(clip) / 32000), vp.score(clip)))
             self.assertFalse(v.keep, "room music kept with five clips enrolled")
 
     # ---- switched off in the config
@@ -142,7 +133,7 @@ class Gate(unittest.TestCase):
         cfg = config(voice_gate=False)
         v = self.judge(follow_up(clip, None, None, text="something was said here"), cfg)
         self.assertTrue(v.keep, f"dropped ({v.why}) with voice_gate off")
-        v = self.judge(follow_up(clip, nothing(), None), cfg)
+        v = self.judge(follow_up(clip, fakes.heard("", sure=False), None), cfg)
         self.assertFalse(v.keep, "a clip with no kept segment kept with voice_gate off")
         self.assertEqual(v.why, "noise")
 
