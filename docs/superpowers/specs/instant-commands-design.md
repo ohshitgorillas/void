@@ -172,8 +172,8 @@ A config entry, as the owner writes it in `config.json` or the Settings editor s
 ```json
 "voice_commands": [
   {"name": "Roon pause", "replaces": "media.pause", "run": "roonctl pause", "reply": "Paused."},
-  {"name": "Roon what", "replaces": "media.what", "run": "roonctl now-playing | head -1", "reply": "That's {out}."},
-  {"name": "Roon volume", "replaces": "volume.set", "match": ["roon volume (?P<n>\\d+)"], "run": "roonctl volume {n}"},
+  {"name": "Roon what", "replaces": "media.what", "run": "roonctl now", "reply": "That's {out}."},
+  {"name": "Roon album", "match": ["play (?:the )?album (?P<album>.+)"], "run": "roonctl play --album {album}"},
   {"name": "Projector", "say": ["projector on", "turn on the projector"], "run": "~/bin/projector on"}
 ]
 ```
