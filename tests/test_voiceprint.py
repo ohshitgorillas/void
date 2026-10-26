@@ -9,6 +9,7 @@ The model is fetched on first use into Void's data folder, so the first run need
 import os
 import sys
 import tempfile
+import time
 import unittest
 import wave
 from pathlib import Path
@@ -74,6 +75,20 @@ class Voiceprint(unittest.TestCase):
             for n, s in scores.items():
                 self.assertIsInstance(s, float, n)
         self.assertGreater(min(owner.values()), max(other.values()), f"owner {owner}, not owner {other}")
+
+    def test_score_looks_at_no_more_than_the_first_3_seconds(self):
+        vp = self.ready()
+        for n in ENROLL:
+            vp.enroll(pcm(n))
+        music = pcm("room_music.wav")
+        self.assertGreater(len(music), 16000 * 2 * 15, "room_music.wav should be about 18 s")
+        vp.score(music)                                  # warm: model loaded, first run done
+        best = float("inf")
+        for _ in range(3):
+            t0 = time.perf_counter()
+            vp.score(music)
+            best = min(best, time.perf_counter() - t0)
+        self.assertLess(best, 0.250, f"warm score of the 18 s clip took {best * 1000:.0f} ms; the cap at 3 s is missing")
 
     def test_says_when_unavailable_and_why(self):
         blocker = Path(self.tmp.name) / "not_a_folder"
