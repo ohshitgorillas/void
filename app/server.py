@@ -1568,10 +1568,19 @@ def is_echo(heard):
 NOISE_WORDS = {"you", "thank you", "thanks", "bye", "thanks for watching", "thank you for watching", "uh", "um", "hmm"}
 
 
+NOISE_LOOP = 4   # a phrase this many words or longer, said twice or more back to back, is Whisper looping on room sound
+
+
 def is_noise(heard):
-    """Nothing, a stock filler, or one short phrase over and over ("Go. Go. Go.", "Oh my god, oh my god")."""
+    """Nothing, a stock filler, or a whole sentence over and over ("It is a pleasure to be here. It is a pleasure to be
+    here"): Whisper makes up and repeats a sentence on room sound. A short phrase repeated ("Not yet, not yet", "Wait,
+    wait, wait") is you, answering him, and is not noise."""
     w = re.findall(r"[^\W_]+", (heard or "").lower())
-    return not w or " ".join(w) in NOISE_WORDS or (len(w) >= 2 and len(set(w)) * 2 <= len(w))
+    if not w or " ".join(w) in NOISE_WORDS:
+        return True
+    # the shortest phrase whose repeats make up the whole (a cut-off last repeat allowed)
+    loop = next(n for n in range(1, len(w) + 1) if all(x == w[i % n] for i, x in enumerate(w)))
+    return loop >= NOISE_LOOP and len(w) >= 2 * loop
 WAKE_RE = re.compile(r"^\W*(?:(?:hey|hi|hay|okay|ok|yo|oi)\W+)?(void|voyd|boyd|voi|vod)\b\W*(.*)$", re.I | re.S)
 
 
@@ -1919,7 +1928,7 @@ class Wake:
         def log(what):                           # (what it heard, so the next missed turn shows in the log)
             print(f"[void] {what}: {said[:80]}", file=sys.stderr)
         if is_noise(said) and not (during and STOP_IN_RE.search(said.lower())):
-            # nothing, filler, or one phrase looping: the room, not you (but "Stop, stop" over him is you stopping him)
+            # nothing, filler, or a sentence looping: the room, not you (but a stop said over him is you stopping him)
             if said:
                 log("dropped as noise")
             return
