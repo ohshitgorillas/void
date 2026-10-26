@@ -4,9 +4,16 @@ should again: shown (/api/sleep off), the wake word switched on (/api/settings),
 he starts talking with barge-in on (/api/speaking), the follow-up window opening after he stops. Switched off
 entirely, the loop ends promptly. The real request handler on a local port; the mic session is a stand-in.
 
+And Wake.check's follow-up gate: a follow-up without "hey Void" that is music in the room is dropped and the page told
+(gate_drop, with the log line); the owner's follow-up is kept; a wake-word clip is never judged; the owner's voice is
+learned only from wake-word and Listen clips, never from follow-ups; voice_gate off takes follow-ups as before; and
+the gate adds under 100 ms of wall time to a follow-up over Whisper alone, the voice scored while Whisper transcribes.
+
     python3 -m unittest discover -s tests
 """
+import contextlib
 import http.client
+import io
 import json
 import sys
 import tempfile
@@ -243,6 +250,232 @@ class WakeLoop(unittest.TestCase):
         t.join(PROMPT + 1.0)
         self.assertFalse(t.is_alive(), "the wake loop is still running")
         self.assertLessEqual(time.monotonic() - t0, PROMPT, f"took {time.monotonic() - t0:.3f}s to end")
+
+
+# ---- the follow-up gate in Wake.check, and where the owner's voice is learned
+# Wake.check is fed fixture clips with speech detection and Whisper stood in for (Whisper is "sure" of every clip, so
+# only the voice can tell music from the owner). The voiceprint scores with a print enrolled from the owner's own clips
+# in a temporary folder; enrolment by the server is only recorded, so the real print on this machine is never touched.
+
+ROOT = Path(__file__).resolve().parent.parent
+SCENES = ROOT / "tests" / "fixtures" / "scenes"
+VP_MODEL_DIR = Path(server.DATA_DIR if server else ".") / "voices" / "voiceprint"
+ENROLL = ["you_stop.wav", "you_hold_on.wav", "you_shut_up.wav", "you_hey_void.wav", "you_answer.wav"]
+SAID = {"room_music.wav": "take me down to the river tonight where the summer lights are shining bright",
+        "you_overlap.wav": "Yeah, move them, and while you're at it, make a new folder called summer for them.",
+        "you_hey_void.wav": "Hey Void, open my Downloads folder instead."}
+WHISPER_S = 0.5             # the Whisper stand-in's time on a clip in the latency test (longer than a warm voice score)
+GATE_BUDGET = 0.100         # wall time the gate may add to a follow-up over Whisper alone (design: Latency)
+
+try:
+    import voiceprint
+except Exception as e:  # noqa: BLE001
+    voiceprint, VP_ERR = None, e
+else:
+    VP_ERR = None
+
+
+def clip(name):
+    import wave
+    with wave.open(str(SCENES / name), "rb") as w:
+        return w.readframes(w.getnframes())
+
+
+@unittest.skipIf(server is None, f"server.py doesn't import here: {IMPORT_ERR}")
+class FollowUpGate(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.vp = None
+        if voiceprint is not None:
+            cls.vp = voiceprint.Voiceprint(Path(cls.tmp.name) / "voiceprint", VP_MODEL_DIR)
+            if cls.vp.available:
+                for n in ENROLL:
+                    cls.vp.enroll(clip(n))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def setUp(self):
+        self.assertIsNotNone(voiceprint, f"app/voiceprint.py doesn't import: {VP_ERR}")
+        self.assertTrue(self.vp.available, f"voiceprint unavailable: {self.vp.why}")
+        W = server.Wake
+        saved = {k: W.__dict__[k] for k in ("speaking_until", "follow_from", "follow_until")}
+        self.addCleanup(lambda: [setattr(W, k, v) for k, v in saved.items()])
+        self.enrolled, self.scored, self.learned = [], [], []
+        test = self
+        ours = self.vp
+        real_score = voiceprint.Voiceprint.score
+
+        def enroll(vp, pcm):
+            test.enrolled.append(pcm)
+
+        def score(vp, pcm):
+            test.scored.append(pcm)
+            return real_score(ours, pcm)
+
+        self.heard_text = {}
+        self.whisper_s = 0.0
+
+        def heard(pcm, **kw):
+            time.sleep(test.whisper_s)
+            return server.Heard(text=test.heard_text[pcm], logprob=-0.2, no_speech=0.02,
+                                seconds=len(pcm) / (server.RATE * 2))
+        gate_cfg = {k: server.DEFAULTS[k] for k in ("voice_gate", "voice_min") if k in server.DEFAULTS}
+        for p in (mock.patch.dict(server.CFG, gate_cfg),     # (the defaults, whatever this machine's config says)
+                  mock.patch.object(server, "speech_seconds", lambda pcm: len(pcm) / (server.RATE * 2)),
+                  mock.patch.object(server, "transcribe_pcm_heard", heard),
+                  mock.patch.object(server, "transcribe_pcm", lambda pcm, **kw: heard(pcm, **kw).text),
+                  mock.patch.object(server, "SPOKEN", type(server.SPOKEN)()),
+                  mock.patch.object(server.Speaker, "idle", classmethod(lambda cls: True)),
+                  mock.patch.object(server.MicAuto, "learn", classmethod(lambda cls, pcm: test.learned.append(pcm))),
+                  mock.patch.object(voiceprint, "fetch", lambda folder: VP_MODEL_DIR / voiceprint.MODEL),
+                  mock.patch.object(voiceprint.Voiceprint, "enroll", enroll),
+                  mock.patch.object(voiceprint.Voiceprint, "score", score)):
+            p.start()
+            self.addCleanup(p.stop)
+        self.q = server.BUS.sub()
+        self.addCleanup(server.BUS.unsub, self.q)
+
+    def check(self, name, follow):
+        """Wake.check on fixture `name`, heard inside the follow-up window or not. → (bus events, '[void]' log lines)."""
+        pcm = clip(name)
+        self.heard_text[pcm] = SAID[name]
+        now = time.monotonic()
+        server.Wake.speaking_until = 0.0
+        server.Wake.follow_from, server.Wake.follow_until = (now - 1, now + 5) if follow else (0.0, 0.0)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            server.Wake.check(pcm, now)
+        events = []
+        while not self.q.empty():
+            events.append(self.q.get_nowait())
+        return pcm, events, [ln for ln in err.getvalue().splitlines() if ln.startswith("[void]")]
+
+    def judged(self):
+        try:
+            import gate
+        except Exception as e:  # noqa: BLE001
+            self.fail(f"app/gate.py doesn't import: {e}")
+        calls = []
+        real = gate.judge
+        p = mock.patch.object(gate, "judge", lambda *a, **k: calls.append(a) or real(*a, **k))
+        p.start()
+        self.addCleanup(p.stop)
+        return calls
+
+    def wakes(self, events):
+        return [e for e in events if e.get("t") == "wake"]
+
+    def test_room_music_follow_up_is_dropped_and_the_page_told(self):
+        _, events, log = self.check("room_music.wav", follow=True)
+        self.assertEqual(self.wakes(events), [], f"room music taken as a request: {events}\n{log}")
+        drops = [e for e in events if e.get("t") == "gate_drop"]
+        self.assertEqual(len(drops), 1, f"no single gate_drop published: {events}\n{log}")
+        shown = [v for v in drops[0].values() if isinstance(v, str) and v != "gate_drop" and v.strip()]
+        self.assertTrue(any(v in ln and "take me down" in ln for v in shown for ln in log),
+                        f"gate_drop doesn't carry the log line of the drop: {drops[0]}\n{log}")
+
+    def test_owner_follow_up_is_kept(self):
+        _, events, log = self.check("you_overlap.wav", follow=True)
+        got = self.wakes(events)
+        self.assertTrue(len(got) == 1 and got[0].get("follow"), f"the owner's follow-up not kept: {events}\n{log}")
+        self.assertFalse([e for e in events if e.get("t") == "gate_drop"], f"gate_drop on a kept clip: {events}")
+
+    def test_each_follow_up_is_judged_once_with_its_voice_score(self):
+        calls = self.judged()
+        self.check("you_overlap.wav", follow=True)
+        self.assertEqual(len(calls), 1, f"gate.judge called {len(calls)}x on one follow-up")
+        self.assertIsInstance(calls[0][1], float, "judged without the clip's voice score")
+
+    def test_wake_word_clip_is_never_judged(self):
+        calls = self.judged()
+        for follow in (False, True):
+            with self.subTest(in_follow_window=follow):
+                calls.clear()
+                self.enrolled.clear()
+                pcm, events, log = self.check("you_hey_void.wav", follow=follow)
+                self.assertEqual(len(self.wakes(events)), 1, f"wake word not taken: {events}\n{log}")
+                self.assertEqual(calls, [], "a wake-word clip went through gate.judge")
+                self.assertTrue(self.enrolled == [pcm], f"the wake-word clip was enrolled {len(self.enrolled)}x, "
+                                                        "not once by the wake-word branch alone")
+
+    def test_wake_word_clip_is_enrolled_beside_mic_learn(self):
+        pcm, events, log = self.check("you_hey_void.wav", follow=False)
+        self.assertTrue(self.learned == [pcm], f"MicAuto.learn got {len(self.learned)} clip(s), not the wake-word clip: {log}")
+        self.assertTrue(self.enrolled == [pcm], f"the wake-word clip wasn't enrolled into the voiceprint ({len(self.enrolled)} clip(s) enrolled)")
+
+    def test_follow_ups_are_never_enrolled(self):
+        followed = []
+        for name in ("you_overlap.wav", "room_music.wav"):     # (one kept, one dropped)
+            self.scored.clear()
+            pcm, events, log = self.check(name, follow=True)
+            followed.append(pcm)
+            self.assertTrue(self.scored == [pcm], f"follow-up {name} not scored once against the voiceprint "
+                                                  f"({len(self.scored)} score(s)): {log}")
+        wake, events, log = self.check("you_hey_void.wav", follow=False)
+        self.assertEqual(len(self.enrolled), 1, f"{len(self.enrolled)} clip(s) enrolled, not just the wake-word clip")
+        self.assertFalse([p for p in followed if p in self.enrolled], "a follow-up clip was enrolled into the voiceprint")
+        self.assertTrue(self.enrolled == [wake], "the wake-word clip after the follow-ups wasn't enrolled")
+
+    def test_the_gate_adds_under_100_ms_over_whisper_alone(self):
+        self.whisper_s = WHISPER_S
+
+        def took(name, gate_on):                 # (best of two, so one hiccup on this machine doesn't decide it)
+            server.CFG["voice_gate"] = gate_on
+            best = None
+            for _ in range(2):
+                t0 = time.perf_counter()
+                self.check(name, follow=True)
+                t = time.perf_counter() - t0
+                best = t if best is None else min(best, t)
+            return best
+
+        for name in ("you_overlap.wav", "room_music.wav"):
+            with self.subTest(name):
+                took(name, True)                 # (warm)
+                alone = took(name, False)
+                self.scored.clear()
+                gated = took(name, True)
+                self.assertTrue(self.scored, f"{name}: the follow-up wasn't scored against the voiceprint")
+                self.assertLess(gated - alone, GATE_BUDGET,
+                                f"{name}: the gate added {(gated - alone) * 1000:.0f} ms over Whisper alone "
+                                f"({alone * 1000:.0f} ms → {gated * 1000:.0f} ms)")
+
+    def test_gate_switched_off_takes_room_music_as_before(self):
+        server.CFG["voice_gate"] = False
+        _, events, log = self.check("room_music.wav", follow=True)
+        self.assertEqual(len(self.wakes(events)), 1, f"voice_gate off but the follow-up wasn't taken: {events}\n{log}")
+        self.assertFalse([e for e in events if e.get("t") == "gate_drop"], f"gate_drop with voice_gate off: {events}")
+
+    def test_listen_clip_is_enrolled_beside_mic_learn(self):
+        pcm = clip("you_answer.wav")
+
+        class FakeMic:                           # the clip, 0.1 s a read, then the recorder ends
+            def __init__(self):
+                self.left = pcm
+
+            def read(self, s):
+                if not self.left:
+                    raise EOFError
+                n = int(server.RATE * 2 * s)
+                out, self.left = self.left[:n], self.left[n:]
+                return out
+
+            def close(self):
+                pass
+
+            def err(self):
+                return ""
+
+        events = []
+        with mock.patch.object(server, "open_clean_mic", lambda: (FakeMic(), "fake mic", b"")), \
+                mock.patch.object(server, "transcribe_pcm", lambda b, **kw: "Move them into Pictures, please."), \
+                contextlib.redirect_stderr(io.StringIO()):
+            server.Listen("ptt").run(lambda **ev: events.append(ev))
+        self.assertEqual(len(self.learned), 1, f"MicAuto.learn not called once on the Listen clip: {events[-3:]}")
+        self.assertTrue(self.enrolled == self.learned, f"the Listen clip wasn't enrolled beside MicAuto.learn ({len(self.enrolled)} clip(s) enrolled)")
 
 
 if __name__ == "__main__":
