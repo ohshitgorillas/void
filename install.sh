@@ -114,6 +114,8 @@ uv pip install --python "$ROOT/venv/bin/python" -U faster-whisper pillow   # pil
 [ $MAC = 1 ] && uv pip install --python "$ROOT/venv/bin/python" PySide6 && uv pip install --python "$ROOT/venv/bin/python" -U sounddevice
 uv pip install --python "$ROOT/venv/bin/python" -U piper-tts \
   || warn "piper-tts failed to install — Void will use espeak-ng (robotic) instead"
+uv pip install --python "$ROOT/venv/bin/python" -U livekit==1.1.21 \
+  || warn "livekit failed to install — Void will run without echo cancelling"
 
 # Kokoro: his main voice — far more natural than piper, still all local. Small int8 model (~120 MB with the voices).
 # GitHub first; if that's blocked, kokoro_fetch.py builds the same files from Hugging Face.

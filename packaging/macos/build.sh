@@ -20,6 +20,8 @@ cp -R "$(find "$WORK/py" -maxdepth 1 -name 'cpython-3.12*' -type d | head -n 1)"
 rm -f "$RES"/python/lib/python3.12/EXTERNALLY-MANAGED          # it's Void's own interpreter, not a system one
 # the same libraries install.sh puts in ~/.local/share/void/venv on a Mac
 uv pip install -q --python "$PY" faster-whisper pillow PySide6 sounddevice piper-tts kokoro-onnx
+uv pip install -q --python "$PY" livekit==1.1.21 \
+  || echo "warning: livekit failed to install - Void will run without echo cancelling" >&2
 
 rsync -a --exclude __pycache__ app/ "$RES/app/"
 install -m644 LICENSE "$RES/LICENSE"
@@ -59,6 +61,8 @@ HOME="$WORK/home" XDG_DATA_HOME="$WORK/home/data" XDG_CONFIG_HOME="$WORK/home/co
   PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 PATH=/usr/bin:/bin \
   "$PY" -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import server, window_win, faster_whisper, piper, kokoro_onnx, sounddevice
 print("bundled python", sys.version.split()[0], "imports server, window_win and the speech libraries")' "$RES/app"
+# livekit is optional (Void runs without echo cancelling), so a missing one only warns
+"$PY" -I -c 'import livekit' 2>/dev/null || echo "warning: the bundle has no livekit - Void will run without echo cancelling" >&2
 HOME="$WORK/home" XDG_DATA_HOME="$WORK/home/data" XDG_CONFIG_HOME="$WORK/home/config" XDG_CACHE_HOME="$WORK/home/cache" \
   PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 PATH=/usr/bin:/bin \
   "$PY" -I packaging/macos/qtcheck.py "$RES/app"
