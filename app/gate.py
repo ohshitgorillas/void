@@ -2,7 +2,9 @@
 people, the TV, his own voice coming back)?
 
 Pure: no audio I/O, no model loads. `judge` runs its checks in a fixed order and returns at the first drop:
-speech share, echo, stop phrase, noise, while talking, wake word, stray word, Whisper confidence, voiceprint.
+speech share, echo, stop phrase, noise, while talking, wake word, Whisper confidence. Nothing here judges whose voice it
+is: a follow-up that gets through and wasn't meant for him is Claude's to ignore (server.FOLLOW_NOTE), where a
+dropped one is a request of yours lost.
 Whisper's confidence thresholds live here; the numbers themselves come from run_whisper_heard.
 """
 import difflib
@@ -32,8 +34,7 @@ _STOP_WORDS = r"(?:stop|hold on|hang on|shut up|be quiet|shush|shh+|that's enoug
 _STOP_FILL = r"(?:ok(?:ay)?|oh|no|hey|void|um+|uh+|please|now|so|well)"
 STOP_IN_RE = re.compile(rf"^\W*(?:{_STOP_FILL}\W+)*{_STOP_WORDS}\b|\b{_STOP_WORDS}(?:\W+{_STOP_FILL})*\W*$")
 WAKE_RE = re.compile(r"^\W*(?:(?:hey|hi|hay|okay|ok|yo|oi)\W+)?(void|voyd|boyd|voi|vod)\b\W*(.*)$", re.I | re.S)
-WHY = ("kept", "no speech", "echo", "noise", "while talking", "stray word",
-       "no wake word", "low confidence", "not your voice")
+WHY = ("kept", "no speech", "echo", "noise", "while talking", "no wake word", "low confidence")
 
 
 @dataclass(frozen=True)
@@ -42,7 +43,6 @@ class Burst:
     heard: object | None       # server.Heard, for a judged follow-up; else None
     speech: float              # speech_seconds of the burst
     seconds: float             # the burst's length
-    voice: float | None        # voiceprint cosine, follow-ups only; None: not scored
     kind: str                  # "listen" | "wake" | "follow" | "over" | "peek"
     talking: bool              # he is talking now
 
@@ -125,14 +125,12 @@ def stop_said(text: str) -> bool:
 
 def judge(b: Burst, spoken: list[str], cfg: dict) -> Verdict:
     """Keep or drop one heard burst, and what to do with a kept one. `spoken`: his lines lately, oldest first (for the
-    echo test) · `cfg`: voice_gate (off: follow-ups are not judged on Whisper's confidence or the voiceprint),
-    voice_min (the lowest voice score that is still the owner)."""
+    echo test) · `cfg`: voice_gate (off: follow-ups are not judged on Whisper's confidence)."""
     def drop(why):
         return Verdict(False, why, "drop", "")
     text = b.text or ""
     said = text.strip(" .,!?")
     gated = bool(cfg.get("voice_gate", True))
-    owner = b.voice is not None and b.voice >= float(cfg.get("voice_min", 0.5))
     # 1. speech share: music or noise, not talking
     if not spoken_enough(b.speech, b.seconds, b.kind):
         return drop("no speech")
@@ -144,8 +142,8 @@ def judge(b: Burst, spoken: list[str], cfg: dict) -> Verdict:
         if ((b.kind in ("over", "peek") and stop_said(said))
                 or (b.talking and STOP_RE.fullmatch(said.lower()) and not is_filler(said))):
             return Verdict(True, "kept", "barge", "")
-    # 4. noise: nothing, or a sentence looping, always; filler unless it is the owner's own voice
-    if is_noise(text) and not (is_filler(text) and owner):
+    # 4. noise: nothing, filler, or a sentence looping
+    if is_noise(text):
         return drop("noise")
     # 5. while talking: a peek only ever stops him; anything else begun over him without his name is most likely his
     # own voice, garbled
@@ -161,18 +159,11 @@ def judge(b: Burst, spoken: list[str], cfg: dict) -> Verdict:
         return Verdict(True, "kept", "request", m.group(2).strip(" .,!?"))
     if b.kind != "follow":
         return drop("no wake word")
-    # 7. stray word: one word is not a request, unless the voiceprint says it is the owner
-    if len(said.split()) < 2 and not (gated and owner):
-        return drop("stray word")
-    if gated:
-        # 8. Whisper confidence
-        if b.heard is not None:
-            if b.heard.no_speech >= NO_SPEECH:
-                return drop("no speech")
-            if b.heard.logprob < MIN_LOGPROB:
-                return drop("low confidence")
-        # 9. voiceprint
-        if b.voice is not None and not owner:
-            return drop("not your voice")
+    # 7. Whisper confidence (a one-word answer, "Yes", is a follow-up like any other)
+    if gated and b.heard is not None:
+        if b.heard.no_speech >= NO_SPEECH:
+            return drop("no speech")
+        if b.heard.logprob < MIN_LOGPROB:
+            return drop("low confidence")
     return Verdict(True, "kept", "follow", text)
 

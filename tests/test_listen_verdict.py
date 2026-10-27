@@ -1,14 +1,11 @@
-"""Listen.run teaches the voiceprint only from a request in words: a recording that came back empty, as noise, as a
-stock filler, or as an echo of his own voice enrols nothing. What is enrolled is the recording's speech alone, without
-the lead-in silence and the chime before it, and each enrolment logs one line saying what was enrolled.
-
-Every Listen recording is kept or dropped by gate.judge alone, as a "listen" burst: a dropped one (too little speech,
-noise or filler, his own echo) is never sent on as a request, and each verdict logs one '[void] <why>: <said>' line.
+"""Every Listen recording is kept or dropped by gate.judge alone, as a "listen" burst: a dropped one (too little speech,
+noise or filler, his own echo) is never sent on as a request, and each verdict logs one
+'[void] <stamp> <why> (listen): <said>' line.
 
 The mic is a fake that plays one recording (a lead-in of room hiss, a chime, then a real clip of you) and Whisper is
 replaced by what it "hears", so the tests need neither a microphone nor the speech model.
 
-    python3 -m unittest tests.test_listen_enrol -v
+    python3 -m unittest tests.test_listen_verdict -v
 """
 import contextlib
 import io
@@ -16,7 +13,6 @@ import math
 import re
 import sys
 import time
-import types
 import unittest
 import wave
 from pathlib import Path
@@ -27,7 +23,7 @@ sys.path.insert(0, str(ROOT / "app"))
 sys.path.insert(0, str(ROOT / "tests"))
 import suite_data  # noqa: E402,F401  (Void's data folder: the suite's own, set before server.py settles it)
 import gate  # noqa: E402
-from fakes import hiss, pieces, ears  # noqa: E402
+from fakes import hiss, ears  # noqa: E402
 
 try:
     import server
@@ -92,87 +88,17 @@ class FakeMic:
 
 
 @unittest.skipIf(server is None, f"server.py doesn't import here: {SERVER_ERR}")
-class ListenEnrolTest(unittest.TestCase):
+class ListenVerdictTest(unittest.TestCase):
 
     def setUp(self):
         self.rec = Recording()
-        self.enrolled = []
-        vp = types.SimpleNamespace(available=True, enrolled=0, enroll=self.enrolled.append)
         self.heard = REQUEST
         for p in (mock.patch.object(server, "open_clean_mic", lambda: (FakeMic(self.rec.pcm), "fake mic", b"")),
                   mock.patch.object(server.MicAuto, "learn", lambda pcm: None),
-                  mock.patch.object(server.Voice, "get", lambda: vp),
                   mock.patch.object(server, "SPOKEN", type(server.SPOKEN)(maxlen=200))):
             p.start()
             self.addCleanup(p.stop)
         self.addCleanup(ears(server, lambda pcm: self.heard).close)
-
-    def listen(self, heard):
-        """Run one Listen session that Whisper hears as `heard`. → what it logged to stderr."""
-        self.heard = heard
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            server.Listen("ptt").run(lambda **k: None)
-        return err.getvalue()
-
-    # ---- only a request in words enrols
-    def test_a_request_in_words_enrols_once(self):
-        self.listen(REQUEST)
-        self.assertEqual(len(self.enrolled), 1, "a request in words was not enrolled exactly once")
-
-    def test_an_empty_transcript_enrols_nothing(self):
-        for heard in ("", "  "):
-            with self.subTest(heard=heard):
-                self.enrolled.clear()
-                self.listen(heard)
-                self.assertEqual(len(self.enrolled), 0, f"enrolled a recording heard as {heard!r}")
-
-    def test_noise_and_filler_enrol_nothing(self):
-        # A sentence Whisper hallucinates and repeats on room sound is still noise.
-        for heard in ("Thank you.", "Thanks for watching!", "Um.", "Uh", "Hmm.",
-                      "The two of them were the two of them. The two of them were the two of them."):
-            with self.subTest(heard=heard):
-                self.enrolled.clear()
-                self.listen(heard)
-                self.assertEqual(len(self.enrolled), 0, f"enrolled a recording heard as {heard!r}")
-
-    def test_a_short_real_phrase_he_repeats_is_him_speaking(self):
-        for heard in ("Not yet, not yet.", "Go. Go. Go."):
-            with self.subTest(heard=heard):
-                self.enrolled.clear()
-                self.listen(heard)
-                self.assertEqual(len(self.enrolled), 1, f"a short real phrase heard as {heard!r} was not enrolled once")
-
-    def test_an_echo_of_his_own_voice_enrols_nothing(self):
-        said = "The build finished and all forty tests passed on the first run."
-        server.SPOKEN.append((time.monotonic(), said))
-        self.listen(said)
-        self.assertEqual(len(self.enrolled), 0, "enrolled an echo of his own voice")
-
-    # ---- only the speech is embedded
-    def test_only_the_speech_is_enrolled_without_lead_in_or_chime(self):
-        self.listen(REQUEST)
-        self.assertEqual(len(self.enrolled), 1, "a request in words was not enrolled exactly once")
-        clip = bytes(self.enrolled[0])
-        lead = sum(1 for p in pieces(self.rec.lead_in, 20) if p in clip)
-        self.assertEqual(lead, 0, f"{lead * 20} ms of the lead-in silence went into the voiceprint")
-        ring = sum(1 for p in pieces(self.rec.chime, 20) if p in clip)
-        self.assertEqual(ring, 0, f"{ring * 20} ms of the chime went into the voiceprint")
-        spoken = pieces(self.rec.speech, 20)
-        kept = sum(1 for p in spoken if p in clip)
-        self.assertGreaterEqual(kept / len(spoken), 0.8, f"only {kept} of {len(spoken)} 20 ms pieces of your speech "
-                                                         "went into the voiceprint")
-
-    # ---- each enrolment logs one line
-    def test_each_enrolment_logs_one_line_saying_what_was_enrolled(self):
-        log = self.listen(REQUEST)
-        self.assertEqual(len(self.enrolled), 1, "a request in words was not enrolled exactly once")
-        lines = [ln for ln in log.splitlines() if re.search(r"enrol", ln, re.I)]
-        self.assertEqual(len(lines), 1, f"enrolment logged {len(lines)} lines, not one: {log!r}")
-        secs = len(self.enrolled[0]) / (SR * 2)
-        says_text = "that's not what i asked" in lines[0].lower()
-        says_secs = any(abs(float(x) - secs) <= 0.1 for x in re.findall(r"(\d+(?:\.\d+)?)\s*s\b", lines[0]))
-        self.assertTrue(says_text or says_secs, f"the enrolment line doesn't say what was enrolled: {lines[0]!r}")
 
     # ---- every recording is kept or dropped by gate.judge, and its verdict logged in one line
     def run_listen(self, heard):
@@ -185,8 +111,9 @@ class ListenEnrolTest(unittest.TestCase):
 
     @staticmethod
     def verdicts(log):
-        """The verdict lines in `log`: '[void] <why>' (any reason gate.WHY names, maybe a note in brackets), ': ', said."""
-        return [(w, ln) for ln in log for w in gate.WHY if re.match(rf"\[void\] {re.escape(w)}(?: \([^)]*\))?: ", ln)]
+        """The verdict lines in `log`: '[void] <stamp> <why> (listen): <said>', <why> any reason gate.WHY names."""
+        return [(w, ln) for ln in log for w in gate.WHY
+                if re.match(rf"\[void\] \d{{4}}-\d\d-\d\d \d\d:\d\d:\d\d {re.escape(w)} \(listen\): ", ln)]
 
     @staticmethod
     def sent(events):
@@ -200,8 +127,8 @@ class ListenEnrolTest(unittest.TestCase):
         self.assertEqual(len(calls), 1, f"gate.judge called {len(calls)}x on one Listen recording")
         b = calls[0][0]
         self.assertIsInstance(b, gate.Burst, f"gate.judge not handed a gate.Burst: {b!r}")
-        self.assertEqual((b.kind, b.text, b.voice), ("listen", REQUEST, None),
-                         f"not judged as an unscored 'listen' burst of what Whisper heard: {b!r}")
+        self.assertEqual((b.kind, b.text), ("listen", REQUEST),
+                         f"not judged as a 'listen' burst of what Whisper heard: {b!r}")
 
     def test_a_kept_request_is_sent_and_logs_one_kept_line(self):
         events, log = self.run_listen(REQUEST)
@@ -237,10 +164,6 @@ class ListenEnrolTest(unittest.TestCase):
         got = self.verdicts(log)
         self.assertEqual([w for w, _ in got], ["no speech"], "not logged as one 'no speech' verdict:\n" + "\n".join(log))
 
-    def test_nothing_enrolled_logs_no_enrolment(self):
-        log = self.listen("Um.")
-        self.assertEqual([ln for ln in log.splitlines() if re.search(r"\benrolled\b", ln, re.I)], [],
-                         f"logged an enrolment for a filler: {log!r}")
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@
 #   void stop       stop the background server (and the window)
 #   void restart    restart the server (after editing config)
 #   void log        follow the server log
+#   void drops [log] [--day YYYY-MM-DD]  everything his hearing dropped, and what it would do with each now
 #   void setup      first run after a system-wide install (ninja install): your voice + speech models
 set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH"
@@ -79,6 +80,7 @@ case "${1:-}" in
            exec "$PY" "$APP/server.py" --doctor ;;
   restart) stop; sleep 0.6 ;;
   log)     exec tail -n 50 -f "$LOG" ;;
+  drops)   exec "$PY" "$APP/drops.py" "${@:2}" ;;
   render)  # pick how the window is drawn: default (GPU) · nodmabuf · nocomp (no GPU layers — steadiest)
            case "${2:-}" in default|nodmabuf|nocomp) echo "$2" > "$ROOT/window.mode"; quitwin; sleep 0.4; exec "$0" show ;;
              *) echo "usage: void render default|nodmabuf|nocomp   (now: $(cat "$ROOT/window.mode" 2>/dev/null || echo auto))"; exit 2 ;; esac ;;

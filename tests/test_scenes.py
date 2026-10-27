@@ -1,8 +1,7 @@
 """Scenes replayed through a simulated room into the real mic path: Void talks through the speakers, you talk into the
 room, and Wake.session listens through open_clean_mic. Once Void has spoken through the clean mic in this run, at least
 25 dB of his echo is removed, from the first second of every later mic session on; your speech after Void stops is
-kept within about 3 dB; with the canceller missing, the mic is passed through unchanged. The follow-up gate is on, and
-"you" is the voice it knows as its owner's, enrolled by saying "hey Void" (Void's voice and the music never are). Every
+kept within about 3 dB; with the canceller missing, the mic is passed through unchanged. The follow-up gate is on. Every
 test starts a fresh run of Void (scenes.new_run), so none depends on which ran before it.
 
 Fast tier (always runs; speech detection and Whisper stood in for):
@@ -85,8 +84,7 @@ def level_db(x):
 
 
 class FreshRun(unittest.TestCase):
-    """Each test starts, and leaves behind, a fresh run of Void: no canceller kept from another test's scenes, and a
-    voiceprint holding only your enrolled voice, in a file of the harness's own."""
+    """Each test starts, and leaves behind, a fresh run of Void: no canceller kept from another test's scenes."""
     def setUp(self):
         scenes.new_run()
         self.addCleanup(scenes.new_run)

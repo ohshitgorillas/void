@@ -696,7 +696,7 @@ class DeafMic:
 @unittest.skipIf(server is None, f"server.py doesn't import here: {SERVER_ERR}")
 @unittest.skipIf(hearing is None, f"hearing.py doesn't import here: {IMPORT_ERR}")
 class LoopsUseVoicingTest(unittest.TestCase):
-    """speech_span, Listen.run and Wake.session hear voice through hearing.Voicing, and server.py keeps no Floor."""
+    """Listen.run and Wake.session hear voice through hearing.Voicing, and server.py keeps no Floor."""
 
     def setUp(self):
         def spy(*a, **k):
@@ -709,10 +709,6 @@ class LoopsUseVoicingTest(unittest.TestCase):
 
     def test_server_keeps_no_floor_of_its_own(self):
         self.assertFalse(hasattr(server, "Floor"))
-
-    def test_speech_span_builds_a_voicing(self):
-        with self.assertRaises(Built):
-            server.speech_span(level(LOUD) * 10)
 
     def test_listen_builds_a_voicing_before_it_reads_the_mic(self):
         with self.assertRaises(Built):
