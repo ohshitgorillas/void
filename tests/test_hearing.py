@@ -303,7 +303,7 @@ class SpeakerFeedsPlayRefTest(unittest.TestCase):
         self.patch(server.time, "sleep", lambda s: self.clock.__setitem__(0, self.clock[0] + s))
         self.patch(server, "make_player", self.make_player)
         self.patch(hearing, "PlayRef", self.ref)
-        self.patch(server.Wake, "hush", classmethod(lambda cls: None))
+        self.patch(server.Wake, "hush", classmethod(lambda cls, at=None: None))
 
     def patch(self, obj, name, value):
         p = mock.patch.object(obj, name, value)

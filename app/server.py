@@ -1502,8 +1502,11 @@ class Wake:
     """Optional "hey Void": keeps a recorder open, cuts out short bursts of speech, and checks them for his name.
     Steps aside whenever the normal mic session runs (or while he's talking, so he can't wake himself)."""
     thread = None
-    speaking_until = 0.0
-    follow_from = follow_until = 0.0         # the "just talk, no 'hey Void'" window right after he stops talking
+    # when he was audible, oldest first: [start, end, until] each, until when the "just talk, no 'hey Void'" window
+    # after it stays open (it opens at end + ECHO_TAIL). Kept, never overwritten: a burst is judged by when it was heard
+    talked = []
+    KEPT = 120                               # s of it kept
+    talk_lock = threading.Lock()             # (the player, the page and the mic all write it: one at a time)
     follow_on = False                        # what the page was last told (it shows him listening while it's open)
     cut = None                               # you clicked him ("finish") or pressed Space/Esc ("cancel") while he heard you
     asleep = False                           # he's hidden: the mic stays closed until he's shown again
@@ -1520,33 +1523,73 @@ class Wake:
     @classmethod
     def speaking(cls):
         """Talking, or about to: more sentences are waiting (his voice must never count as yours)."""
-        return time.monotonic() < cls.speaking_until or not Speaker.idle()
+        now = time.monotonic()
+        return cls.heard_him(now, now) or not Speaker.idle()
 
     @classmethod
     def window_open(cls):
         """The "just talk" window: after he's done (even while Claude is still working: the page holds it till then)."""
-        return not cls.speaking() and cls.follow_from <= time.monotonic() < cls.follow_until
+        return not cls.speaking() and cls.window_at(time.monotonic())
+
+    @classmethod
+    def talking(cls, start, end):
+        """He's audible from `start` to `end`. Running on from his last span, it moves that one's end (the latest word
+        on when he stops); the follow-up window after it opens once his echo has died away (ECHO_TAIL)."""
+        until = end + ECHO_TAIL + float(CFG.get("follow_up") or 0)
+        with cls.talk_lock:
+            t = [x for x in cls.talked if x[1] > end - cls.KEPT]  # (a new list: readers keep the old one meanwhile)
+            new = not t or start > t[-1][1] + 1e-3        # (a chunk straight on from the last runs on)
+            if new:
+                t.append([start, end, until])
+            else:
+                t[-1] = [min(t[-1][0], start), end, until]
+            cls.talked = t
+        if new:
+            cls.nudge()
 
     @classmethod
     def talking_until(cls, end):
-        """He's talking until `end`; the follow-up window opens once his echo has died away (ECHO_TAIL)."""
-        cls.speaking_until = end
-        cls.follow_from = end + ECHO_TAIL      # (not before the room has stopped ringing with his voice)
-        cls.follow_until = cls.follow_from + float(CFG.get("follow_up") or 0)
+        """He's talking from now until `end` (the page's own voice tells us so)."""
+        cls.talking(time.monotonic(), end)
         cls.nudge()
+
+    @classmethod
+    def heard_him(cls, a, b, tail=0.0):
+        """Was he audible at any moment from `a` to `b` (with `tail`: or his voice still ringing that long after)?"""
+        return any(s <= b and a < e + tail for s, e, _ in cls.talked)
+
+    @classmethod
+    def span_at(cls, t):
+        """The span he was talking at `t`, or whose echo was still ringing then (ECHO_TAIL); None if neither."""
+        return next((x for x in reversed(cls.talked) if x[0] <= t < x[1] + ECHO_TAIL), None)
+
+    @classmethod
+    def window_at(cls, t):
+        """Was the follow-up window open at `t`: past his echo, before it closed, and him not talking again?"""
+        return cls.span_at(t) is None and any(e + ECHO_TAIL <= t < u for _, e, u in cls.talked)
+
+    @classmethod
+    def shut(cls, at=None):
+        """No follow-up from `at` (now) on: every window closes then."""
+        at = time.monotonic() if at is None else at
+        with cls.talk_lock:
+            cls.talked = [[s, e, min(u, at)] for s, e, u in cls.talked]
 
     @classmethod
     def end_follow(cls, how):
         """Close the follow-up window. "finish": take what you've said so far · "cancel": throw it away."""
         cls.cut = how
         if how != "finish":
-            cls.follow_until = 0.0
+            cls.shut()
         cls.nudge()
 
     @classmethod
-    def hush(cls):
-        """He was cut off: no follow-up window."""
-        cls.speaking_until = cls.follow_until = 0.0
+    def hush(cls, at=None):
+        """He was cut off at `at` (now): nothing of him after it, and no follow-up window. What he said before it
+        stays: a burst heard over him is still judged as heard over him."""
+        at = time.monotonic() if at is None else at
+        with cls.talk_lock:
+            cls.talked = [[s, min(e, at), min(u, at)] for s, e, u in cls.talked if s < at]
         cls.nudge()
 
     @classmethod
@@ -1561,7 +1604,7 @@ class Wake:
             return False
         if cls.speaking():                       # while he talks: only to catch "stop" / "hey Void" (barge-in)
             return bool(CFG.get("barge_in"))
-        return bool(CFG.get("wake_word")) or cls.follow_from <= time.monotonic() < cls.follow_until
+        return bool(CFG.get("wake_word")) or cls.window_at(time.monotonic())
 
     @classmethod
     def loop(cls):
@@ -1571,7 +1614,7 @@ class Wake:
             if not cls.should_run():
                 # nothing to do until poked, or until he stops talking / the follow-up window opens or closes
                 now = time.monotonic()
-                due = [t - now for t in (cls.speaking_until, cls.follow_from, cls.follow_until) if t > now]
+                due = [t - now for _, e, u in cls.talked[-1:] for t in (e, e + ECHO_TAIL, u) if t > now]
                 cls.poke.wait(min(due) + 0.01 if due else 60)
                 continue
             try:
@@ -1610,7 +1653,8 @@ class Wake:
                         how, cls.cut = cls.cut, None
                         if in_speech and how == "finish" and len(seg) > RATE * 2 * 0.35:
                             cls.check(bytes(seg), started, at=seg_at)
-                        in_speech, seg, cls.follow_until = False, bytearray(), 0.0
+                        in_speech, seg = False, bytearray()
+                        cls.shut()
                     # you started talking inside the follow-up window: show him hearing you, ring/eyes move with your voice
                     fol = cls.window_open() or (in_speech and req and not cls.speaking())   # (and stays shown while
                     # you're still saying something you started inside it, even past the window's end)
@@ -1636,7 +1680,7 @@ class Wake:
                             req = True                    # you started answering as he finished: hear your turn out
                         # begun over him: don't wait for you to finish to hear a stop phrase at its start ("Stop, stop,
                         # that's not what I…" stops him as you say it, not once you've said the rest)
-                        if (not req and started < cls.speaking_until + ECHO_TAIL and now - peek_at >= STOP_PEEK
+                        if (not req and cls.span_at(started) and now - peek_at >= STOP_PEEK
                                 and len(seg) >= RATE * 2 * STOP_PEEK):
                             peek_at = now
                             if cls.stop_in(bytes(seg)):
@@ -1708,16 +1752,20 @@ class Wake:
         """You stopped him: stop his voice, tell the page (with the request, if you said his name), no follow-up."""
         m = WAKE_RE.match(text or "")
         if not Speaker.idle():
-            Speaker.stop()                       # (also hushes us)
+            Speaker.stop()                       # (also hushes us, from when what was already out has played)
+        else:
+            cls.hush()
         BUS.pub(t="barge", listen=bool(m), text=(m.group(2).strip(" .,!?") if m else ""))
-        cls.hush()
 
     @classmethod
     def ran_on(cls, started, ended):
-        """A burst that began while he talked (or in his echo) but went on well after he stopped: you answering him."""
-        tail = cls.speaking_until + ECHO_TAIL
-        return (not cls.speaking() and started < tail <= ended - ECHO_RUN
-                and cls.follow_until > cls.speaking_until)       # (and he's open to a follow-up)
+        """A burst that began while he talked (or in his echo) but went on well after he stopped, him quiet since:
+        you answering him. → the span it began over, or None."""
+        x = cls.span_at(started)
+        if (x and x[1] + ECHO_TAIL <= ended - ECHO_RUN and x[2] > x[1] + ECHO_TAIL       # (and he's open to a follow-up)
+                and not any(x[1] < s <= ended for s, _, _ in cls.talked)):
+            return x
+        return None
 
     @classmethod
     def check(cls, pcm, started, text=None, ended=None, at=None):
@@ -1726,17 +1774,19 @@ class Wake:
         ended = time.monotonic() if ended is None else ended     # (when you last made a sound)
         # started after he finished talking, inside the follow-up window → it's a request, no "hey Void" needed
         # (Claude may still be working: the page keeps it and sends it once he's done)
-        follow = not cls.speaking() and cls.follow_from <= started < cls.follow_until
+        follow = cls.window_at(started)
         # began while he talked / in his echo: may be his voice (gate.judge: echo) or you answering over him
-        over = cls.speaking() or started < cls.speaking_until + ECHO_TAIL
+        over = cls.span_at(started) is not None
         cut = 0                                  # (bytes of his voice cut off the front)
-        if over and cls.ran_on(started, ended):   # …but it ran on long after: your turn, as a follow-up
-            follow, over = True, False
-            cut = 0 if at is None else int((cls.speaking_until - at) * RATE) * 2
+        x = over and cls.ran_on(started, ended)
+        if x:                                    # …but it ran on long after: your turn, as a follow-up
+            follow, over, started = True, False, x[1]
+            cut = 0 if at is None else int((x[1] - at) * RATE) * 2
             if 0 < cut < len(pcm):               # (only what came after his last word: his echo, however well cancelled,
                 pcm = pcm[cut:]                  # opened the burst, and heard it is his voice, not yours)
             else:
                 cut = 0
+        talking = cls.heard_him(started, ended)  # (he was audible while it was heard: not whether he is, now)
         kind = "over" if over else "follow" if follow else "wake"
         heard = None
         try:
@@ -1756,8 +1806,8 @@ class Wake:
         text = text or ""
         hear_out(f"heard {secs:.1f}s, {len(text.split())} words"
                  f"{', follow-up' if follow else ''}{f', after his last word ({cut / (RATE * 2):.1f}s of him cut)' if cut else ''}"
-                 f"{', wake word' if WAKE_RE.match(text) else ''}{', while talking' if cls.speaking() else ''}")
-        v = gate.judge(gate.Burst(text, heard, ss, secs, kind, cls.speaking()), said_lately(), CFG)
+                 f"{', wake word' if WAKE_RE.match(text) else ''}{', while talking' if talking else ''}")
+        v = gate.judge(gate.Burst(text, heard, ss, secs, kind, talking), said_lately(), CFG)
         verdict_out(v, text, kind)
         if v.act == "barge":
             cls.barge(text)
@@ -1765,7 +1815,7 @@ class Wake:
             MicAuto.learn(pcm)                   # (only your requests tune the mic: not noise, not his voice)
             BUS.pub(t="wake", text=v.rest)
         elif v.act == "follow":
-            cls.follow_until = 0.0
+            cls.shut()
             MicAuto.learn(pcm)
             BUS.pub(t="wake", text=v.rest.strip(" .,!?"), follow=True)
 
@@ -2320,7 +2370,7 @@ class Speaker:
             except OSError:
                 pass
         hearing.PlayRef.cut(time.monotonic() + cls.LAT)          # what was already out of the player still plays
-        Wake.hush()
+        Wake.hush(time.monotonic() + cls.LAT)
 
     # ---- worker 1: make the audio ahead of time
     @classmethod
@@ -2414,8 +2464,11 @@ class Speaker:
                     print(f"[void] audio player: {e}", file=sys.stderr)
                     return False
                 return cls._write(data[max(0, i - back):], g, again=False)
-            hearing.PlayRef.played(data[i:i + step], cls.prate, cls.t0 + cls.written / cls.prate + cls.LAT)  # (heard from the speakers then)
-            cls.written += len(data[i:i + step]) // 2
+            at, n = cls.t0 + cls.written / cls.prate + cls.LAT, len(data[i:i + step]) // 2   # (heard from the speakers then)
+            hearing.PlayRef.played(data[i:i + step], cls.prate, at)
+            if g == cls.gen:                                      # (not once he's been cut off: it never plays)
+                Wake.talking(at, at + n / cls.prate)
+            cls.written += n
         return True
 
     @classmethod
@@ -2447,8 +2500,6 @@ class Speaker:
                 cls.t0, cls.written, cls.filled = now, 0, False
             start = cls.t0 + cls.written / cls.prate
             dur = len(pcm) / 2 / prate
-            if g == cls.gen:                                     # (not if he was cut off meanwhile)
-                Wake.talking_until(start + dur + 0.45)
             cls.stats["sentences"] = cls.stats.get("sentences", 0) + 1
             cls.stats["audio_s"] = round(cls.stats.get("audio_s", 0) + dur, 2)
             BUS.pub(t="spk", id=sid, at=round((start - now + cls.LAT) * 1000), dur=round(dur, 3), words=words,

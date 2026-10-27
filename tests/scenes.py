@@ -724,7 +724,7 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
                      ("epoch", 0), ("proc", None), ("prate", None), ("t0", 0.0), ("written", 0), ("threads", []),
                      ("filled", False), ("stats", {})):
             patch(S, k, v)
-        for k, v in (("speaking_until", 0.0), ("follow_from", 0.0), ("follow_until", 0.0), ("follow_on", False),
+        for k, v in (("talked", []), ("follow_on", False),
                      ("cut", None), ("asleep", False), ("thread", None), ("poke", threading.Event())):
             patch(W, k, v)
         for k, v in (("ring", np.zeros(len(P.ring), np.int16)), ("lo", None), ("hi", None), ("tail", None)):

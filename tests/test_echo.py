@@ -37,9 +37,9 @@ PCM = bytes(32000)
 class Echo(unittest.TestCase):
     def setUp(self):
         W = server.Wake
-        self._saved = {k: W.__dict__[k] for k in ("speaking_until", "follow_from", "follow_until")}
+        self._saved = {k: W.__dict__[k] for k in ("talked",)}
         self.addCleanup(self._restore)
-        W.speaking_until = W.follow_from = W.follow_until = 0.0
+        W.talked = []
         server.SPOKEN.clear()
         self.addCleanup(server.SPOKEN.clear)
         self.pub = mock.Mock()
@@ -63,14 +63,15 @@ class Echo(unittest.TestCase):
 
     def after_speech(self, ago):             # he finished talking `ago` seconds ago, follow window open
         now = time.monotonic()
-        server.Wake.talking_until(now - ago)
-        server.Wake.follow_until = now + 30
+        server.Wake.talked = [[now - ago - 3, now - ago, now + 30]]
+
+    def last_word(self):                     # when he stopped talking
+        return server.Wake.talked[-1][1]
 
     # the echo match: what is heard against what he said lately (server.py keeps SPOKEN and expires it)
     def test_match_expires(self):
         server.SPOKEN.append((time.monotonic() - 120, REPLY))
         self.after_speech(server.ECHO_TAIL + 0.6)
-        server.Wake.follow_from = 0.0
         self.assertFollowUp(self.burst("I moved the meeting to Thursday at three"),
                             "I moved the meeting to Thursday at three")
 
@@ -81,14 +82,12 @@ class Echo(unittest.TestCase):
         for heard in ("I can kill them all really long in a 30K bonus folder", "But you might want to check me."):
             self.pub.reset_mock()
             self.after_speech(server.ECHO_TAIL + 0.6)
-            server.Wake.follow_from = 0.0
             self.assertDropped(self.burst(heard), heard)
 
     def test_request_sharing_his_words_gets_through(self):
         server.note_spoken("Kill 'Em All really belongs in the 30K rolloff folder.")
         server.note_spoken("The other two albums are already sorted, but you might want to check that.")
         self.after_speech(server.ECHO_TAIL + 0.6)
-        server.Wake.follow_from = 0.0
         self.assertFollowUp(self.burst("please move Reload to the 30K folder too"),
                             "please move Reload to the 30K folder too")
 
@@ -97,13 +96,15 @@ class Echo(unittest.TestCase):
             server.Speaker.say(REPLY, 1)
         self.addCleanup(server.Speaker.todo.clear)
         self.after_speech(server.ECHO_TAIL + 0.6)
-        server.Wake.follow_from = 0.0
         self.assertDropped(self.burst("I moved the meeting to Thursday at three"))
 
     # the time gate
     def test_follow_window_waits_for_tail(self):
-        server.Wake.talking_until(time.monotonic())
-        self.assertGreaterEqual(server.Wake.follow_from, server.Wake.speaking_until + server.ECHO_TAIL)
+        now = time.monotonic()
+        with mock.patch.dict(server.CFG, {"follow_up": 30}):
+            server.Wake.talking(now - 1, now)
+        self.assertFalse(server.Wake.window_at(now + server.ECHO_TAIL - 0.05))
+        self.assertTrue(server.Wake.window_at(now + server.ECHO_TAIL))
 
     def assertFollowUp(self, ev, text="please add milk to the shopping list"):
         self.assertEqual([(e.get("t"), e.get("text"), e.get("follow")) for e in ev], [("wake", text, True)])
@@ -117,8 +118,7 @@ class Echo(unittest.TestCase):
 
     def test_words_started_before_tail_end_dropped(self):
         self.after_speech(1.6)
-        started = server.Wake.speaking_until + server.ECHO_TAIL - 0.2
-        server.Wake.follow_from = 0.0
+        started = self.last_word() + server.ECHO_TAIL - 0.2
         self.assertEqual(self.burst("please add milk to the shopping list", started), [])
 
     def test_echo_in_tail_dropped(self):
@@ -137,36 +137,35 @@ class Echo(unittest.TestCase):
     def test_answer_begun_as_he_finished_is_a_follow_up(self):
         server.note_spoken(REPLY)
         self.after_speech(10)                    # you started in his last second and talked on 10 s after he stopped
-        ev = self.burst(self.ANSWER, server.Wake.speaking_until - 0.5)
+        ev = self.burst(self.ANSWER, self.last_word() - 0.5)
         self.assertFollowUp(ev, self.ANSWER)
 
     def test_echo_running_on_after_he_finished_dropped(self):
         server.note_spoken(REPLY)
         self.after_speech(10)
         self.assertDropped(self.burst("Sure I moved the meeting to Thursday at three and told Sam about it",
-                                      server.Wake.speaking_until - 0.5))
+                                      self.last_word() - 0.5))
 
     def test_words_ending_in_tail_dropped(self):     # began as he finished, over by the time the room stopped ringing
         self.after_speech(10)
-        su = server.Wake.speaking_until
+        su = self.last_word()
         self.assertEqual(self.burst("I can kill them all really long in a 30K bonus folder", su - 0.5,
                                     su + server.ECHO_TAIL), [])
 
     def test_answer_begun_as_he_finished_needs_follow_ups_on(self):
         self.after_speech(10)
-        server.Wake.follow_until = 0.0
-        self.assertEqual(self.burst(self.ANSWER, server.Wake.speaking_until - 0.5), [])
+        s, e, _ = server.Wake.talked[-1]
+        server.Wake.talked = [[s, e, e + server.ECHO_TAIL]]          # (follow-ups off: no window after him)
+        self.assertEqual(self.burst(self.ANSWER, self.last_word() - 0.5), [])
 
     def test_follow_up_after_tail_accepted(self):
         self.after_speech(server.ECHO_TAIL + 0.6)
-        server.Wake.follow_from = 0.0
         ev = self.burst("please add milk to the shopping list")
         self.assertEqual([e.get("t") for e in ev], ["wake"])
         self.assertTrue(ev[0]["follow"])
 
     def test_follow_up_while_claude_works_heard(self):      # the page holds it until his reply is done
         self.after_speech(server.ECHO_TAIL + 0.6)
-        server.Wake.follow_from = 0.0
         self.assertTrue(server.ST.lock.acquire(blocking=False))
         self.addCleanup(server.ST.lock.release)
         self.assertTrue(server.Wake.window_open())
@@ -184,6 +183,42 @@ class Echo(unittest.TestCase):
     def test_wake_word_still_works(self):
         ev = self.burst("Hey Void, what is the weather like")
         self.assertEqual([e.get("t") for e in ev], ["wake"])
+
+    # a burst is judged by when it was heard, not by whether he talks when Whisper is done with it
+    def clocked(self, at=1000.0):
+        clock = [at]
+        p = mock.patch.object(server, "time", mock.Mock(monotonic=lambda: clock[0], time=time.time))
+        p.start()
+        self.addCleanup(p.stop)
+        return clock
+
+    def judged(self):
+        calls = []
+        p = mock.patch.object(server.gate, "judge", side_effect=lambda b, *a: calls.append(b) or self.real_judge(b, *a))
+        self.real_judge = server.gate.judge
+        p.start()
+        self.addCleanup(p.stop)
+        return calls
+
+    def test_burst_over_him_cut_off_before_judged_is_still_over_him(self):
+        clock = self.clocked()
+        server.Wake.talking_until(1010.0)              # he talks from 1000 s to 1010 s…
+        clock[0] = 1006.0
+        server.Wake.hush()                             # …and is stopped at 1006 s, while the burst is being judged
+        clock[0] = 1006.5
+        calls = self.judged()
+        self.burst("I can kill them all really long in a 30K bonus folder", 1002.0, 1005.5)
+        self.assertEqual([(b.kind, b.talking) for b in calls], [("over", True)],
+                         "a burst heard while he talked was judged as if he had been quiet")
+
+    def test_reply_in_window_judged_while_his_next_sentence_plays_is_a_follow_up(self):
+        clock = self.clocked()
+        with mock.patch.dict(server.CFG, {"follow_up": 30}):
+            server.Wake.talking_until(1000.5)          # his sentence ends; the window opens once his echo has gone
+            clock[0] = 1004.1
+            server.Wake.talking_until(1008.0)          # his next sentence starts after you stopped, before you're judged
+            clock[0] = 1004.5
+            self.assertFollowUp(self.burst("please add milk to the shopping list", 1002.0, 1004.0))
 
     # barge-in
     def test_barge_in_while_talking(self):
@@ -204,7 +239,7 @@ class Echo(unittest.TestCase):
     def test_stop_said_with_his_name_while_talking(self):
         server.Wake.talking_until(time.monotonic() + 5)
         self.assertEqual([e.get("t") for e in self.burst("Void, stop")], ["barge"])
-        self.assertEqual(server.Wake.speaking_until, 0.0)          # hushed
+        self.assertFalse(server.Wake.speaking())          # hushed
 
     def test_stop_inside_longer_burst_while_talking(self):
         server.Wake.talking_until(time.monotonic() + 5)
@@ -219,7 +254,7 @@ class Echo(unittest.TestCase):
                 self.text = said
                 self.assertTrue(server.Wake.stop_in(PCM), f"{said!r} over him didn't stop him mid-burst")
                 self.assertEqual([c.kwargs.get("t") for c in self.pub.call_args_list], ["barge"])
-                self.assertEqual(server.Wake.speaking_until, 0.0)          # hushed
+                self.assertFalse(server.Wake.speaking())          # hushed
 
     def test_stop_word_buried_in_his_own_speech_heard_over_him_never_stops_him(self):
         # the live log: "barge-in mid-burst: you told him to stop: It goes to the time to realize that it's ready to
@@ -230,12 +265,12 @@ class Echo(unittest.TestCase):
         self.text = heard
         self.assertFalse(server.Wake.stop_in(PCM), "stopped mid-burst by a stop word inside his own speech")
         self.assertEqual(self.burst(heard, started), [])
-        self.assertGreater(server.Wake.speaking_until, time.monotonic())   # still talking
+        self.assertTrue(server.Wake.speaking())   # still talking
 
     def test_stop_begun_while_talking_stops_him_after_his_sentence_ends(self):
         # what the owner's log showed: "stop" over and over for 12 s, heard once his sentence had finished playing
         now = time.monotonic()
-        server.Wake.talking_until(now - 1)
+        server.Wake.talking(now - 13, now - 1)
         ev = self.burst("Stop, stop, stop, stop stop, stop Void stop, Void stop, Void, shut the", started=now - 12)
         self.assertEqual([e.get("t") for e in ev], ["barge"])
 
@@ -253,14 +288,14 @@ class Echo(unittest.TestCase):
         with mock.patch.object(server.Speaker, "stop", stop):
             self.assertEqual(self.burst("please add milk to the shopping list"), [])
         stop.assert_not_called()
-        self.assertGreater(server.Wake.speaking_until, time.monotonic())   # still talking
+        self.assertTrue(server.Wake.speaking())   # still talking
 
     # what the log showed cutting him off: his own sentences, too garbled for the echo match
     def test_garbled_echo_while_talking_no_barge_in(self):
         server.note_spoken("Kill 'Em All really belongs in the 30K rolloff folder.")
         server.Wake.talking_until(time.monotonic() + 5)
         self.assertEqual(self.burst("I can kill them all really long in a 30K bonus folder"), [])
-        self.assertGreater(server.Wake.speaking_until, time.monotonic())
+        self.assertTrue(server.Wake.speaking())
 
     def test_garbled_tail_of_his_sentence_no_barge_in(self):   # "heard 7.0s, 22 words, while talking"
         server.note_spoken("The other two albums are already sorted, and the remaster sits next to the original "
@@ -271,7 +306,7 @@ class Echo(unittest.TestCase):
         self.assertEqual(len(tail.split()), 22)
         self.assertEqual(self.burst(tail), [])
         self.assertEqual(self.burst("But you might want to check me."), [])
-        self.assertGreater(server.Wake.speaking_until, time.monotonic())
+        self.assertTrue(server.Wake.speaking())
 
     def test_echo_while_talking_dropped(self):
         server.note_spoken(REPLY)
@@ -289,20 +324,17 @@ class Echo(unittest.TestCase):
         for said in ("Not yet, not yet", "Wait, wait, wait, wait, wait, wait"):
             self.pub.reset_mock()
             self.after_speech(server.ECHO_TAIL + 0.6)
-            server.Wake.follow_from = 0.0
             self.assertFollowUp(self.burst(said), said)
         for junk in ("The two of them were the two of them. The two of them were the two of them",
                      "It is a pleasure to be here. It is a pleasure to be here", "", "   "):
             self.pub.reset_mock()
             self.after_speech(server.ECHO_TAIL + 0.6)
-            server.Wake.follow_from = 0.0
             self.assertDropped(self.burst(junk), junk)
 
     def test_mic_gain_learns_only_from_your_requests(self):
         learn = mock.Mock()
         with mock.patch.object(server.MicAuto, "learn", learn):
             self.after_speech(server.ECHO_TAIL + 0.6)
-            server.Wake.follow_from = 0.0
             self.burst("")                                   # "heard 2.0s, 0 words"
             self.burst("It is a pleasure to be here. It is a pleasure to be here")
             learn.assert_not_called()
@@ -356,8 +388,8 @@ class Burst(unittest.TestCase):
                 mock.patch.object(W, "heard", staticmethod(lambda pcm: "")), \
                 mock.patch.object(W, "check", classmethod(lambda cls, pcm, started, text=None, **kw:
                     ended.append((round(len(pcm) / (server.RATE * 2), 1), round(clock[0] - 1000.0, 1), text)))), \
-                mock.patch.multiple(W, speaking_until=talk_till, follow_from=talk_till + server.ECHO_TAIL,
-                                    follow_until=talk_till + 60 if talk_till else 0.0, cut=None):
+                mock.patch.multiple(W, talked=[[1000.0, talk_till, talk_till + server.ECHO_TAIL + 60]] if talk_till
+                                    else [], cut=None):
             W.session()
         return ended                            # (seconds heard, when it ended, text it was given) per burst
 
