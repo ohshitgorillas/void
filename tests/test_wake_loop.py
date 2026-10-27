@@ -48,11 +48,10 @@ OFF = {"wake_word": False, "barge_in": False, "follow_up": 0}
 class WakeLoop(unittest.TestCase):
     def setUp(self):
         W = server.Wake
-        self._saved = {k: W.__dict__[k] for k in ("thread", "speaking_until", "follow_from", "follow_until",
-                                                    "follow_on", "cut", "asleep")}
+        self._saved = {k: W.__dict__[k] for k in ("thread", "talked", "follow_on", "cut", "asleep")}
         self.addCleanup(self._restore)
         W.thread, W.asleep, W.cut = None, False, None
-        W.speaking_until = W.follow_from = W.follow_until = 0.0
+        W.talked = []
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.orig_should_run = W.__dict__["should_run"].__func__
@@ -225,8 +224,8 @@ class WakeLoop(unittest.TestCase):
         self.post("/api/speaking", {"on": True})
         time.sleep(0.2)
         self.post("/api/speaking", {"on": False})        # stops talking: window opens 0.8 s from now
-        opens = server.Wake.follow_from
-        self.assertGreater(server.Wake.follow_until, opens)
+        opens = server.Wake.talked[-1][1] + server.ECHO_TAIL
+        self.assertGreater(server.Wake.talked[-1][2], opens)
         self.assertEqual(self.sessions, [])
         self.assert_session_soon(opens, what="the follow-up window opening")
 
@@ -234,7 +233,7 @@ class WakeLoop(unittest.TestCase):
         self.start(follow_up=4)
         self.idle()
         server.Wake.talking_until(time.monotonic() + 0.3)
-        self.assert_session_soon(server.Wake.follow_from, what="Wake.talking_until's follow-up window")
+        self.assert_session_soon(server.Wake.talked[-1][1] + server.ECHO_TAIL, what="Wake.talking_until's follow-up window")
 
     # ---- 3. switched off: the loop ends promptly, even while waiting
     def test_switching_everything_off_ends_the_loop(self):
@@ -280,7 +279,7 @@ def clip(name):
 class FollowUpGate(unittest.TestCase):
     def setUp(self):
         W = server.Wake
-        saved = {k: W.__dict__[k] for k in ("speaking_until", "follow_from", "follow_until")}
+        saved = {k: W.__dict__[k] for k in ("talked",)}
         self.addCleanup(lambda: [setattr(W, k, v) for k, v in saved.items()])
         self.learned = []
         test = self
@@ -305,8 +304,7 @@ class FollowUpGate(unittest.TestCase):
         pcm = clip(name)
         self.heard_text[pcm] = SAID[name] if said is None else said
         now = time.monotonic()
-        server.Wake.speaking_until = 0.0
-        server.Wake.follow_from, server.Wake.follow_until = (now - 1, now + 5) if follow else (0.0, 0.0)
+        server.Wake.talked = [[now - 3 - server.ECHO_TAIL, now - 1 - server.ECHO_TAIL, now + 5]] if follow else []
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             server.Wake.check(pcm, now)
@@ -414,8 +412,8 @@ class FollowUpGate(unittest.TestCase):
         """Wake.stop_in on fixture `name`, heard as `said`, while he talks. → (its answer, bus events, '[void]' lines)."""
         pcm = clip(name)
         self.heard_text[pcm] = said
-        server.Wake.speaking_until = time.monotonic() + 5
-        server.Wake.follow_from = server.Wake.follow_until = 0.0
+        now = time.monotonic()
+        server.Wake.talked = [[now, now + 5, now + 5]]           # (no follow-up window after it)
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             stopped = server.Wake.stop_in(pcm)
@@ -449,7 +447,7 @@ class FollowUpGate(unittest.TestCase):
         calls = self.judged()
         pcm = clip("you_hey_void.wav")
         self.heard_text[pcm] = SAID["you_hey_void.wav"]
-        server.Wake.speaking_until = server.Wake.follow_from = server.Wake.follow_until = 0.0
+        server.Wake.talked = []
         with contextlib.redirect_stderr(io.StringIO()):
             said = server.Wake.heard(pcm)
         self.assertEqual(len(calls), 1, f"gate.judge called {len(calls)}x on one quick listen")
@@ -497,8 +495,7 @@ class FollowUpGate(unittest.TestCase):
         """Wake.check on `pcm`, heard as `said`, inside the follow-up window or not. → (bus events, '[void]' log lines)."""
         self.heard_text[pcm] = said
         now = time.monotonic()
-        server.Wake.speaking_until = 0.0
-        server.Wake.follow_from, server.Wake.follow_until = (now - 1, now + 5) if follow else (0.0, 0.0)
+        server.Wake.talked = [[now - 3 - server.ECHO_TAIL, now - 1 - server.ECHO_TAIL, now + 5]] if follow else []
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             server.Wake.check(pcm, now)
@@ -526,9 +523,8 @@ class FollowUpGate(unittest.TestCase):
         self.heard_text = collections.defaultdict(lambda: said)
         W, now = server.Wake, time.monotonic()
         at = now - len(pcm) / (server.RATE * 2)                      # (when the burst's first sample was caught)
-        W.speaking_until = at + len(his) / (server.RATE * 2)
-        W.follow_from = W.speaking_until + server.ECHO_TAIL
-        W.follow_until = W.follow_from + 4
+        end = at + len(his) / (server.RATE * 2)
+        W.talked = [[at - 5, end, end + server.ECHO_TAIL + 4]]
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             W.check(pcm, at + 0.5, ended=now - 0.3, at=at)
