@@ -190,11 +190,8 @@ DEFAULTS = {
     "barge_in": True,
     # for this many seconds after he stops talking, just talk — no "hey Void" needed (0 = off)
     "follow_up": 4,
-    # follow-ups (no "hey Void") that aren't you are dropped: Whisper unsure, nobody talking, or — once he knows your voice
-    # from five of your "hey Void" / Listen requests — a voice that isn't yours (music in the room, the TV, other people)
+    # follow-ups (no "hey Void") Whisper was unsure of, or heard nobody talking in, are dropped
     "voice_gate": True,
-    # how close to your voiceprint a follow-up must sound to count as you (cosine, 0–1; you ~0.85, music ~0.15)
-    "voice_min": 0.5,
     # context: he tracks how full Claude's memory of the chat is; past `compact_at` he writes himself a short note and
     # starts a fresh chat from it (so a long session can't quietly eat your usage). Off = only warn.
     "auto_compact": True,
@@ -1166,28 +1163,6 @@ RATE = 16000
 FRAME = RATE * 2 * 40 // 1000               # 40 ms of s16le mono = 1280 bytes
 
 
-def speech_span(pcm: bytes):
-    """Where your voice is in `pcm`, for the voiceprint: (start, end) byte offsets, or None (no voice in it). A loud run
-    counts once its level rises again, as a voice does and a chime (struck, then only dying away) never does, so the
-    lead-in and the listening chime stay out of it. The one cut every enrolment and every follow-up's voice score uses."""
-    vo = hearing.Voicing(0.012, 3.0)
-    voiced, run_at, rose, last_rms, said_from, said_to = 0, None, False, 0.0, None, None
-    for at in range(0, len(pcm) - FRAME + 1, FRAME):
-        rms, _floor, thr, voiced = vo.frame(pcm[at:at + FRAME], MicAuto.soft, hold=voiced >= 3)
-        if rms <= thr:
-            run_at, rose = None, False
-        elif run_at is None:
-            run_at = at
-        else:
-            rose = rose or rms > last_rms * 1.25
-        last_rms = rms
-        if voiced >= 3 and rose and said_from is None:
-            said_from = run_at
-        if said_from is not None and rms > thr * 0.6:
-            said_to = at + FRAME
-    return None if said_from is None else (said_from, said_to)
-
-
 def last_speech_end(pcm: bytes):
     """Where, in seconds into `pcm`, someone is last heard talking (the speech detector, so music doesn't count).
     None: nobody. False: no detector available."""
@@ -1439,7 +1414,6 @@ class Listen:
                     break
         finally:
             mic.close()
-        span = speech_span(bytes(pcm))           # (where your voice is, cut before MicAuto.learn retunes the level)
         if peak < 0.0005:
             emit(t="error", text="the mic is completely silent — is the right input selected/unmuted? "
                                  "(`void doctor` lists inputs; set mic_device in the config)")
@@ -1458,16 +1432,12 @@ class Listen:
             emit(t="transcribing")
             text = transcribe_pcm(bytes(pcm))
         # (push-to-talk is you asking: not judged as heard over him, so a "stop" said into it is sent on as said)
-        v = gate.judge(gate.Burst(text, None, ss, secs, None, "listen", False), said_lately(), CFG)
-        verdict_out(v, text, None, "listen")
+        v = gate.judge(gate.Burst(text, None, ss, secs, "listen", False), said_lately(), CFG)
+        verdict_out(v, text, "listen")
         if not v.keep:
             emit(t="cancel", why=v.why)
             return
         emit(t="text", text=v.rest)
-        # teach him your voice only from a request in words (judge has dropped nothing, noise, filler and echo), and
-        # only from the stretch you were talking in
-        if learned and span is not None:
-            Voice.enroll(bytes(pcm[span[0]:span[1]]), text)
 
 
 def reset_whisper():
@@ -1513,105 +1483,19 @@ def said_lately():
     return [said for _t, said in SPOKEN]
 
 
-def verdict_out(v: "gate.Verdict", said: str, voice: float | None, kind: str) -> None:
-    """One stderr line per verdict, '[void] <why>: <said>' with the voice score. A follow-up verdict whose keep is
-    false also publishes BUS gate_drop, shown on the page (app/static/index.html:1905). Never a file, store or count."""
-    vs = "" if voice is None else f" (voice {voice:.2f})"     # (on every scored verdict: the next wrong call reads off the log)
-    line = f"{v.why}{vs}: {(said or '').strip(' .,!?')[:80]}"
-    print(f"[void] {line}", file=sys.stderr)
+def hear_out(line: str) -> None:
+    """One hearing line on stderr, stamped with the local time to the second ('[void] 2026-10-26 18:39:43 <line>'), so
+    it lines up with history.jsonl and with what you remember saying (bin/void-drops replays them)."""
+    print(f"[void] {time.strftime('%Y-%m-%d %H:%M:%S')} {line}", file=sys.stderr)
+
+
+def verdict_out(v: "gate.Verdict", said: str, kind: str) -> None:
+    """One stamped stderr line per verdict, '<why> (<kind>): <said>'. A follow-up verdict whose keep is false also
+    publishes BUS gate_drop, shown on the page (app/static/index.html:1905). Never a file, store or count."""
+    line = f"{v.why} ({kind}): {(said or '').strip(' .,!?')[:80]}"
+    hear_out(line)
     if kind == "follow" and not v.keep:
         BUS.pub(t="gate_drop", text=line)
-
-
-class Voice:
-    """The server's one voiceprint of the owner (voiceprint.Voiceprint), loaded on its own thread: the first run downloads
-    its model, and neither startup nor the mic loop waits for that. Until it's in, follow-ups are judged on Whisper's
-    confidence alone and nothing is enrolled. Why it's off is the Voiceprint's own `why` (voice_report)."""
-    PATH = DATA_DIR / "voiceprint.npz"          # the print (running mean of the enrolled clips' embeddings)
-    MODELS = DATA_DIR / "voices" / "voiceprint"  # the embedding model, fetched on first use
-    RETRY = 600                                  # a print left unavailable (no network?) is tried again after this long
-    vp = None
-    loader = None
-    tried = None
-    lock = threading.Lock()
-
-    @classmethod
-    def start(cls):
-        """Load the voiceprint in the background, unless it's loading or loaded already. → the loader thread."""
-        with cls.lock:
-            due = cls.tried is None or (cls.vp is not None and not cls.vp.available
-                                        and time.monotonic() - cls.tried > cls.RETRY)
-            if due and not (cls.loader and cls.loader.is_alive()):
-                cls.tried = time.monotonic()
-                cls.loader = threading.Thread(target=cls._load, daemon=True)
-                cls.loader.start()
-            return cls.loader
-
-    @classmethod
-    def _load(cls):
-        import voiceprint
-        cls.vp = voiceprint.Voiceprint(cls.PATH, cls.MODELS)
-
-    @classmethod
-    def get(cls):
-        """The voiceprint, or None while it's loading. Waits for the load only when the model is on disk already (a quick
-        load, no download)."""
-        t = cls.start()
-        if cls.vp is None and t is not None and t.is_alive():
-            import voiceprint
-            if (cls.MODELS / voiceprint.MODEL).exists():
-                t.join()
-        return cls.vp
-
-    @classmethod
-    def score_soon(cls, pcm):
-        """Score `pcm` against the owner's voice on its own thread (alongside Whisper). → wait(): the score, or None (no
-        voiceprint yet, too few clips enrolled, or the scoring failed)."""
-        box = [None]
-
-        def run():
-            vp = cls.get()
-            if vp is not None:
-                try:
-                    box[0] = vp.score(pcm)
-                except Exception as e:  # noqa: BLE001
-                    print(f"[void] voiceprint score failed: {e}", file=sys.stderr)
-        t = threading.Thread(target=run, daemon=True)
-        t.start()
-
-        def wait():
-            t.join()
-            return box[0]
-        return wait
-
-    @classmethod
-    def enroll(cls, pcm, text):
-        """Fold one of the owner's own requests (wake-word or Listen, never a follow-up) into the voiceprint: `pcm` is
-        the stretch speech_span found, `text` what was said in it (for the log)."""
-        vp = cls.get()
-        if vp is not None and vp.available:
-            print(f"[void] voiceprint enrolling {len(pcm) / (RATE * 2):.1f}s of your speech: {(text or '').strip()[:80]}",
-                  file=sys.stderr)
-            try:
-                vp.enroll(pcm)
-            except Exception as e:  # noqa: BLE001
-                print(f"[void] voiceprint enrolment failed: {e}", file=sys.stderr)
-
-
-def voice_report(vp) -> str:
-    """What `void doctor` and diagnostics() say about the voiceprint: on (and how far enrolled), or the Voiceprint's own
-    why when it's unavailable."""
-    if vp is None:
-        return "loading (its model downloads on first use)"
-    if not vp.available:
-        return vp.why
-    import voiceprint
-    out = f"on, {vp.enrolled} of your clips enrolled"
-    if vp.enrolled < voiceprint.MIN_ENROLL:
-        out += f" (follow-ups judged on Whisper's confidence alone until {voiceprint.MIN_ENROLL})"
-    if not CFG.get("voice_gate", True):
-        out += "; the follow-up gate is off (voice_gate)"
-    return out
 
 
 class Wake:
@@ -1799,8 +1683,8 @@ class Wake:
         except Exception as e:  # noqa: BLE001
             print(f"[void] wake word stt: {e}", file=sys.stderr)
             return None
-        v = gate.judge(gate.Burst(text, None, ss, secs, None, "wake", cls.speaking()), said_lately(), CFG)
-        verdict_out(v, text, None, "wake")
+        v = gate.judge(gate.Burst(text, None, ss, secs, "wake", cls.speaking()), said_lately(), CFG)
+        verdict_out(v, text, "wake")
         return None if v.why == "no speech" else text
 
     @classmethod
@@ -1812,8 +1696,8 @@ class Wake:
         except Exception as e:  # noqa: BLE001
             print(f"[void] stop check stt: {e}", file=sys.stderr)
             return False
-        v = gate.judge(gate.Burst(text, None, ss, secs, None, "peek", cls.speaking()), said_lately(), CFG)
-        verdict_out(v, text, None, "peek")
+        v = gate.judge(gate.Burst(text, None, ss, secs, "peek", cls.speaking()), said_lately(), CFG)
+        verdict_out(v, text, "peek")
         if v.act != "barge":
             return False
         cls.barge(text)
@@ -1850,23 +1734,16 @@ class Wake:
             follow, over = True, False
             cut = 0 if at is None else int((cls.speaking_until - at) * RATE) * 2
             if 0 < cut < len(pcm):               # (only what came after his last word: his echo, however well cancelled,
-                pcm = pcm[cut:]                  # opened the burst, and heard or scored it is his voice, not yours)
+                pcm = pcm[cut:]                  # opened the burst, and heard it is his voice, not yours)
             else:
                 cut = 0
         kind = "over" if over else "follow" if follow else "wake"
-        gated = kind == "follow" and CFG.get("voice_gate", True)
-        voice = None                             # (a follow-up's voice score: worked out while Whisper transcribes)
         heard = None
-        span = None
         try:
             ss, secs = speech_seconds(pcm), len(pcm) / (RATE * 2)
             if not gate.spoken_enough(ss, secs, kind):   # (music or noise, not talking: Whisper would dream up words)
                 text = ""
             else:
-                span = speech_span(pcm)          # (only where you spoke is scored or enrolled, never the lead-in)
-                spoken = pcm if span is None else pcm[span[0]:span[1]]
-                if gated:
-                    voice = Voice.score_soon(spoken)
                 if kind == "follow":             # (a judged follow-up needs Whisper's confidence, not just words)
                     heard = transcribe_pcm_heard(pcm, sure=True)
                     text = heard.text
@@ -1877,20 +1754,16 @@ class Wake:
             print(f"[void] wake word stt: {e}", file=sys.stderr)
             return
         text = text or ""
-        print(f"[void] heard {secs:.1f}s, {len(text.split())} words"
-              f"{', follow-up' if follow else ''}{f', after his last word ({cut / (RATE * 2):.1f}s of him cut)' if cut else ''}"
-              f"{', wake word' if WAKE_RE.match(text) else ''}{', while talking' if cls.speaking() else ''}",
-              file=sys.stderr)
-        score = voice() if voice else None
-        v = gate.judge(gate.Burst(text, heard, ss, secs, score, kind, cls.speaking()), said_lately(), CFG)
-        verdict_out(v, text, score, kind)
+        hear_out(f"heard {secs:.1f}s, {len(text.split())} words"
+                 f"{', follow-up' if follow else ''}{f', after his last word ({cut / (RATE * 2):.1f}s of him cut)' if cut else ''}"
+                 f"{', wake word' if WAKE_RE.match(text) else ''}{', while talking' if cls.speaking() else ''}")
+        v = gate.judge(gate.Burst(text, heard, ss, secs, kind, cls.speaking()), said_lately(), CFG)
+        verdict_out(v, text, kind)
         if v.act == "barge":
             cls.barge(text)
         elif v.act == "request":
             MicAuto.learn(pcm)                   # (only your requests tune the mic: not noise, not his voice)
             BUS.pub(t="wake", text=v.rest)
-            if span is not None:                 # (…and teach him your voice: after the request is out, never a follow-up)
-                Voice.enroll(spoken, text.strip(" .,!?"))
         elif v.act == "follow":
             cls.follow_until = 0.0
             MicAuto.learn(pcm)
@@ -1920,8 +1793,6 @@ def doctor():
         print()
     print("recorders tried in order:", "sounddevice" if OSYS else (", ".join(c[0] for c in mic_cmds()) or "NONE"))
     print("echo canceller:", echo_report(hearing.Canceller(CFG.get("echo_cancel", True))))
-    import voiceprint
-    print("voiceprint:", voice_report(voiceprint.Voiceprint(Voice.PATH, Voice.MODELS)), flush=True)
     print("recording 3 seconds — keep talking the whole time…", flush=True)
     try:
         if OSYS:                                    # (keep every channel, to see which one your voice is on)
@@ -3406,7 +3277,6 @@ def diagnostics():
         except OSError:
             add("vc++ runtime", "not found")
     add("echo canceller", echo_report(hearing.Canceller(CFG.get("echo_cancel", True))))
-    add("voiceprint", voice_report(Voice.vp))
     add("mic auto-level", f"{'on' if CFG.get('mic_auto', True) else 'off'}, boost {MicAuto.soft:.1f}x, last voice peak "
                           + ("-" if MicAuto.last_peak is None else f"{MicAuto.last_peak:.3f}"))
     add("settings", ", ".join(f"{k}={CFG.get(k)}" for k in ("trust", "wake_word", "barge_in", "follow_up", "tts",
@@ -4158,7 +4028,6 @@ def main():
     _wire_quick()
     resync_launch_agent()
     threading.Thread(target=warm_tts, daemon=True).start()
-    Voice.start()                           # (downloads its model on the first run: off the startup path)
     Wake.ensure()
     Updates.start()
     srv = ThreadingHTTPServer(("127.0.0.1", int(CFG["port"])), Handler)

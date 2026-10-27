@@ -22,6 +22,8 @@ Hearing test doubles have one home, `tests/fakes.py`: `heard` (`tests/fakes.py:2
 
 The voiceprint stays on. Its check is one step of the single verdict.
 
+**Superseded, 26 Oct, by the owner's ruling:** "If the voiceprint can't separate me from Void's own echo reliably, take it out of the follow-up decision rather than tune its threshold again." It couldn't: on 26 Oct the owner's dropped follow-ups scored 0.02 to 0.43 and the echo and room it dropped scored 0.04 to 0.17. The voiceprint is gone (`app/voiceprint.py`, `server.Voice`, `speech_span`, `voice_min`, `Burst.voice`), and with it steps 7 (stray word, which only the voiceprint could overrule) and 9 below and the owner exception in step 4: `judge` is now speech share, echo, stop phrase, noise, while talking, wake word, Whisper confidence. A follow-up that gets through and wasn't meant for him is Claude's to `[ignore]`.
+
 ## Modules
 
 ### `app/gate.py`: every keep-or-drop decision on a heard burst
