@@ -2739,7 +2739,35 @@ def hooks_file():
 
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # (light mode keeps Agent: the long-lived process and its little Voids are built on his subagents, see agents.py)
-LEAN_TOOLS = "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Agent"
+LEAN_TOOLS = "Bash,Read,Edit,Write,WebSearch,Agent"     # (no Grep/Glob/WebFetch: unused in his chats, ~5k chars of schema)
+# the only subagent types he dispatches; every other role in ~/.claude/agents (and the built-in Explore / Plan /
+# statusline-setup) is denied for his sessions, which also takes its description out of his system prompt
+KEEP_AGENTS = ("general-purpose", "claude")
+BUILTIN_AGENTS = ("Explore", "Plan", "statusline-setup")
+
+
+def agent_names(d=None):
+    """The user's own subagent roles: the `name:` of each ~/.claude/agents/*.md (the file name if it has none)."""
+    names = []
+    for f in sorted(Path(d or Path.home() / ".claude" / "agents").glob("*.md")):
+        name = f.stem
+        try:
+            for line in f.read_text(encoding="utf-8", errors="replace").splitlines()[1:40]:
+                if line.strip() == "---":
+                    break
+                if line.startswith("name:"):
+                    name = line[5:].strip().strip('"\'') or name
+                    break
+        except OSError:
+            pass
+        names.append(name)
+    return names
+
+
+def agent_deny_args(d=None):
+    """--disallowedTools Agent(<role>) for every subagent type but KEEP_AGENTS."""
+    deny = [n for n in dict.fromkeys(list(BUILTIN_AGENTS) + agent_names(d)) if n not in KEEP_AGENTS]
+    return ["--disallowedTools", ",".join(f"Agent({n})" for n in deny)] if deny else []
 
 
 WORKISH = re.compile(r"\b(code|files?|fix|bug|commit|tests?|run|build|refactor|install|folder|project|git|error|script|"
@@ -2773,6 +2801,7 @@ def usage_args(live=False):
     if CFG.get("lean", True):
         c += ["--tools", LEAN_TOOLS, "--disable-slash-commands", "--strict-mcp-config",
               "--exclude-dynamic-system-prompt-sections"]
+    c += agent_deny_args()
     if not live and float(CFG.get("max_cost_usd") or 0) > 0:
         c += ["--max-budget-usd", str(CFG["max_cost_usd"])]
     return c
@@ -2847,6 +2876,7 @@ def claude_env():
         env.pop("LC_CTYPE", None)
     if CFG.get("root_mode") and not WIN:
         env["SUDO_ASKPASS"] = askpass_path()
+    env.setdefault("BASH_MAX_OUTPUT_LENGTH", "3000")   # long command output fills his context fast; his own setting wins
     env["VOID_PORT"], env["VOID_TOKEN"] = str(CFG["port"]), TOOL_TOKEN   # (the limited one: every command Claude runs sees it)
     return env
 
