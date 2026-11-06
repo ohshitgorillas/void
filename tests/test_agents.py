@@ -13,6 +13,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "app"))
@@ -637,6 +638,327 @@ class GroupKill(unittest.TestCase):
         finally:
             if not self._gone(p.pid):
                 os.killpg(p.pid, signal.SIGKILL)
+
+
+# ---------------------------------------------------------------- what the helpers make of a tool's output
+class Helpers(unittest.TestCase):
+    def test_result_text_joins_text_and_marks_pictures(self):
+        self.assertEqual(agents.result_text("plain"), "plain")
+        blocks = [{"type": "text", "text": "a"}, {"type": "image"}, {"type": "tool_use"}, "junk"]
+        self.assertEqual(agents.result_text(blocks), "a\n[image]\n\n")
+        self.assertEqual(agents.result_text(None), "")
+
+    def test_a_long_output_keeps_its_head_and_tail(self):
+        out = agents.tool_output("\n".join(f"line{i}" for i in range(100))).splitlines()
+        self.assertEqual(out[:40], [f"line{i}" for i in range(40)])
+        self.assertEqual(out[40], "… 30 more lines …")
+        self.assertEqual(out[41:], [f"line{i}" for i in range(70, 100)])
+        self.assertEqual(agents.tool_output("short"), "short")
+
+    def test_one_huge_line_is_cut_at_6000_characters(self):
+        self.assertEqual(agents.tool_output("x" * 7000), "x" * 6000 + "\n…")
+
+    @staticmethod
+    def pic(data="AAAA", media="image/png", kind="base64"):
+        return {"type": "image", "source": {"type": kind, "media_type": media, "data": data}}
+
+    def test_pictures_become_data_uris_and_unusable_ones_are_left_out(self):
+        got = agents.tool_images([self.pic(), self.pic("BBBB", "image/jpeg"), self.pic(media="text/plain"),
+                                  self.pic(kind="url"), self.pic(data="x" * 11), {"type": "text", "text": "t"}],
+                                 limit=10)
+        self.assertEqual(got, ["data:image/png;base64,AAAA", "data:image/jpeg;base64,BBBB"])
+        self.assertEqual(agents.tool_images("not a list"), [])
+
+    def test_at_most_three_pictures(self):
+        self.assertEqual(len(agents.tool_images([self.pic(str(i)) for i in range(5)])), 3)
+
+    def test_the_notes_prefix_says_when_memory_was_cleared(self):
+        self.assertIn("cleared your memory notes", agents.notes_prefix(""))
+        self.assertIn("likes tea", agents.notes_prefix("likes tea"))
+
+
+class KillTree(unittest.TestCase):
+    """The process boundary is replaced: no signal reaches a real group, no real process is started."""
+
+    class P:
+        pid = 4242
+
+        def __init__(self, hangs=False, running=True):
+            self.hangs, self.running, self.waits = hangs, running, []
+
+        def poll(self):
+            return None if self.running else 0
+
+        def wait(self, timeout=None):
+            self.waits.append(timeout)
+            if self.hangs:
+                raise subprocess.TimeoutExpired("p", timeout)
+
+    def test_nothing_to_kill(self):
+        self.assertIsNone(agents.kill_tree(None))
+
+    def test_term_then_kill_for_a_group_that_will_not_go(self):
+        p = self.P(hangs=True)
+        with mock.patch.object(agents.os, "killpg") as killpg:
+            agents.kill_tree(p, grace=0.5)
+        self.assertEqual(killpg.call_args_list, [mock.call(4242, signal.SIGTERM), mock.call(4242, signal.SIGKILL)])
+        self.assertEqual(p.waits, [0.5, 0.5])
+
+    def test_a_group_already_gone_is_no_error(self):
+        for err in (ProcessLookupError, PermissionError):
+            with mock.patch.object(agents.os, "killpg", side_effect=err):
+                agents.kill_tree(self.P())
+
+    def test_windows_kills_the_tree_of_a_running_process_only(self):
+        with mock.patch.object(agents, "WIN", True), mock.patch.object(agents.subprocess, "run") as run:
+            agents.kill_tree(self.P(running=False))
+            run.assert_not_called()
+            agents.kill_tree(self.P())
+        run.assert_called_once_with(["taskkill", "/T", "/F", "/PID", "4242"], capture_output=True, creationflags=0x08000000)
+
+    def test_own_group_arguments_per_platform(self):
+        self.assertEqual(agents.own_group_kw(), {"start_new_session": True})
+        with mock.patch.object(agents, "WIN", True):
+            self.assertEqual(agents.own_group_kw(), {"creationflags": 0x00000200 | 0x08000000})
+
+
+# ---------------------------------------------------------------- the stream events no capture holds
+def user_result(content, tid="tu1", **kw):
+    return {"type": "user", "message": {"role": "user", "content": content}, "parent_tool_use_id": None,
+            "tool_use_id": tid, **kw}
+
+
+def tool_result(tid="tu1", content="out", **kw):
+    return user_result([dict({"type": "tool_result", "tool_use_id": tid, "content": content}, **kw)], tid)
+
+
+class StreamEvents(unittest.TestCase):
+    def open_stream(self):
+        s = agents.Stream()
+        s.ask_open = True
+        return s
+
+    def test_how_full_the_chat_is_comes_from_usage_and_the_biggest_window(self):
+        s = self.open_stream()
+        usage = {"input_tokens": 5}
+        self.assertEqual(s.feed({"type": "assistant", "message": {"usage": usage, "content": []}}),
+                         [("ctx", {"usage": usage})])
+        res = dict(result("ok"), session_id="s9",
+                   modelUsage={"a": {"contextWindow": 200000}, "b": {"contextWindow": 1000000}, "c": "junk"})
+        self.assertEqual(s.feed(res)[:2], [("session", "s9"), ("ctx", {"window": 1000000})])
+
+    def test_a_whole_message_is_sent_once_when_no_deltas_came(self):
+        s = self.open_stream()
+        out = s.feed({"type": "assistant", "message": {"content": ["junk", {"type": "text", "text": "Hello"}]}})
+        self.assertEqual(out, [("ask", {"t": "break"}), ("ask", {"t": "delta", "text": "Hello"})])
+        s.feed(delta("Hi"))
+        self.assertEqual(s.feed({"type": "assistant", "message": {"content": [{"type": "text", "text": "Hi"}]}}), [])
+
+    def test_a_new_message_breaks_the_text_and_other_stream_events_say_nothing(self):
+        s = self.open_stream()
+        self.assertEqual(s.feed({"type": "stream_event", "event": {"type": "message_start"}}),
+                         [("ask", {"t": "break"})])
+        self.assertEqual(s.feed({"type": "stream_event", "event": {"type": "content_block_start"}}), [])
+
+    def test_a_tool_result_carries_its_pictures(self):
+        s = self.open_stream()
+        img = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+        self.assertEqual(s.feed(tool_result("tu1", [img])),
+                         [("ask", {"t": "toolres", "id": "tu1", "text": "[image]", "is_error": False,
+                                   "images": ["data:image/png;base64,AAAA"]})])
+
+    def test_user_rows_that_are_not_tool_results_say_nothing(self):
+        s = self.open_stream()
+        self.assertEqual(s.feed(user_result([{"type": "text", "text": "x"}])), [])
+        self.assertEqual(s.feed(user_result("plain text")), [])
+
+    def test_a_failed_launch_without_a_known_launch_makes_no_little_void(self):
+        s = self.open_stream()
+        out = feed(s, {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "tu1", "name": "Agent", "input": None}]}}, tool_result("tu1", "boom", is_error=True))
+        self.assertEqual(bus(out), [])
+        self.assertEqual(to_ask(out)[-1]["is_error"], True)
+
+    def test_init_without_a_session_names_none(self):
+        s = self.open_stream()
+        out = s.feed({"type": "system", "subtype": "init", "model": "m"})
+        self.assertEqual(out, [("ask", {"t": "init", "model": "m"})])
+        self.assertTrue(s.inited and s.in_turn)
+
+    def test_a_subagent_without_a_run_id_is_not_awaited_after_it_ends(self):
+        s = agents.Stream()
+        out = feed(s, started("t1", None), {"type": "system", "subtype": "task_progress", "task_id": "zz"},
+                   notified("t1"))
+        self.assertEqual([e["t"] for e in bus(out)], ["sub_start", "sub_end"])   # no tick for an unknown task
+        self.assertEqual((s.runs, s.awaiting), ({}, {}))
+
+    def test_a_helper_of_an_unknown_subagent_is_not_counted(self):
+        s = agents.Stream()
+        out = s.feed(started("k1", "rk", parent_task_id="ghost"))
+        self.assertEqual((out, s.kids, s.tasks), ([], {}, {}))
+
+    def test_a_peers_empty_turn_says_nothing(self):
+        s = self.open_stream()
+        out = feed(s, init(), result("   ", origin=PEER))
+        self.assertEqual(bus(out, "followup"), [])
+
+
+class MoreBrain(unittest.TestCase):
+    def test_stop_with_no_process_is_false(self):
+        self.assertFalse(Harness().brain.stop())
+
+    def test_a_waiting_flag_for_an_unknown_subagent_is_ignored(self):
+        h = Harness()
+        h.brain.set_waiting("nobody", True)
+        self.assertEqual(h.events, [])
+
+    def test_another_chat_restarts_him(self):
+        h = Harness()
+        h.ask()
+        h.ask(session="sess-1")
+        self.assertEqual(len(h.procs), 1)
+        h.ask(session="another")
+        self.assertEqual(len(h.procs), 2)
+        self.assertTrue(wait_for(lambda: h.procs[0] in h.killed))
+
+    def test_context_events_go_to_on_ctx(self):
+        h = Harness(lambda p, o: o.get("type") == "user" and p.emit(
+            init(), {"type": "assistant", "message": {"usage": {"input_tokens": 7}, "content": []}}, result("ok")))
+        seen = []
+        h.brain.on_ctx = seen.append
+        h.ask()
+        self.assertEqual(seen, [{"usage": {"input_tokens": 7}}])
+
+    def test_a_process_that_cannot_start_ends_the_message_with_the_reason(self):
+        h = Harness()
+
+        def refuse(cmd, **kw):
+            raise OSError("no such file")
+        h.brain.popen = refuse
+        r, got = h.ask()
+        self.assertEqual((r, got), ("done", [{"t": "error", "text": "couldn't start Claude Code: no such file"}]))
+        self.assertFalse(h.brain.alive())
+        self.assertEqual(h.brain.err, ["no such file"])
+
+    def test_lines_that_are_not_json_are_skipped(self):
+        def noisy(p, o):
+            if o.get("type") == "user":
+                p.out.put("\n")
+                p.out.put("not json at all\n")
+                p.emit(init(), delta("ok"), result("ok"))
+        r, got = Harness(noisy).ask()
+        self.assertEqual((r, got[-1]["t"]), ("done", "result"))
+
+    def test_shutdown_without_waiting_kills_in_the_background(self):
+        h = Harness()
+        h.ask()
+        self.assertTrue(h.brain.shutdown(wait=False))
+        self.assertTrue(wait_for(lambda: h.procs[0] in h.killed))
+
+    def test_shutdown_goes_on_when_the_pipe_will_not_close(self):
+        h = Harness()
+        h.ask()
+
+        def broken():
+            raise ValueError("closed")
+        h.procs[0].stdin.close = broken
+        self.assertTrue(h.brain.shutdown(wait=True))
+        self.assertIn(h.procs[0], h.killed)
+
+    def dies_at_start(self, stderr, **launch):
+        h = Harness()
+
+        def popen_dead(cmd, **kw):
+            p = FakeProc(cmd, None, **kw)
+            p.exit(1, stderr)
+            h.procs.append(p)
+            return p
+        h.brain.popen = popen_dead
+        return h.ask(**launch)
+
+    def test_a_claude_that_does_not_know_partial_messages_asks_for_a_retry_without_them(self):
+        r, got = self.dies_at_start("error: unknown option '--include-partial-messages'\n")
+        self.assertEqual((r, [e for e in got if e["t"] == "error"]), ("retry_nopartial", []))
+
+    def test_a_chat_claude_cannot_find_asks_for_a_fresh_start(self):
+        r, got = self.dies_at_start("No conversation found with session ID: old\n", session="old")
+        self.assertEqual((r, [e for e in got if e["t"] == "error"]), ("retry_fresh", []))
+
+    def test_a_crash_with_no_message_says_so_without_a_code(self):
+        r, got = self.dies_at_start("")
+        self.assertEqual(r, "done")
+        self.assertEqual(got[0]["text"], "Claude Code stopped unexpectedly (exit code 1) — your next message starts it again.")
+
+    def test_a_process_that_exits_on_the_interrupt_is_stopped_not_crashed(self):
+        def cli(p, o):
+            if o.get("type") == "user":
+                p.emit(init(), started("t1", "r1"), delta("hmm"))
+            elif (o.get("request") or {}).get("subtype") == "interrupt":
+                p.exit(0)
+        h = Harness(cli)
+        res = {}
+        th = threading.Thread(target=lambda: res.update(r=h.ask()))
+        th.start()
+        self.assertTrue(wait_for(lambda: h.brain.running()))
+        h.brain.stop(wait=5)
+        th.join(3)
+        r, got = res["r"]
+        self.assertEqual((r, got[-1]), ("done", {"t": "stopped"}))
+        self.assertEqual([e["t"] for e in got if e["t"] == "error"], [])
+        self.assertEqual(h.bus("sub_end")[0]["status"], "stopped")
+
+    def test_a_reader_that_hangs_on_a_dead_process_does_not_block_the_crash_report(self):
+        def crash(p, o):
+            if o.get("type") == "user":
+                p.emit(init())
+                p.wait = lambda timeout=None: (_ for _ in ()).throw(subprocess.TimeoutExpired("fake", timeout))
+                p.out.put(None)                                # (its output ended, but it never exits)
+        h = Harness(crash)
+        r, got = h.ask()
+        self.assertEqual(r, "done")
+        self.assertEqual(got[-1]["t"], "error")
+        self.assertTrue(wait_for(lambda: h.procs[0] in h.killed))
+
+    def test_a_process_that_died_unnoticed_is_replaced_and_its_late_words_are_not_heard(self):
+        h = Harness(lambda p, o: (answer(p, o), o.get("type") == "user" and "bg" in o["message"]["content"]
+                                  and p.emit(started("t1", "r1"))))
+        h.ask("bg")
+        self.assertTrue(wait_for(lambda: h.brain.running()))
+        old = h.procs[0]
+        old.returncode = 1                                     # (gone, but its reader hasn't noticed)
+        self.assertEqual(h.ask("again")[0], "done")
+        self.assertEqual(len(h.procs), 2)
+        self.assertEqual(h.bus("sub_end"), [{"t": "sub_end", "id": "t1", "status": "failed"}])
+        self.assertTrue(wait_for(lambda: old in h.killed))
+        old.emit(started("late", "rl"))                        # the old reader wakes up: it is not his any more
+        old.out.put(None)
+        time.sleep(0.2)
+        self.assertEqual(h.brain.running(), [])
+
+    def test_a_write_that_fails_on_a_warm_process_starts_a_new_one_once(self):
+        h = Harness()
+        h.ask()
+        h.procs[0].stdin.closed = True                         # (still "alive", but takes no input)
+        r, got = h.ask("again")
+        self.assertEqual((r, got[-1]["t"]), ("done", "result"))
+        self.assertEqual(len(h.procs), 2)
+        self.assertTrue(wait_for(lambda: h.procs[0] in h.killed))
+        self.assertEqual(h.procs[1].users(), ["again"])
+
+    def test_the_watchdog_survives_a_failing_idle_check_and_runs_it_each_round(self):
+        class Quit(BaseException):
+            pass
+        h = Harness()
+        calls = []
+
+        def boom():
+            calls.append(1)
+            raise RuntimeError("x")
+        h.brain.idle_check = boom
+        with mock.patch.object(agents.time, "sleep", side_effect=[None, None, Quit()]) as sleep:
+            with self.assertRaises(Quit):
+                h.brain._watch()
+        self.assertEqual((len(calls), sleep.call_args_list), (2, [mock.call(20)] * 3))
 
 
 # ---------------------------------------------------------------- the approval hook says who's asking
