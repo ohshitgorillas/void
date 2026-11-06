@@ -367,8 +367,12 @@ class Quitting(unittest.TestCase):
 @unittest.skipUnless(sys.platform == "darwin", "Core Audio")
 class CoreAudio(unittest.TestCase):
     def test_audio_devices(self):
-        import macsys
+        """macsys hands winsys the system's devices when it is imported, so it is imported afresh here: an earlier
+        import (another test file's, at collection) did its assignment before a teardown reset it. The module that
+        was already loaded goes back afterwards, so nothing holding it is left with a stranger."""
+        earlier = sys.modules.pop("macsys", None)
         try:
+            import macsys
             self.assertIs(winsys.devices, macsys.audio_devices)
             out, inp, devs = macsys.audio_devices()
             for ids in (out, inp, devs):
@@ -377,6 +381,10 @@ class CoreAudio(unittest.TestCase):
             self.assertTrue(set(out + inp) - {0} <= set(devs))   # (0: no such device right now)
         finally:
             winsys.devices = None
+            if earlier is None:
+                sys.modules.pop("macsys", None)
+            else:
+                sys.modules["macsys"] = earlier
 
 
 class StuckOpen(Base):
