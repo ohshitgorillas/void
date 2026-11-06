@@ -59,15 +59,15 @@ export function run(argv) {
   try { policy = JSON.parse(fs.readFileSync(policyPath, 'utf8')); } catch { policy = undefined; }
 
   const include = policy && policy.coverage && policy.coverage.include;
-  if (!report || typeof report.files !== 'object' || report.files === null || !Array.isArray(include)) {
+  if (!report || typeof report.files !== 'object' || report.files === null || !policy) {
     // nothing to slice: the checker alone judges the report and the policy as given
     const { out, status } = check([...(reportPath ? ['--report', reportPath] : []), '--policy', policyPath]);
     process.stdout.write(out);
     return status;
   }
 
-  if (include.length === 0) {
-    console.log('FAIL policy: coverage.include is empty, so no module was checked');
+  if (!Array.isArray(include) || include.length === 0) {
+    console.log('FAIL policy: coverage.include is missing or empty, so no module was checked');
     return 1;
   }
 
