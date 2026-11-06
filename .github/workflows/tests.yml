@@ -1,0 +1,33 @@
+name: tests
+# Runs the suite with coverage on a Mac, then judges each fork-owned module against the floor in
+# .github/cadence/coverage-policy.json. The commands are the policy's accepted commands, verbatim.
+on:
+  push:
+    branches: [macos, personal]
+jobs:
+  tests:
+    runs-on: macos-14
+    timeout-minutes: 45        # a hung test otherwise holds the runner for 6 hours
+    env:
+      UV_PYTHON: "3.12"        # install.sh pins 3.12: the speech libraries do not all support newer Pythons
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v6        # uvx and its cache
+        with:
+          enable-cache: true
+          cache-dependency-glob: tests/requirements.txt
+      - name: Playwright for the page tests
+        run: npm install -g playwright@1.65.0        # tests/test_page_idle.py finds it under `npm root -g`; the runner's Chrome is the browser
+      - name: Suite with coverage
+        env:
+          PYTEST_ADDOPTS: "-rs"        # print every skip reason
+        run: uvx --with pytest-cov --with-requirements tests/requirements.txt pytest --cov=app --cov-branch --cov-report=json
+      - name: Per-module floor
+        run: node .github/ci/coverage-modules.mjs --report coverage.json
+      - name: coverage.json
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage.json
+          path: coverage.json
+          if-no-files-found: warn
