@@ -1,0 +1,51 @@
+{
+  "phase": "1",
+  "trigger": "plan",
+  "discriminator": "plan-7294443",
+  "round": 1,
+  "base": "7294443",
+  "head": "7294443",
+  "base_id": "72944434ea7b35e42486e279b9c208432fdc8bf6",
+  "head_id": "72944434ea7b35e42486e279b9c208432fdc8bf6",
+  "voices": [
+    {
+      "voice": "claude-subagent",
+      "model": "sonnet"
+    }
+  ],
+  "citations": {
+    "checked": true
+  },
+  "entries": [
+    {
+      "voice": "claude-subagent",
+      "model": "sonnet",
+      "file": ".planning/phases/1/PLAN-1.md",
+      "line": 81,
+      "severity": "medium",
+      "claim": "Task 7's verify requires the second command to print 'exactly 14 per-module lines', but the unmodified checker also prints a statements line for every file, so the real output is 21 lines.",
+      "failure_scenario": "The policy has statements: 0 (.github/cadence/coverage-policy.json). The template (coverage-report-check.mjs, final loop) prints 'statements: disabled (threshold 0)' for each of the three metrics that is disabled. The runner prefixes every checker line, so 7 files give 21 lines, and the 'exactly 14' check cannot pass as written. The same task is told to report those 14 lines as the baseline Plan 2 starts from, and Plan 2's closing truths repeat the count of 14 (lines 114 and 117 of PLAN-2.md). The executor has to improvise, or 'done' is declared against a count that was never true. The count should be 14 lines/branches lines plus 7 statements lines, or the check should filter to lines and branches.",
+      "ruling": "survived",
+      "convergent": false,
+      "fix_commit": "2fd08d0",
+      "citation_missing": true,
+      "base_id": "72944434ea7b35e42486e279b9c208432fdc8bf6",
+      "head_id": "72944434ea7b35e42486e279b9c208432fdc8bf6"
+    },
+    {
+      "voice": "claude-subagent",
+      "model": "sonnet",
+      "file": ".planning/phases/1/PLAN-2.md",
+      "line": 156,
+      "severity": "low",
+      "claim": "Task 5 allows additions to tests/test_window_mac.py, but its declared Files list and the plan's front-matter files list name only tests/test_macsys.py.",
+      "failure_scenario": "The action says 'Cocoa window calls are already exercised by tests/test_window_mac.py; add to them only where the gap is there'. If the gap is there, which D-06 and the 44 macsys references suggest, the executor edits a file the plan never declared. Any scope or file-ownership check against the declared files would flag the edit, or the executor would be held to the single declared file and be unable to close the macsys gap.",
+      "ruling": "survived",
+      "convergent": false,
+      "fix_commit": "2fd08d0",
+      "citation_missing": true,
+      "base_id": "72944434ea7b35e42486e279b9c208432fdc8bf6",
+      "head_id": "72944434ea7b35e42486e279b9c208432fdc8bf6"
+    }
+  ]
+}
