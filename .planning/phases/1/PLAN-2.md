@@ -14,6 +14,8 @@ files:
   - tests/test_langmark.py
   - tests/test_notifier.py
   - .github/workflows/tests.yml
+  - .github/ci/coverage-modules.mjs
+  - tests/test_coverage_modules.py
 ---
 
 # Phase 1: Coverage gate - Plan 2: Fork modules at the floor
@@ -83,7 +85,13 @@ The existing suite runs unattended on a macOS runner, and the fork-owned modules
 - **Action:** Close any measured gap in `app/notifier.py` (`PingBatch.add`, `PingBatch.due`, `digest`) with tests in `tests/test_notifier.py` driving `PingBatch` through its injected `clock`, asserting when a batch is due (quiet time since the last line, hold time since the first) and the digest's line order. No sleeps and no change to `app/`.
 - **Verify:** Subset run over `tests/test_notifier.py tests/test_inbox.py` prints both `app/notifier.py` lines as `meets 85`, every test passing. Testing scope: outcomes are the quiet and hold due rules and digest order; existing notifier and inbox tests likely cover most of it already; testing stops at 85/85.
 
-### Task 8: Commit the `tests` workflow
+### Task 8: Fail the per-module runner when the policy has no include list
+
+- **Files:** .github/ci/coverage-modules.mjs, tests/test_coverage_modules.py
+- **Action:** Carried from Plan 1's `risk_surface` review, round 2 (`REVIEW-risk_surface-plan-1-r2.md`): a policy whose `coverage.include` is missing or not an array sends `run()` down the unsliced fallback, where the checker judges the report's totals and the gate exits 0 having checked no module. That contradicts the design's rule that no total over `app/` is compared (`docs/superpowers/specs/coverage-gate-design.md:13`). Make any policy that names no usable include list fail with a non-zero exit and a line saying no module was checked, the way `include: []` already does since 2f4b0f3. The unreadable-report passthrough the design specifies stays as it is. Prove it in `tests/test_coverage_modules.py`.
+- **Verify:** `uvx pytest tests/test_coverage_modules.py -rs` passes with none skipped, the new test having failed before the fix; a policy with no `include` key and one with `"include": {}` each exit 1 printing the no-module line. Testing scope: one defect, one test per shape that reached the fallback.
+
+### Task 9: Commit the `tests` workflow
 
 - **Files:** .github/workflows/tests.yml
 - **Action:** Moved from Plan 1 (its former Task 7). `.github/workflows/tests.yml` already exists, untracked, written to this spec by Plan 1's first run; check it against the spec, correct any departure, and commit it only after the closing checks in the Notes have both commands exiting 0. The spec: Create `.github/workflows/tests.yml` (a new file; `macos.yml` is not touched, CONTEXT D-01) with: `on: push` to branches `macos` and `personal`, no `paths:` filter and no other trigger; one job named `tests`, `runs-on: macos-14`, `timeout-minutes: 45` (my choice: an unattended macOS job otherwise runs up to 6 hours if a test hangs, which CONTEXT's last flagged assumption raises); job-level `env` `UV_PYTHON: "3.12"` (my choice: `install.sh` pins 3.12 because the speech libraries do not all support newer Pythons, and the env leaves the accepted command text verbatim). Steps: `actions/checkout@v7`; `astral-sh/setup-uv@v6` with `enable-cache: true` and `cache-dependency-glob: tests/requirements.txt`; a global Playwright install with `npm install -g playwright@<exact version>`, the version read from `npm view playwright version` when the file is written, so `node_path()` in `tests/test_page_idle.py` finds it under `npm root -g` and the page tests run against the runner's preinstalled Chrome through `channel: "chrome"` (D-05; no browser download); the first accepted command verbatim as a single-line `run:` with step `env` `PYTEST_ADDOPTS: -rs` (my choice: it prints every skip reason for AC5 without altering the accepted text); the second accepted command verbatim as its own single-line `run:`; then `actions/upload-artifact@v7` with `if: always()`, `name: coverage.json`, `path: coverage.json`, `if-no-files-found: warn` (the run has already failed when the report is missing). No `continue-on-error`, no `--cov-fail-under`, no threshold, no file list and no direct call to `coverage-report-check.mjs` anywhere in the file (D-02; design Homes). Fetch no speech model (D-07). Before running the suite locally, name its footprint to the user (rule 3.1): the uv cache gains PySide6, faster-whisper, onnxruntime, kokoro-onnx and the rest (over 1 GB of disk), the run holds one core for minutes, and Qt windows and Chrome open on Slate's screen; run it with `UV_PYTHON=3.12` to match CI.
@@ -91,7 +99,8 @@ The existing suite runs unattended on a macOS runner, and the fork-owned modules
 
 ## Notes
 
-- Closing checks for the plan (no files of their own; run after Task 7 and before Task 8, and report the output): the full two-command run for AC3's local half, then AC4 by moving `tests/test_langmark.py` aside, running both commands, quoting the `app/langmark.py: FAIL` line and restoring the file (`git status tests/` clean afterwards). Name the full run's footprint before it runs, as Plan 1 Task 7 does.
+- Closing checks for the plan (no files of their own; run after Task 8 and before Task 9, and report the output): the full two-command run for AC3's local half, then AC4 by moving `tests/test_langmark.py` aside, running both commands, quoting the `app/langmark.py: FAIL` line and restoring the file (`git status tests/` clean afterwards). Name the full run's footprint before it runs, as Plan 1 Task 7 does.
 - The CI halves of AC3 and AC5 need a push of `personal`, which only the owner can authorize in the turn it happens; no task here pushes.
 - If closing a module's gap materially exceeds a task's effort (most likely `macsys` or `agents`), the executor reports the measured gap and the tradeoff once, per the testing policy, rather than lowering the floor or widening the task.
 - Recalled D-08 (phases/1/CONTEXT.md, phase 1) sets this plan's floor and module list.
+- Amended at execution (orchestrator): Task 8 added from Plan 1's round-2 `risk_surface` finding, since Plan 1's one re-arm round was spent; it lands in this plan's range so this plan's own `risk_surface` fire reviews it. The workflow commit is now Task 9.
