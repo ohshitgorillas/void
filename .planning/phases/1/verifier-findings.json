@@ -1,0 +1,84 @@
+{
+  "status": "gaps",
+  "score": "7/8",
+  "truths": [
+    {
+      "n": 1,
+      "truth": "A `tests` workflow on macos-14 runs on push to macos and personal with no paths filter, and runs both accepted commands verbatim as separate steps with no continue-on-error, uploading coverage.json with if: always()",
+      "status": "VERIFIED",
+      "uat_item": 1,
+      "evidence": ".github/workflows/tests.yml:4-6 `on: push: branches: [macos, personal]`, no `paths:` key anywhere in the file; :8-9 job `tests`, `runs-on: macos-14`; :24 is the first command and :26 the second, both identical to `.github/cadence/coverage-policy.json` coverage.commands and to `.planning/config.json` testing.coverage.commands; no `continue-on-error`, `--cov-fail-under` or direct call to the checker; :27-33 upload-artifact `if: always()`, name and path coverage.json. Action versions (checkout@v7, upload-artifact@v7, setup-uv@v6) match the repo's other workflows."
+    },
+    {
+      "n": 2,
+      "truth": "The Cadence policy check finds the gate",
+      "status": "VERIFIED",
+      "uat_item": 2,
+      "evidence": "`node .../cadence-core/bin/planning.mjs test-policy check --root .` printed {\"ok\":true,\"accepted\":true,\"enforcement\":\"available\",\"gate_found\":true,\"problems\":[],\"publish_authorized\":false}, exit 0."
+    },
+    {
+      "n": 3,
+      "truth": "The per-module gate judges each include file on that file's own slice of coverage.json, and fails on a missing, non-array or empty include list, on a module absent from the report, and on a low module hidden by a high total",
+      "status": "VERIFIED",
+      "uat_item": null,
+      "evidence": ".github/ci/coverage-modules.mjs:22-32 slice() keeps only files[file] and sets totals to that entry's summary; :35-37 narrows the policy's include to [file]; :70-73 prints `FAIL policy: coverage.include is missing or empty` and returns 1 when include is not a non-empty array; :78-89 runs the checker once per entry and sets exit 1 on any non-zero. .github/cadence/coverage-report-check.mjs is byte-identical to cadence-core/templates/coverage-report-check.mjs (diff empty). `python3 -m unittest tests.test_coverage_modules`: 10 tests OK, including test_high_total_hides_no_low_module, test_module_absent_from_report_fails_naming_it, test_empty_include..., test_policy_with_no_include_key..., test_policy_whose_include_is_not_a_list.... Spot-check on copies of the real local coverage.json (report total 48.10% lines, so a total-only check would fail everything): with app/langmark.py deleted from files the runner printed `app/langmark.py: FAIL files: in scope but absent from the report: app/langmark.py` and exit 1; with langmark's covered_lines cut to 24% it printed `app/langmark.py: FAIL lines: 23.30% is below 85`, exit 1. slice(report, 'app/hearing.py') returned files ['app/hearing.py'] with branches 49/56. coverage.json keys files as `app/<module>.py`, matching include."
+    },
+    {
+      "n": 4,
+      "truth": "The recursive delete in coverage-modules.mjs removes only the runner's own fresh temp directory",
+      "status": "VERIFIED",
+      "uat_item": null,
+      "evidence": ".github/ci/coverage-modules.mjs:75 `tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'coverage-modules-'))`, a new uniquely named directory never derived from argv, the report or the policy; :91 `fs.rmSync(tmp, { recursive: true, force: true })` sits in the finally of the try that starts after mkdtemp, so it runs only once tmp exists, and only tmp's own slice/policy files are written under it (:84-87, names from the loop index, not from include text). After the 10 runner tests and 2 spot-check runs, no `coverage-modules-*` directory was left in $TMPDIR."
+    },
+    {
+      "n": 5,
+      "truth": "All 7 fork-owned modules are at or above 85% lines and 85% branches with the suite at HEAD",
+      "status": "VERIFIED",
+      "uat_item": null,
+      "evidence": "The local coverage.json (meta.timestamp 2026-11-06T02:54:52, branch_coverage true) comes after the last app/ or tests/ change (3ad5209, 02:49; `git diff --stat 3ad5209 HEAD -- app tests` is empty). Per-file summary figures, lines/branches: gate 99.06/97.62, hearing 98.12/87.50, agents 100.00/97.22, langmark 98.06/94.44, macsys 100.00/100.00, notifier 100.00/100.00, drops 100.00/100.00. This does not show that both accepted commands exit 0 (pytest writes the report even when tests fail), so UAT item 3 is left to the main session's own run of the accepted commands, which was in progress during this check."
+    },
+    {
+      "n": 6,
+      "truth": "The new tests in test_drops.py, test_agents.py and test_macsys.py exercise the modules' own logic rather than stubbing what they claim to test",
+      "status": "VERIFIED",
+      "uat_item": null,
+      "evidence": "tests/test_drops.py runs the real drops.replay, drops.report and drops.main (and the module as __main__ through runpy) on a written log and asserts exact rows and report lines. tests/test_macsys.py replaces only the process and Cocoa boundary (subprocess.run/Popen fail the test unless a test stands in for them, :30-34; _send, _run, osa) and asserts macsys's own argv building, output parsing, clamping, matching, caching and error text (e.g. Volume :291-305, Apps :400-413, Screenshots :183-188). The test_agents.py additions (f4acc7d) drive agents.Stream.feed, kill_tree and Brain through the file's fake-process Harness and assert the emitted events and kill order. Run by name with UV_PYTHON=3.12 UV_OFFLINE=1 uvx --with-requirements tests/requirements.txt pytest: test_drops.py + test_macsys.py 63 passed; test_agents.py -k 'Helpers or KillTree or StreamEvents or MoreBrain' 40 passed, 33 deselected. No TODO/FIXME/XXX/HACK/placeholder markers in any phase file."
+    },
+    {
+      "n": 7,
+      "truth": "Nothing in the workflow or the suite makes a test skip on the runner for a missing import or a missing Playwright",
+      "status": "VERIFIED",
+      "uat_item": null,
+      "evidence": "Every import-based skip in tests/ (server.py, hearing.py, gate.py, livekit, faster-whisper, PySide6/window_win, QWebEngineView, Kokoro's phonemizer) is covered by tests/requirements.txt, which matches packaging/macos/build.sh:22-23 (faster-whisper pillow PySide6 sounddevice piper-tts kokoro-onnx, livekit==1.1.21). tests.yml:19-20 runs `npm install -g playwright@1.65.0`, and node_path() in tests/test_page_idle.py:20-35 looks in `npm root -g`; with no /opt/pw-browsers, LAUNCH is channel 'chrome' (:41-45), the runner's preinstalled Chrome. Qt tests set QT_QPA_PLATFORM offscreen (test_window_mac.py:19, test_page_notch.py:17, test_window_poll.py:17, test_window_reauth.py:15). The only other skips are platform, VOID_SCENES slow tier (9 tests in test_scenes.py from :238, the 9 local skips) and test_window_mac.py:279 'no screen'. Whether the runner's -rs output is in fact clean is UAT item 6, settled by the first pushed run."
+    },
+    {
+      "n": 8,
+      "truth": "No test fetches a speech model in CI (CONTEXT D-07)",
+      "status": "FAILED",
+      "uat_item": null,
+      "evidence": "tests/test_hearing.py:544-577 HeardTest sets CFG whisper_model 'base.en', resets server._whisper to None and calls server.transcribe_pcm_heard / server.run_whisper on a real clip; app/server.py:1036-1043 _load() then calls faster_whisper.WhisperModel('base.en'), which fetches Systran/faster-whisper-base.en from Hugging Face when no copy is cached. Slate has it cached (~/.cache/huggingface/hub/models--Systran--faster-whisper-base.en), so local runs never fetched it; .github/workflows/tests.yml has no model cache, no HF_HUB_OFFLINE, and nothing in app/ or tests/ sets local_files_only, HF_HOME or a download root. On the runner these 2 tests download the model over the network on every push, against D-07, and fail if Hugging Face cannot be reached."
+    }
+  ],
+  "passes": [
+    {
+      "k": 1,
+      "name": "tests workflow shape",
+      "evidence": ".github/workflows/tests.yml:4-6 push to [macos, personal] with no paths: key; :8-9 job `tests`, runs-on macos-14; :24 and :26 the two policy commands verbatim, no continue-on-error; :27-33 coverage.json upload with if: always()."
+    },
+    {
+      "k": 2,
+      "name": "Policy check finds the gate",
+      "evidence": "`planning.mjs test-policy check --root .` -> {\"ok\":true,\"accepted\":true,\"enforcement\":\"available\",\"gate_found\":true,\"problems\":[]}, exit 0."
+    }
+  ],
+  "gaps": [
+    {
+      "name": "No test fetches a speech model in CI",
+      "reason": "behavior wrong - the suite loads the real Whisper base.en model, which the runner has to download from Hugging Face, against CONTEXT D-07 and the flagged assumption that no test downloads a model",
+      "evidence": "tests/test_hearing.py:544-577 HeardTest (whisper_model 'base.en', server._whisper reset to None, real server.transcribe_pcm_heard / run_whisper); app/server.py:1036-1043 _load() -> WhisperModel(name). The model is cached on Slate only (~/.cache/huggingface/hub/models--Systran--faster-whisper-base.en). .github/workflows/tests.yml has no model cache and no HF_HUB_OFFLINE; no local_files_only / HF_HOME / download_root anywhere in app/ or tests/.",
+      "severity": "major",
+      "missing": "Settle HeardTest's model source on the runner to fit D-07: either have the CI job keep it offline (e.g. HF_HUB_OFFLINE=1 for the suite step, with HeardTest using a model the repo supplies or mocking WhisperModel the way tests/test_echo.py:470-474 mocks server.whisper), or, if a real-Whisper test in CI is wanted, record that departure from D-07 and add an actions/cache step for the Hugging Face model. Then confirm on the first pushed run that no test reaches the network for a model."
+    }
+  ],
+  "human_checks": []
+}
