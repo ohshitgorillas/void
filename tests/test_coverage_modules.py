@@ -21,6 +21,9 @@ def summary(lines, covered, branches, covered_branches):
                         "covered_branches": covered_branches, "num_branches": branches}}
 
 
+NO_INCLUDE = object()   # a policy with no `include` key at all
+
+
 def run_modules(tmp, files, include, report_text=None):
     """Writes tmp/coverage.json and tmp/policy.json (floor 85 on lines and branches), runs the runner from the repo root."""
     totals = {key: sum(f["summary"][key] for f in files.values())
@@ -29,8 +32,10 @@ def run_modules(tmp, files, include, report_text=None):
     report.write_text(report_text if report_text is not None else
                       json.dumps({"meta": {"branch_coverage": True}, "totals": totals, "files": files}))
     policy = tmp / "policy.json"
-    policy.write_text(json.dumps({"coverage": {"lines": 85, "branches": 85, "statements": 0,
-                                               "include": include, "exclude": [], "commands": []}}))
+    coverage = {"lines": 85, "branches": 85, "statements": 0, "include": include, "exclude": [], "commands": []}
+    if include is NO_INCLUDE:
+        del coverage["include"]
+    policy.write_text(json.dumps({"coverage": coverage}))
     return subprocess.run(["node", RUNNER, "--report", str(report), "--policy", str(policy)],
                           cwd=ROOT, capture_output=True, text=True, timeout=60)
 
@@ -89,6 +94,16 @@ class CoverageModules(unittest.TestCase):
 
     def test_empty_include_fails_saying_no_module_was_checked(self):
         r = run_modules(self.tmp, {GATE: summary(100, 10, 20, 2)}, [])
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("no module was checked", r.stdout)
+
+    def test_policy_with_no_include_key_fails_saying_no_module_was_checked(self):
+        r = run_modules(self.tmp, {GATE: summary(100, 10, 20, 2)}, NO_INCLUDE)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("no module was checked", r.stdout)
+
+    def test_policy_whose_include_is_not_a_list_fails_saying_no_module_was_checked(self):
+        r = run_modules(self.tmp, {GATE: summary(100, 99, 20, 20)}, {})
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("no module was checked", r.stdout)
 
