@@ -1,0 +1,7 @@
+faster-whisper
+pillow
+PySide6
+sounddevice
+piper-tts
+kokoro-onnx
+livekit==1.1.21
