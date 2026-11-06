@@ -99,8 +99,8 @@
       ],
       "exclude": [],
       "commands": [
-        "uvx --with pytest-cov pytest --cov=app --cov-branch --cov-report=json",
-        "node .github/cadence/coverage-report-check.mjs --format python --report coverage.json"
+        "uvx --with pytest-cov --with-requirements tests/requirements.txt pytest --cov=app --cov-branch --cov-report=json",
+        "node .github/ci/coverage-modules.mjs --report coverage.json"
       ]
     },
     "strong_areas": [
