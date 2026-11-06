@@ -1,0 +1,31 @@
+{
+  "scope": "integrated",
+  "coverage": {
+    "lines": 85,
+    "branches": 85,
+    "statements": 0,
+    "include": [
+      "app/gate.py",
+      "app/hearing.py",
+      "app/agents.py",
+      "app/langmark.py",
+      "app/macsys.py",
+      "app/notifier.py",
+      "app/drops.py"
+    ],
+    "exclude": [],
+    "commands": [
+      "uvx --with pytest-cov pytest --cov=app --cov-branch --cov-report=json",
+      "node .github/cadence/coverage-report-check.mjs --format python --report coverage.json"
+    ]
+  },
+  "strong_areas": [
+    "app/gate.py",
+    "app/hearing.py",
+    "app/agents.py"
+  ],
+  "required_jobs": [
+    "tests",
+    "build"
+  ]
+}
