@@ -66,6 +66,11 @@ export function run(argv) {
     return status;
   }
 
+  if (include.length === 0) {
+    console.log('FAIL policy: coverage.include is empty, so no module was checked');
+    return 1;
+  }
+
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'coverage-modules-'));
   let code = 0;
   try {
