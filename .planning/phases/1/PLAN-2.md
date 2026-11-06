@@ -13,6 +13,7 @@ files:
   - tests/test_window_mac.py
   - tests/test_langmark.py
   - tests/test_notifier.py
+  - .github/workflows/tests.yml
 ---
 
 # Phase 1: Coverage gate - Plan 2: Fork modules at the floor
@@ -23,6 +24,8 @@ The existing suite runs unattended on a macOS runner, and the fork-owned modules
 
 ## Must be true when done
 
+- `node "${CLAUDE_PLUGIN_ROOT}/cadence-core/bin/planning.mjs" test-policy check --root .` prints `"gate_found":true`.
+- `.github/workflows/tests.yml` has a job named `tests` on `macos-14`, triggered on push to `macos` and `personal` with no `paths:` filter, running the two accepted commands verbatim as separate steps and uploading `coverage.json` with `if: always()`.
 - From the repo root with `UV_PYTHON=3.12`, the two accepted commands from `.github/cadence/coverage-policy.json` exit 0, and the second prints `<file>: lines: … meets 85` and `<file>: branches: … meets 85` for all 7 `include` files (AC3, local half).
 - With `tests/test_langmark.py` moved aside, the same two commands exit non-zero and the second prints an `app/langmark.py: FAIL` line; with it restored, they exit 0 again (AC4). If langmark stays at or above 85 without its file (it is also imported through `app/server.py`), `tests/test_agents.py` and `app/agents.py` are used instead, and the module used is named in the report.
 - No module reaches the floor by narrowing what is measured: nothing under `app/` changed, no `pragma: no cover`, no coverage config file, and `.planning/config.json` and `.github/cadence/coverage-policy.json` are unchanged by this plan.
@@ -30,7 +33,7 @@ The existing suite runs unattended on a macOS runner, and the fork-owned modules
 
 ## Context
 
-- Builds on Plan 1's output and runs after it: `tests/requirements.txt`, the rendered accepted commands and `.github/ci/coverage-modules.mjs` must exist, and Plan 1 Task 7's 21 baseline lines (14 `lines`/`branches` figures plus 7 `statements: disabled (threshold 0)`) are where each task starts.
+- Builds on Plan 1's output and runs after it: `tests/requirements.txt`, the rendered accepted commands and `.github/ci/coverage-modules.mjs` must exist, and Plan 1's 21 baseline lines (in `reports/plan-1.md`) (14 `lines`/`branches` figures plus 7 `statements: disabled (threshold 0)`) are where each task starts.
 - Binding: CONTEXT D-08 (85/85 for all 7 modules; the floor is not lowered and no module leaves `include`), D-06 (Cocoa and Qt tests do not skip on the runner; `macsys.py` stays in `include`), D-07 (no speech model in any test), and the design's rule that no module test adds a coverage setting, threshold or file list.
 - `testing.strong_areas` is `app/gate.py`, `app/hearing.py`, `app/agents.py`; Key Decision "Hearing test doubles live only in `tests/fakes.py`". Phase 3 owns the real-log regression set and new `void drops` output; this plan tests existing behavior only.
 - Every task follows one loop: measure the module's gap (Plan 1's baseline lines, then `missing_lines` and `missing_branches` for `files["app/<module>.py"]` in `coverage.json`), add tests only for those gaps, stop at 85/85. A module already at or above 85/85 in the baseline gets no new tests; its task reports the baseline lines and commits nothing.
@@ -80,9 +83,15 @@ The existing suite runs unattended on a macOS runner, and the fork-owned modules
 - **Action:** Close any measured gap in `app/notifier.py` (`PingBatch.add`, `PingBatch.due`, `digest`) with tests in `tests/test_notifier.py` driving `PingBatch` through its injected `clock`, asserting when a batch is due (quiet time since the last line, hold time since the first) and the digest's line order. No sleeps and no change to `app/`.
 - **Verify:** Subset run over `tests/test_notifier.py tests/test_inbox.py` prints both `app/notifier.py` lines as `meets 85`, every test passing. Testing scope: outcomes are the quiet and hold due rules and digest order; existing notifier and inbox tests likely cover most of it already; testing stops at 85/85.
 
+### Task 8: Commit the `tests` workflow
+
+- **Files:** .github/workflows/tests.yml
+- **Action:** Moved from Plan 1 (its former Task 7). `.github/workflows/tests.yml` already exists, untracked, written to this spec by Plan 1's first run; check it against the spec, correct any departure, and commit it only after the closing checks in the Notes have both commands exiting 0. The spec: Create `.github/workflows/tests.yml` (a new file; `macos.yml` is not touched, CONTEXT D-01) with: `on: push` to branches `macos` and `personal`, no `paths:` filter and no other trigger; one job named `tests`, `runs-on: macos-14`, `timeout-minutes: 45` (my choice: an unattended macOS job otherwise runs up to 6 hours if a test hangs, which CONTEXT's last flagged assumption raises); job-level `env` `UV_PYTHON: "3.12"` (my choice: `install.sh` pins 3.12 because the speech libraries do not all support newer Pythons, and the env leaves the accepted command text verbatim). Steps: `actions/checkout@v7`; `astral-sh/setup-uv@v6` with `enable-cache: true` and `cache-dependency-glob: tests/requirements.txt`; a global Playwright install with `npm install -g playwright@<exact version>`, the version read from `npm view playwright version` when the file is written, so `node_path()` in `tests/test_page_idle.py` finds it under `npm root -g` and the page tests run against the runner's preinstalled Chrome through `channel: "chrome"` (D-05; no browser download); the first accepted command verbatim as a single-line `run:` with step `env` `PYTEST_ADDOPTS: -rs` (my choice: it prints every skip reason for AC5 without altering the accepted text); the second accepted command verbatim as its own single-line `run:`; then `actions/upload-artifact@v7` with `if: always()`, `name: coverage.json`, `path: coverage.json`, `if-no-files-found: warn` (the run has already failed when the report is missing). No `continue-on-error`, no `--cov-fail-under`, no threshold, no file list and no direct call to `coverage-report-check.mjs` anywhere in the file (D-02; design Homes). Fetch no speech model (D-07). Before running the suite locally, name its footprint to the user (rule 3.1): the uv cache gains PySide6, faster-whisper, onnxruntime, kokoro-onnx and the rest (over 1 GB of disk), the run holds one core for minutes, and Qt windows and Chrome open on Slate's screen; run it with `UV_PYTHON=3.12` to match CI.
+- **Verify:** `node "${CLAUDE_PLUGIN_ROOT}/cadence-core/bin/planning.mjs" test-policy check --root .` prints `"gate_found":true` (AC2); `grep -c 'continue-on-error\|fail-under\|paths:' .github/workflows/tests.yml` prints 0; the closing checks' full two-command run exited 0 before the commit. The CI half (the `tests` job passing on a pushed `personal` commit and uploading `coverage.json`, AC3 and AC5) is (ci: tests), checked by `ci-status` once the owner authorizes the push. Testing scope: the policy check plus the closing run; no test is added.
+
 ## Notes
 
-- Closing checks for the plan (no files of their own; run after Task 7 and report the output): the full two-command run for AC3's local half, then AC4 by moving `tests/test_langmark.py` aside, running both commands, quoting the `app/langmark.py: FAIL` line and restoring the file (`git status tests/` clean afterwards). Name the full run's footprint before it runs, as Plan 1 Task 7 does.
+- Closing checks for the plan (no files of their own; run after Task 7 and before Task 8, and report the output): the full two-command run for AC3's local half, then AC4 by moving `tests/test_langmark.py` aside, running both commands, quoting the `app/langmark.py: FAIL` line and restoring the file (`git status tests/` clean afterwards). Name the full run's footprint before it runs, as Plan 1 Task 7 does.
 - The CI halves of AC3 and AC5 need a push of `personal`, which only the owner can authorize in the turn it happens; no task here pushes.
 - If closing a module's gap materially exceeds a task's effort (most likely `macsys` or `agents`), the executor reports the measured gap and the tradeoff once, per the testing policy, rather than lowering the floor or widening the task.
 - Recalled D-08 (phases/1/CONTEXT.md, phase 1) sets this plan's floor and module list.
