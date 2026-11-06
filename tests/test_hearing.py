@@ -14,6 +14,7 @@ import importlib
 import inspect
 import io
 import math
+import os
 import random
 import sys
 import unittest
@@ -541,6 +542,7 @@ def fixture(name):
         return w.readframes(w.getnframes())
 
 
+@unittest.skipUnless(os.environ.get("VOID_SCENES") == "1", "slow tier: set VOID_SCENES=1")
 @unittest.skipIf(server is None, f"server.py doesn't import here: {SERVER_ERR}")
 @unittest.skipIf(WHISPER_ERR is not None, f"faster-whisper doesn't import here: {WHISPER_ERR}")
 class HeardTest(unittest.TestCase):
