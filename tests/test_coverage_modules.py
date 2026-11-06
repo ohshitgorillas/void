@@ -87,6 +87,11 @@ class CoverageModules(unittest.TestCase):
         self.assertIn("FAIL app/*.py: include entries must be file paths", r.stdout)
         self.assertTrue(any("lines:" in l and "meets 85" in l for l in self.lines_for(r, GATE)), r.stdout)
 
+    def test_empty_include_fails_saying_no_module_was_checked(self):
+        r = run_modules(self.tmp, {GATE: summary(100, 10, 20, 2)}, [])
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("no module was checked", r.stdout)
+
     def test_unreadable_report_fails(self):
         r = run_modules(self.tmp, {}, [GATE], report_text="{ not json")
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
