@@ -1,1 +1,0 @@
-**Void briefs no workers directly.** Owner rule, 23 Oct, binding on Void, the app, only: the Claude sessions Void drives hand work to a lead rather than writing worker briefs. Agents developing this repo are not bound by it.
