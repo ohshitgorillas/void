@@ -35,12 +35,12 @@ evidence: PYTEST_ADDOPTS=-rs uvx --with pytest-cov --with-requirements tests/req
 ### 4. tests job passes in CI and uploads coverage.json
 expected: The `tests` job on a pushed `personal` commit passes and uploads a `coverage.json` artifact showing all 7 modules meeting 85 (ci: tests)
 criterion: AC3
-status: fail
+status: pass
 job: tests
-commit: 4488777abbe18f14f1908fb00aa9a0ab924762e9
+commit: 9b309e085a37533cf7362e4ed8238cd91b52d057
 first_pass: fail
 source: model
-evidence: Needs the tests job on a GitHub macos-15 runner; it cannot run on Slate
+evidence: tests concluded success at 9b309e085a37533cf7362e4ed8238cd91b52d057 (run 42366225527, macos-15); test-policy ci-status: tests answer pass. Plan 4 fix first passed on run 42362803211 at 89f4bfe
 severity: blocker
 cause: tests concluded failure at 4488777 (run 42335490351, macos-15): `21 failed, 571 passed, 11 skipped in 583.43s`; the gate step never ran. Clusters (b) and (c), the page tests, were closed by Plan 3 (80fa8e8, 75b8a6c; they pass on run 42341370023). Cluster (a) is 14 tests, not 13: 6 in `Launchers`, 2 in `LauncherQuit`, 6 in `WindowKeepsTheRecord`; on run 42341370023 they still failed (`14 failed, 578 passed, 11 skipped`) with empty logs. Cause, as diagnosed by the owner from instrumented run 42346423614 (branch `ci-debug/fake-servers`, e667dad): on macos-15 `http.server.HTTPServer.server_bind` runs `socket.getfqdn("127.0.0.1")`, which blocks about 35 s in `mdns_hostbyaddr`, past the 5 s, 6 s and 8 s start waits, so the fake server is still in its bind and has written nothing when the wait gives up. Evidence, from `gh run view 42346423614 --log`: `in-process getfqdn(127.0.0.1) = 'localhost' took 35.041s`, and a sampled frame `mdns_hostbyaddr  (in libsystem_info.dylib)` under `socket.py line 808 in getfqdn`.
 fix: Plan 4 (tests/loopback_http.py binds without the lookup)
@@ -78,8 +78,8 @@ fix: 4f95ffb, retest
 ## Summary
 
 total: 7
-passed: 6
-failed: 1
+passed: 7
+failed: 0
 pending: 0
 skipped: 0
 blocked: 0
