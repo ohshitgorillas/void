@@ -22,9 +22,9 @@ sys.path.insert(0, str(ROOT / "app"))
 
 # a stand-in for app/server.py with a child of its own (like the multiprocessing resource tracker). VOID_RUN_ID, when
 # set, is its run id (as in the real one).
-FAKE_SERVER = r'''
+FAKE_SERVER = (HERE / "loopback_http.py").read_text() + r'''
 import json, os, secrets, signal, subprocess, sys
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 PORT = int(os.environ["FAKE_PORT"])
 if "--print-port" in sys.argv:
     print(PORT); sys.exit()
@@ -37,7 +37,7 @@ class H(BaseHTTPRequestHandler):
         self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers()
         self.wfile.write(body)
     def log_message(self, *a): pass
-srv = ThreadingHTTPServer(("127.0.0.1", PORT), H)
+srv = LoopbackThreadingHTTPServer(("127.0.0.1", PORT), H)
 os.makedirs(data, exist_ok=True)
 kid = subprocess.Popen(["sleep", "40"])
 open(os.path.join(data, "server.pid"), "w").write(str(os.getpid()))
