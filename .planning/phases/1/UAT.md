@@ -3,7 +3,7 @@ status: testing
 phase: 1
 fields_version: 1
 started: 2026-11-06
-updated: 2026-11-06
+updated: 2026-11-07
 ---
 
 ## Items
@@ -35,11 +35,15 @@ evidence: PYTEST_ADDOPTS=-rs uvx --with pytest-cov --with-requirements tests/req
 ### 4. tests job passes in CI and uploads coverage.json
 expected: The `tests` job on a pushed `personal` commit passes and uploads a `coverage.json` artifact showing all 7 modules meeting 85 (ci: tests)
 criterion: AC3
-status: pending_ci
+status: fail
 job: tests
-commit: 4f95ffb574c13d6a674704e6c482e62742f883c8
+commit: 4488777abbe18f14f1908fb00aa9a0ab924762e9
+first_pass: fail
 source: model
 evidence: Needs the tests job on a GitHub macos-15 runner; it cannot run on Slate
+severity: blocker
+cause: tests concluded failure at 4488777 (run 42335490351, macos-15): `21 failed, 571 passed, 11 skipped in 583.43s`; the gate step never ran. Three clusters, root causes unverified: (a) 13 tests in tests/test_launchers.py and tests/test_quit.py whose fake server never writes runtime.json / child.pid / server.pid within 5-8 s (`the foreign fake server didn't start`, `server didn't start`, test_quit.py:207 `False is not true`); the fake server's stderr goes to DEVNULL and server.log is not uploaded, so why it does not start is unknown; (b) 4 tests in tests/test_page_idle.py measure 17.7-29.8 frames a second against a `> 30` floor in headless Chrome on the GPU-less runner; (c) tests/test_page_notch.py NotchShift sees 0 frames of the shift (`0 not greater than 3`) and SplitEyes reads eyes 0.781 during a split, with `GPUInfo not initialized on GpuInfoUpdate` on stderr, and CleanExit fails because those two fail. These are the CONTEXT flagged assumptions about Qt, Chrome and Cocoa on the runner, now falsified.
+fix: routed to /cad-plan
 
 ### 5. Gate fails when a module's tests are removed
 expected: With `tests/test_langmark.py` removed, the two commands exit non-zero and the second prints an `app/langmark.py: FAIL` line
@@ -52,11 +56,12 @@ evidence: tests/test_langmark.py moved aside, both accepted commands run, file r
 ### 6. No import or Playwright skips in CI
 expected: The `tests` job's pytest `-rs` output shows no test skipped for a missing import or missing Playwright; Windows-only and Linux-only skips allowed (ci: tests)
 criterion: AC5
-status: pending_ci
+status: pass
 job: tests
-commit: 4f95ffb574c13d6a674704e6c482e62742f883c8
+commit: 4488777abbe18f14f1908fb00aa9a0ab924762e9
+first_pass: pass
 source: model
-evidence: Needs the tests job pytest -rs output from the macos-15 runner; local skips do not settle runner skips
+evidence: tests job run 42335490351 at 4488777, pytest -rs short summary: all 11 skips read `slow tier: set VOID_SCENES=1` (tests/test_hearing.py:565, :574; tests/test_scenes.py:242-290); no skip for a missing import or missing Playwright.
 
 ### 7. No test fetches a speech model in CI
 expected: behavior wrong - the suite loads the real Whisper base.en model, which the runner has to download from Hugging Face, against CONTEXT D-07 and the flagged assumption that no test downloads a model
@@ -73,10 +78,9 @@ fix: 4f95ffb, retest
 ## Summary
 
 total: 7
-passed: 5
-failed: 0
+passed: 6
+failed: 1
 pending: 0
-pending_ci: 2
 skipped: 0
 blocked: 0
-reworked: 1
+reworked: 2
