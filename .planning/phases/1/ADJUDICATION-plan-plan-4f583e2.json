@@ -1,0 +1,20 @@
+{
+  "phase": "1",
+  "trigger": "plan",
+  "discriminator": "plan-4f583e2",
+  "round": 1,
+  "base": "4f583e2",
+  "head": "4f583e2",
+  "base_id": "4f583e2cdf27f8431f2e4c62186f9f170bfe47ee",
+  "head_id": "4f583e2cdf27f8431f2e4c62186f9f170bfe47ee",
+  "voices": [
+    {
+      "voice": "claude-subagent",
+      "model": "sonnet"
+    }
+  ],
+  "citations": {
+    "checked": true
+  },
+  "entries": []
+}
