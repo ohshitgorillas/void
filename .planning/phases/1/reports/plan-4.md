@@ -1,0 +1,12 @@
+PLAN COMPLETE
+Plan: .planning/phases/1/PLAN-4.md
+Tasks: 5 of 5
+| Task | Commit | Note |
+|---|---|---|
+| 1 Record cause in UAT item 4 | f7cef25 | cause cites run 42346423614; quotes `in-process getfqdn(127.0.0.1) = 'localhost' took 35.041s` |
+| 2 Child-process fakes bind without lookup | 6271a78 | tests/loopback_http.py; poisoned-getfqdn scratch run: HEAD both fakes `RuntimeError: getfqdn called`, changed tree both started; all PIDs gone (ps -p); 18 passed |
+| 3 In-process servers bind through the module | 89f4bfe | 114 tests unchanged; poisoned run (WindowsLauncherUp, test_wake_loop, ApproveHook): HEAD `17 failed, 19 passed`, changed `36 passed`; sweep grep shows no server built outside the module |
+| 4 Local gate on Slate (no commit) | - | `592 passed, 11 skipped in 268.97s`; all 11 skips `slow tier: set VOID_SCENES=1`; coverage-modules.mjs exit 0, 14 `meets 85` lines (hearing branches 87.50 unchanged); test-policy check `"gate_found":true`; no figure moved; no processes of mine left |
+| 5 Tests job green on the runner (no commit) | - | Owner authorized the push; orchestrator pushed personal 75b8a6c..89f4bfe. Run 42362803211 at 89f4bfe451bf296c9196708243f1a86cca7d03fe: workflow `tests`, job `tests` conclusion success; steps `Suite with coverage`, `Per-module floor`, `coverage.json` all success, `failed-start logs` skipped. Pytest line: `592 passed, 11 skipped in 356.94s (0:05:56)` (was `14 failed, 578 passed, 11 skipped` on 75b8a6c). All 11 skips read `slow tier: set VOID_SCENES=1`, none other. Downloaded coverage.json artifact (new scratch dir): `coverage-modules.mjs --report` exit 0, 14 `meets 85` lines (gate 99.06/97.62, hearing 98.12/87.50, agents 100/97.22, langmark 98.06/94.44, macsys/notifier/drops 100/100). No failures in the run, so the 14 cluster (a) tests (6 Launchers, 2 LauncherQuit, 6 WindowKeepsTheRecord) all passed; the log is summary-only (no -v), so per-test lines are not shown. |
+Deviations: none
+Open items: app/server.py main binds ThreadingHTTPServer(("127.0.0.1", ...)) with the same getfqdn lookup; out of lease, reported not fixed. Logs helper duplication between test_launchers.py and test_quit.py left alone (plan Notes). Branch ci-debug/fake-servers left as is. UAT item 4 status/commit/evidence fields still read fail (Task 1 left them for this run's result); updating them is for the orchestrator. The full suite ran once locally (Task 4, green), and the runner's green run at 89f4bfe is the final-suite proof.
