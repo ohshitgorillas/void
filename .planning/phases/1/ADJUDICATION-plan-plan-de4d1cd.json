@@ -1,0 +1,70 @@
+{
+  "phase": "1",
+  "trigger": "plan",
+  "discriminator": "plan-de4d1cd",
+  "round": 1,
+  "base": "de4d1cd",
+  "head": "de4d1cd",
+  "base_id": "de4d1cd63e43cc6382f87cb90e3068d10538242a",
+  "head_id": "de4d1cd63e43cc6382f87cb90e3068d10538242a",
+  "voices": [
+    {
+      "voice": "claude-subagent",
+      "model": "sonnet"
+    }
+  ],
+  "citations": {
+    "checked": true
+  },
+  "entries": [
+    {
+      "voice": "claude-subagent",
+      "model": "sonnet",
+      "file": ".planning/phases/1/PLAN-3.md",
+      "line": 66,
+      "severity": "medium",
+      "claim": "Task 5's Verify cannot fail: the 13 tests already pass on Slate, and the reproduction that would make the check falsifiable is optional ('Where the logs allow', 'If the cause was reproduced locally').",
+      "failure_scenario": "UAT item 4 shows the 13 tests fail only on the runner (571 passed there, Slate runs 592 passed). If no local reproduction is possible, the executor runs the suite on Slate, sees it pass as it did before the edit, and counts the check as met. A fix that does nothing on the runner still satisfies this line, and the only real check is the Task 8 push. The plan should state what Task 5 does if there is no local reproduction, for example a gate on a second Task 4-style diagnostic push.",
+      "ruling": "survived",
+      "convergent": false,
+      "fix_commit": "ed5da4e33512d6f7863ee9eda728c774deca6e73",
+      "citation_missing": true,
+      "base_id": "de4d1cd63e43cc6382f87cb90e3068d10538242a",
+      "head_id": "de4d1cd63e43cc6382f87cb90e3068d10538242a"
+    },
+    {
+      "voice": "claude-subagent",
+      "model": "sonnet",
+      "file": ".planning/phases/1/PLAN-3.md",
+      "line": 83,
+      "severity": "medium",
+      "claim": "The plan has only one fix pass behind one diagnostic push. Task 8 is the only run that checks Tasks 5-7, and on failure it says 'nothing else here is changed', so the plan can end without the goal (tests job passing) being reached.",
+      "failure_scenario": "Tasks 5 and 7 are written to follow evidence from one run. Task 4 may show that a cluster is still unexplained, or that Task 6's RM.matches is false (Task 6 then stops and reports). Task 8 then pushes a still-red job and ends with 'UAT item 4 stays failed'. The Goal section and the 'Must be true' list promise a green job and 14 meets lines, and no task makes that true in that branch. The plan should name a loop back to a further gap plan as the exit, so the Goal is not stated as unconditional.",
+      "ruling": "survived",
+      "convergent": false,
+      "fix_commit": "ed5da4e33512d6f7863ee9eda728c774deca6e73",
+      "citation_missing": true,
+      "base_id": "de4d1cd63e43cc6382f87cb90e3068d10538242a",
+      "head_id": "de4d1cd63e43cc6382f87cb90e3068d10538242a"
+    },
+    {
+      "voice": "claude-subagent",
+      "model": "sonnet",
+      "file": ".planning/phases/1/PLAN-3.md",
+      "line": 77,
+      "severity": "low",
+      "claim": "Task 7 adds a second always-running requestAnimationFrame loop to the page the test measures, and its replacement band and minimum are left to the executor with no number.",
+      "failure_scenario": "On the GPU-less runner the page loop already runs at 17.7-29.8 fps. A reference rAF loop in the same page adds per-frame work and can lower or shift the rate it is meant to measure. Without a stated band (for example 0.7-1.3 of the reference) and a minimum reference count, the 'tight enough to fail at 0.5x and 2x' requirement is only checked against hand-made spans, not against real runner jitter. The band could be set so loose it passes a half-rate loop, or so tight it flakes on CI.",
+      "ruling": "refuted",
+      "convergent": false,
+      "counter_evidence": {
+        "file": ".planning/phases/1/PLAN-3.md",
+        "line": 78,
+        "note": "Task 7's Verify requires hand-made spans at 0.5x and 2x the reference, and one below the reference minimum, to fail, so a band loose enough to pass a half-rate loop fails Task 7's own check; Task 7's Action (line 77) requires the band and minimum to be recorded beside the assertion, and the runner-jitter half is what Task 8's CI run checks. A counter-only rAF callback adds no measurable per-frame work against the page's own render loop."
+      },
+      "citation_missing": true,
+      "base_id": "de4d1cd63e43cc6382f87cb90e3068d10538242a",
+      "head_id": "de4d1cd63e43cc6382f87cb90e3068d10538242a"
+    }
+  ]
+}
