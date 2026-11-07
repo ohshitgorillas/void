@@ -21,6 +21,7 @@ jobs:
       - name: Suite with coverage
         env:
           PYTEST_ADDOPTS: "-rs"        # print every skip reason
+          VOID_TEST_LOGS: ${{ runner.temp }}/void-test-logs        # a failed fake-server start copies its logs here (tests/test_launchers.py, tests/test_quit.py)
         run: uvx --with pytest-cov --with-requirements tests/requirements.txt pytest --cov=app --cov-branch --cov-report=json
       - name: Per-module floor
         run: node .github/ci/coverage-modules.mjs --report coverage.json
@@ -31,3 +32,10 @@ jobs:
           name: coverage.json
           path: coverage.json
           if-no-files-found: warn
+      - name: failed-start logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: failed-start-logs
+          path: ${{ runner.temp }}/void-test-logs
+          if-no-files-found: ignore
