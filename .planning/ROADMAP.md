@@ -30,7 +30,7 @@ after it.
 **Depends on:** Nothing (first phase)
 **Requirements:** TEST-01
 **Success Criteria:**
-1. A workflow under `.github/workflows/` has a job named `tests` on `macos-14` that runs both accepted commands from `.github/cadence/coverage-policy.json` on pushes to `macos` and `personal`
+1. A workflow under `.github/workflows/` has a job named `tests` on `macos-15` that runs both accepted commands from `.github/cadence/coverage-policy.json` on pushes to `macos` and `personal`
 2. `planning.mjs test-policy check --root .` returns `gate_found: true`
 3. `coverage.json` from that job shows every file in `testing.coverage.include` at or above 85% lines and 85% branches, and the report check exits 0
 4. A commit that removes the tests for one fork-owned module makes the `tests` job fail, naming that module

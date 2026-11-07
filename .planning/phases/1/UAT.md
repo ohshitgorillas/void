@@ -9,12 +9,12 @@ updated: 2026-11-06
 ## Items
 
 ### 1. tests workflow shape
-expected: `.github/workflows/tests.yml` has a job named `tests` with `runs-on: macos-14`, triggered on push to `macos` and `personal`, with no `paths:` filter
+expected: `.github/workflows/tests.yml` has a job named `tests` with `runs-on: macos-15`, triggered on push to `macos` and `personal`, with no `paths:` filter
 criterion: AC1
 status: pass
 first_pass: pass
 source: model
-evidence: cat .github/workflows/tests.yml -> `on: push: branches: [macos, personal]` (:3-5), job `tests:` (:7) with `runs-on: macos-14` (:8); `grep -n paths .github/workflows/tests.yml` -> no match (exit 1)
+evidence: cat .github/workflows/tests.yml -> `on: push: branches: [macos, personal]` (:6-8), job `tests:` (:10) with `runs-on: macos-15` (:11); `grep -n paths .github/workflows/tests.yml` -> no match (exit 1). Re-pinned from macos-14 after GitHub cancelled run 42335427416 with `The configuration 'macos-14-arm64-us-default' is not supported`
 
 ### 2. Policy check finds the gate
 expected: `planning.mjs test-policy check --root .` prints `"gate_found":true`
@@ -39,7 +39,7 @@ status: pending_ci
 job: tests
 commit: 4f95ffb574c13d6a674704e6c482e62742f883c8
 source: model
-evidence: Needs the tests job on a GitHub macos-14 runner; it cannot run on Slate, and HEAD has never been pushed
+evidence: Needs the tests job on a GitHub macos-15 runner; it cannot run on Slate
 
 ### 5. Gate fails when a module's tests are removed
 expected: With `tests/test_langmark.py` removed, the two commands exit non-zero and the second prints an `app/langmark.py: FAIL` line
@@ -56,7 +56,7 @@ status: pending_ci
 job: tests
 commit: 4f95ffb574c13d6a674704e6c482e62742f883c8
 source: model
-evidence: Needs the tests job pytest -rs output from the macos-14 runner; local skips do not settle runner skips
+evidence: Needs the tests job pytest -rs output from the macos-15 runner; local skips do not settle runner skips
 
 ### 7. No test fetches a speech model in CI
 expected: behavior wrong - the suite loads the real Whisper base.en model, which the runner has to download from Hugging Face, against CONTEXT D-07 and the flagged assumption that no test downloads a model
