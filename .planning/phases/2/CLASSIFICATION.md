@@ -295,6 +295,33 @@ Fresh worktree on `split-trial` at c895ced, every `fix` row in table order by th
 - `python3 -m py_compile app/*.py` exit 0
 - difference from the snapshot over non-personal-only paths: `.gitignore`, `app/agents.py`, `app/server.py`, `app/static/index.html`, `tests/test_page_props.py`, `tests/test_page_sparks.py` (the visual, feature and dev-tooling rows left out)
 
+### Suite and per-module gate (Task 4)
+
+Run in the Row-construction worktree (tip fead0c9, tree 93b23c2) with `UV_PYTHON=3.12`, the two commands of `.github/cadence/coverage-policy.json` verbatim, in order. Footprint said first: about one core, Qt windows and Chrome on Slate's screen, uv cache reused.
+
+1. `uvx --with pytest-cov --with-requirements tests/requirements.txt pytest --cov=app --cov-branch --cov-report=json`: exit 1. 3 failed, 566 passed, 11 skipped in 231.72 s (580 collected; Phase 1 counted 603 on the full `personal` tree, 592 passed and 11 skipped, and the difference is the tests of the rows left out, not itemised).
+2. `node .github/ci/coverage-modules.mjs --report coverage.json`: exit 0, all 7 `include` modules meet 85 for lines and branches. The 14 per-module lines:
+
+| Module | Lines | Branches |
+|---|---|---|
+| app/gate.py | 99.06 | 97.62 |
+| app/hearing.py | 98.12 | 87.50 |
+| app/agents.py | 100.00 | 97.14 |
+| app/langmark.py | 98.06 | 94.44 |
+| app/macsys.py | 100.00 | 100.00 |
+| app/notifier.py | 100.00 | 100.00 |
+| app/drops.py | 100.00 | 100.00 |
+
+The three failures, one cause:
+
+| Test | Decisive line | Cause |
+|---|---|---|
+| `tests/test_agents.py::Helpers::test_at_most_three_pictures` | `AttributeError: module 'agents' has no attribute 'tool_images'` | `tool_images` and the `images` field on a `toolres` event are added by 283432f (class `feature`, the code panel thumbnails), which the split leaves out; the tests are in fix row f4acc7d |
+| `tests/test_agents.py::Helpers::test_pictures_become_data_uris_and_unusable_ones_are_left_out` | `AttributeError: module 'agents' has no attribute 'tool_images'` | same |
+| `tests/test_agents.py::StreamEvents::test_a_tool_result_carries_its_pictures` | `AssertionError: Lists differ ... 'images': ['data:image/png;base64,AAAA']` | same |
+
+Every failure is split-caused (none unexplained); the Borderline row is B-08. Two measurements for that row, neither a full-suite run: `git cherry-pick -n 283432f` applies to the trial tip with no conflict (2 files, 22 lines changed: `app/agents.py`, `app/static/index.html`); and `tests/test_agents.py` is the only test file that names `agents`, so with macos's own version of it (no f4acc7d) `app/agents.py` is 88.4% lines and 81.9% branches (172 of 210), under the 85 branch bar. 89f4bfe also edits `tests/test_agents.py`. After the run no pytest, Chrome or Qt process of the run was left (the run's PID 23006 was gone; the one QtWebEngine process listed belongs to HQPlayer6Client, up two days).
+
 ## Borderline
 
 Each row is a call for the owner's ruling. "Default" is the class the table holds until the owner rules. The ruling column stays empty until Task 6.
@@ -308,3 +335,4 @@ Each row is a call for the owner's ruling. "Default" is the class the table hold
 | B-05 | ed2fa27 | visual: the glow ring on the page | fix: his head no longer rises over the glow on a stretch | Two lines in `app/static/index.html`; the message says "since fd7f83e it held still" | visual | |
 | B-06 | f3b2947 | fix: delivers inbox alerts to his Claude session, which ping batching (8441f85, fix-bound) builds on | feature: inbox alerts are a capability macos lacks | One commit with no body; `app/server.py` and `tests/test_inbox.py`; `8441f85` and `7ef0a99` edit the same inbox code | fix | |
 | B-07 | fb16e92 | fix: pairs with ping batching (context-bleed step 7) | feature: changes what Claude is told to do with long jobs | Two `app/server.py` prompt lines and one test | fix | |
+| B-08 | f4acc7d (and 283432f) | carry 283432f onto the fix branch (it becomes class fix: Mac users get a thumbnail of images Claude reads, in the code panel) | keep f4acc7d (the agents stream-event tests, 322 lines) on `personal` with 283432f's class, so it stays off `macos` | Three tests in f4acc7d fail on the fix branch without 283432f (`tool_images` does not exist). 283432f applies cleanly. Without f4acc7d, `app/agents.py` is 81.9% branches on `tests/test_agents.py` alone, under the 85 bar the `tests` job enforces (D-09), and 89f4bfe edits the same test file | table keeps f4acc7d fix and 283432f feature. The plan's default is B, but B fails the agents.py bar; I recommend A | |
