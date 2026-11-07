@@ -181,17 +181,13 @@ A path-split commit is a `fix` row whose diff also touches a personal-only path.
 | d015d26 | `.github/cadence/coverage-policy.json` (D-02, D-09) | `.planning/PROJECT.md`, `.planning/REQUIREMENTS.md`, `.planning/ROADMAP.md`, `.planning/STATE.md`, `.planning/config.json` |
 | 45d4f02 | `.github/cadence/coverage-policy.json` | `.planning/config.json` |
 | 4488777 | `.github/workflows/macos.yml`, `.github/workflows/tests.yml` (the `macos-15` runner; D-02, D-09) | `.planning/ROADMAP.md`, `.planning/phases/1/CONTEXT.md`, `.planning/phases/1/UAT.md` |
-| bb02446 | `tests/test_page_held.py`, `tests/test_page_idle.py` | `tests/test_page_sparks.py` (1 line; the file exists only for 87344d3, class visual). Built by `cherry-pick -n`, then the modify/delete conflict on that file is removed from index and tree, then `commit -C`. |
+| bb02446 | `tests/test_page_held.py`, `tests/test_page_idle.py` | `tests/test_page_sparks.py` (1 line; the file exists only for 87344d3, class visual). |
 
-Construction (Plan 2 builds each the same way): `git cherry-pick -n <sha>`, then every personal-only path is put back to its pre-pick state (restored from `HEAD` where it exists there, removed from the index and tree where the commit created it or where the pick leaves a modify/delete conflict on a path the fix branch never had), then `git commit -C <sha>` keeps the original author and message. 45d4f02 and 4488777 modify `.planning/` files that d015d26 left behind, so on the fix branch their `.planning/` paths come out of `cherry-pick -n` as modify/delete conflicts; the restore step removes them. That is the construction, not a hand resolution.
-
-`git cherry` marks every path-split commit `+` (absent), because the fix branch carries a different patch than `personal` has. AC3's exception therefore covers each commit this section names, not only c378787.
-
-A non-path-split `fix` pick can also print `+` by context drift: patch-id hashes context lines, and an excluded neighbour changes them. Plan 2 matches such a commit by author, author date and subject instead.
+Each row above is built by the `path-split` kind of the Trial section's Row construction ("Construction"), and whether a row is on a branch is decided by its Presence test ("Presence"). Neither is restated here; `git cherry` `+` is not evidence of absence for a `fix` row.
 
 ## Trial
 
-Status: Task 3 trial done and recorded; Task 3's Verify is met only by a construction the plan did not name (see "Construction findings"), so Plan 1 stopped at a structural checkpoint here. The trial worktrees and branches were removed again (nothing left behind); the recipe below rebuilds the tree in seconds.
+Status: the first pass (below) stands as evidence. The architect's design (`docs/superpowers/specs/branch-split-construction-design.md`, approved) settled the construction findings: "Construction", "Presence" and "Merge-back prep" below are the recipes Plan 1's trials and Plan 2's build run, and the Row-construction pass rebuilds `split-trial` by them.
 
 ### First pass: table order, plain picks, as the plan wrote it
 
@@ -214,7 +210,7 @@ Eleven real skips, with the conflicting paths and the cause:
 |---|---|---|
 | bb02446 | `tests/test_page_sparks.py` | the file is created by the Local-only 87344d3 (visual); path-split, see above |
 | d24b2b6 | `tests/test_page_idle.py` | follows bb02446 |
-| 044e7f9 | `app/server.py` (the `is_noise` comment and `stop_said` lines, 2 lines) | not an excluded commit. Merge 8cacc1d ("Merge commit '044e7f9' into mine/context-cloud") carries a resolution against macos's own 6091587 text ("a sentence looping ... a stop said over him"); a cherry-pick of 044e7f9 alone cannot reproduce it |
+| 044e7f9 | `app/server.py` (the `is_noise` comment and `stop_said` lines, 2 lines) | fix row 6120ace, not an excluded commit. 6120ace rewrites the `is_noise` comment ("one phrase looping" to "a sentence looping", and "Stop, stop" to "a stop said over him") beside the line 044e7f9 changes. 6120ace is on neither c895ced nor 044e7f9's history (044e7f9's parent 6948ea4 has the old text), so on a branch holding 6120ace the pick's context clashes. The only resolution is merge 8cacc1d (parents 2f1d75d, 044e7f9; `2f1d75d..044e7f9` is 044e7f9 alone). Correction: the first-pass record named macos's own 6091587; c895ced has no "a sentence looping" text, and `git log -S` finds it first in 6120ace |
 | ae3ff8b, bfef46c, 7688517, c7a7ef7, 87d1faa, 74e983f, 89f4bfe | `app/server.py`, `app/gate.py`, `tests/test_gate.py`, `tests/test_echo.py`, `tests/test_wake_loop.py` | follow 044e7f9: ae3ff8b's context needs `stop_said`, which 044e7f9 introduces; each later one fails on the one before |
 | c378787 | `app/gate.py`, `app/server.py`, `tests/test_gate.py`, `tests/test_voiceprint.py` | follows the same chain (path-split pick, reset after the conflict) |
 
@@ -235,10 +231,69 @@ Evidence from that tree (tip 91e6f4e, tree 93b23c2):
 
 ### Construction findings (technical, for the architect; not owner rows)
 
-1. 044e7f9 cannot be a plain pick: its effect on macos exists only in merge 8cacc1d's resolution. Taking it as `cherry-pick -m 1 8cacc1d` clears its own skip and eight downstream ones (d24b2b6 is cleared by the bb02446 path-split). Cost: the pick's message is the merge's ("Merge commit '044e7f9' into mine/context-cloud"), so Plan 2's author-date-and-subject match for 044e7f9 finds no commit by subject; the match must name 8cacc1d for that row. Merge 8cacc1d is class `merge`, "follows its parents"; the other merge with a resolution (aa91f20, 12 combined-diff lines) needed no vehicle, since 047b54f picked cleanly and the tree matches.
+1. 044e7f9 cannot be a plain pick: it conflicts with fix row 6120ace, and its effect on a branch holding 6120ace exists only in merge 8cacc1d's resolution (first-pass wording named macos's 6091587; that was wrong, see the 044e7f9 row above). Taking it as `cherry-pick -m 1 8cacc1d` clears its own skip and eight downstream ones (d24b2b6 is cleared by the bb02446 path-split). Cost: the pick's message is the merge's ("Merge commit '044e7f9' into mine/context-cloud"), so the vehicle kind finishes with `git commit -C 044e7f9`, which keeps 044e7f9's author, author date and subject and the Presence test matches it with no special case. Merge 8cacc1d is class `merge`, "follows its parents"; the other merge with a resolution (aa91f20, 12 combined-diff lines) needed no vehicle, since 047b54f picked cleanly and the tree matches.
 2. The six commits already on macos are not picked. They stay class `fix` in the table; Plan 2's AC3 reads them as present by author date and subject.
 3. Probe of the merge-back (a throwaway worktree detached at the snapshot, `git merge --no-commit --no-ff` of the second-pass tip, aborted, worktree clean after): one conflict, `.gitignore`. Cause: 8935491 (dev tooling) adds its block next to the two coverage lines that 5a4f07d adds on both sides. `app/server.py` and `app/static/index.html` auto-merged. With the personal-only ignore block moved above `__pycache__/` on `personal` (one commit on `personal` before the merge) the same merge completes with no conflict and an empty `git diff --cached --name-only HEAD`. This was a probe on the snapshot; it is not Task 5's run and no commit was made on `personal`.
-4. Not run yet: Task 4 (suite and per-module gate) and Task 5/7 as written. The suite is about 270 s on Slate and was not started, since the tree to test depends on the architect's ruling on findings 1 and 3.
+4. Settled by the architect's design: findings 1 to 3 are the Row construction, Presence and Merge-back prep recipes below. Task 4 (suite and per-module gate) and Task 5 run on the Row-construction tree.
+
+### Construction
+
+How a `fix` row, in table order, becomes zero or one commit on the branch (design: `docs/superpowers/specs/branch-split-construction-design.md`). Four kinds; nothing else is allowed, and no `-m` on any merge but 8cacc1d.
+
+```
+# kind: present   (ad1da73, 0ba0fec, 16b5829, f3b2947, 3935571, 7ef0a99)
+#   no command; c895ced already holds 975c918, 16d33c7, fabc753, 8c064eb, c63fdea, 5033bce
+# kind: plain     (every fix row not named below)
+git cherry-pick <sha>
+# kind: path-split (every row of the Path-split section: c378787, d015d26, 45d4f02, 4488777, bb02446)
+git cherry-pick -n <sha>
+#   then each left-behind path of that row's Path-split entry goes back to its pre-pick state:
+#   restored from HEAD where HEAD has it; removed from index and tree where it does not
+git commit -C <sha>
+# kind: vehicle   (044e7f9 only)
+git cherry-pick -n -m 1 8cacc1d
+git commit -C 044e7f9
+```
+
+A conflict, an empty pick or a non-empty `git status --porcelain` after `commit`, in any kind, is a stop, never a resolution. The number of commits made is the number of `fix` rows less the `present` rows: 87 at snapshot 74af430 (93 - 6). Where a path-split pick leaves a modify/delete conflict on a left-behind path (45d4f02 and 4488777 on `.planning/` files d015d26 left behind; bb02446 on `tests/test_page_sparks.py`), the restore step removes the path; that is the construction, not a hand resolution. 8cacc1d stays class `merge`; it is the vehicle for 044e7f9's row and is never a row of its own on the branch.
+
+### Presence
+
+Decides whether a `fix` row is on a branch. `git cherry` `-` is not the test: it prints `+` for the six `present` rows, for 044e7f9 (context differs) and for every path-split row.
+
+```
+key(<sha>)               = git log -1 --format='%an%x00%aI%x00%s' <sha>
+present(<sha>, <branch>) = exactly one line of `git log --format='%an%x00%aI%x00%s' <branch>` equals key(<sha>)
+absent(<sha>, <branch>)  = no line equals key(<sha>), and `git cherry <branch> <snapshot>` prints `+ <sha>`
+```
+
+Every `fix` row, of every kind, is `present` on the built branch; every `visual` and `feature` row is `absent`. `commit -C` keeps the key of path-split and vehicle rows, and the six `present` rows match their c895ced copies.
+
+### Merge-back prep
+
+The Ignore reorder. Cause of the one merge-back conflict: 8935491 (dev tooling) inserts personal-only ignore lines after `installer/art/`, the same point where 5a4f07d inserts `coverage.json` and `.coverage`. One commit on `personal` (made by Plan 2, never by Plan 1) after `macos` carries the fix branch and before any merge of `macos` into `personal`. It touches `.gitignore` alone and changes line order only. The file becomes:
+
+```
+<the 8935491 block: "# macOS maintainer's todo list" through ".planning/reads.1.jsonl.evict.*",
+ then a blank line, then "# Claude Code agent worktrees - each is its own git checkout", ".claude/worktrees/">
+<blank line>
+<lines from "__pycache__/" to end, byte-identical to the fix branch's .gitignore>
+```
+
+Message: `chore: list personal-only ignores above the shared ones, so macos merges in cleanly`. "No changed file" for the merge-back is `git diff --name-only <the reorder commit> personal` after the merge, not measured from the commit before it. Plan 1's trial merges apply the same reorder as a commit on their detached scratch worktree only.
+
+### Row-construction pass
+
+Fresh worktree on `split-trial` at c895ced, every `fix` row in table order by the Construction kinds above (script outside the repo; same recipe a human runs). Result:
+
+- 93 `fix` rows = 87 commits made + 6 `present`, zero skipped, zero empty picks, `git status --porcelain` empty after every commit
+- kinds: 81 plain, 5 path-split (c378787, d015d26, 45d4f02, 4488777, bb02446), 1 vehicle (044e7f9 via 8cacc1d), 6 present
+- tip fead0c9, tree 93b23c2 (the second pass's tree; its tip 91e6f4e differs only because the vehicle row now ends in `commit -C 044e7f9`)
+- Presence test: all 93 `fix` rows `present` exactly once on `split-trial`; all 11 `visual` and `feature` rows `absent` (no key match, and `git cherry split-trial 74af430` prints `+` for each)
+- `git diff --name-only c895ced..split-trial` lists no path under `CLAUDE.md`, `.claude/`, `queues/`, `docs/superpowers/`, `docs/design/` or `.planning/`
+- `app/voiceprint.py` absent; `app/gate.py`, `app/hearing.py`, `app/drops.py`, `app/notifier.py` present
+- `python3 -m py_compile app/*.py` exit 0
+- difference from the snapshot over non-personal-only paths: `.gitignore`, `app/agents.py`, `app/server.py`, `app/static/index.html`, `tests/test_page_props.py`, `tests/test_page_sparks.py` (the visual, feature and dev-tooling rows left out)
 
 ## Borderline
 
