@@ -24,9 +24,9 @@ import launch_win  # noqa: E402
 
 # a stand-in for app/server.py: the same port rule, runtime.json and /api/state and /api/id answers, nothing else. Like the real
 # one with the mic waiting on Core Audio, the full state (with the window's token) doesn't answer for a long while.
-FAKE_SERVER = r'''
+FAKE_SERVER = (HERE / "loopback_http.py").read_text() + r'''
 import json, os, secrets, signal, sys, time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer as HTTPServer
+from http.server import BaseHTTPRequestHandler
 PORT = int(os.environ["FAKE_PORT"])
 if "--print-port" in sys.argv:
     print(PORT); sys.exit()
@@ -46,7 +46,7 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(body)
     def log_message(self, *a): pass
 
-srv = HTTPServer(("127.0.0.1", PORT), H)            # (port taken → dies here, like the real one)
+srv = LoopbackThreadingHTTPServer(("127.0.0.1", PORT), H)     # (port taken → dies here, like the real one)
 os.makedirs(data, exist_ok=True)
 open(os.path.join(data, "server.pid"), "w").write(str(os.getpid()))
 json.dump({"port": PORT, "token": tok, "tool_token": "t", **old}, open(os.path.join(data, "runtime.json"), "w"))
