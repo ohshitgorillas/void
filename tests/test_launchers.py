@@ -13,14 +13,16 @@ import tempfile
 import threading
 import time
 import unittest
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(ROOT / "app"))
+sys.path.insert(0, str(HERE))
 import launch_win  # noqa: E402
+from loopback_http import LoopbackThreadingHTTPServer  # noqa: E402
 
 # a stand-in for app/server.py: the same port rule, runtime.json and /api/state and /api/id answers, nothing else. Like the real
 # one with the mic waiting on Core Audio, the full state (with the window's token) doesn't answer for a long while.
@@ -217,7 +219,7 @@ class WindowsLauncherUp(unittest.TestCase):
             def log_message(self, *a):
                 pass
 
-        srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        srv = LoopbackThreadingHTTPServer(("127.0.0.1", 0), H)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         self.addCleanup(srv.server_close)
         self.addCleanup(srv.shutdown)

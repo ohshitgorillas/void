@@ -17,7 +17,9 @@ from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "app"))
+sys.path.insert(0, str(HERE))
 import agents  # noqa: E402
+from loopback_http import LoopbackHTTPServer  # noqa: E402
 
 FIX = HERE / "fixtures"
 
@@ -956,7 +958,7 @@ class ApproveHook(unittest.TestCase):
 
             def log_message(self, *a):
                 pass
-        srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+        srv = LoopbackHTTPServer(("127.0.0.1", 0), H)
         threading.Thread(target=srv.handle_request, daemon=True).start()
         hook = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"},
                 "agent_id": "t1", "agent_type": "Explore"}

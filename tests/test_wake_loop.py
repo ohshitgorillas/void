@@ -31,10 +31,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import suite_data  # noqa: E402  (Void's data folder: the suite's own, set before server.py settles it)
 from fakes import hiss, ears  # noqa: E402
+from loopback_http import LoopbackThreadingHTTPServer  # noqa: E402
 
 try:
     import server
-    from http.server import ThreadingHTTPServer
 except Exception as e:  # noqa: BLE001
     server, IMPORT_ERR = None, e
 else:
@@ -91,7 +91,7 @@ class WakeLoop(unittest.TestCase):
                   mock.patch.object(server.Listen, "run", listen_run)):
             p.start()
             self.addCleanup(p.stop)
-        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        self.srv = LoopbackThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         self.srv.daemon_threads = True
         threading.Thread(target=self.srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
         self.addCleanup(self.srv.server_close)
