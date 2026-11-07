@@ -67,14 +67,17 @@ rulings first, then build, verify and merge).
   and none duplicated; a "Borderline" section lists each call for the owner's ruling
 - [ ] AC2: `git diff --name-only c895ced..<fix branch>` lists no path under `CLAUDE.md`, `.claude/`, `queues/`,
   `docs/superpowers/`, `docs/design/` or `.planning/`
-- [ ] AC3: `git cherry <fix branch> personal` marks every commit classed fix as present (`-`) and every commit
-  classed visual or feature as absent (`+`), except the path-split `c378787`, which the classification file names
+- [ ] AC3: every commit classed fix has exactly one author, author-date and subject match in `git log <fix branch>`,
+  and every commit classed visual or feature has none and is marked `+` by `git cherry <fix branch> personal`
+  [amended by docs/superpowers/specs/branch-split-construction-design.md: `git cherry` `-` fails for path-split,
+  already-on-macos and context-drifted fix rows]
 - [ ] AC4: On the fix branch, `python3 -m py_compile app/*.py` exits 0, and the two accepted commands from
   `.github/cadence/coverage-policy.json` exit 0 with the checker reporting all 7 `include` modules meeting 85 for
   lines and branches
 - [ ] AC5: `git merge-base --is-ancestor <fix branch> macos` exits 0, and `origin/macos` still points at 29e22ae
 - [ ] AC6: `git merge macos` on `personal` completes with no conflict, and `git diff <personal before merge> personal`
-  shows no changed file
+  shows no changed file [`<personal before merge>` is Plan 2's `.gitignore` reorder commit `R`, per
+  docs/superpowers/specs/branch-split-construction-design.md]
 
 ## Flagged assumptions
 

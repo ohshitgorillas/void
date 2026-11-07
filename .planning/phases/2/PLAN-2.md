@@ -23,11 +23,11 @@ The ruled fix set sits on a branch off local `macos` and passes the repo gate. L
 
 ## Must be true when done
 
-- Branch `macos-fixes`, based on `c895ced`, carries every `fix` row of `.planning/phases/2/CLASSIFICATION.md` and no change under `CLAUDE.md`, `.claude/`, `queues/`, `docs/superpowers/`, `docs/design/` or `.planning/`
-- `git cherry macos-fixes <snapshot>` marks every non-path-split `fix` commit `-` and every `visual` and `feature` commit `+`
+- Branch `macos-fixes`, based on `c895ced` and built by the Trial section's Row construction, holds every `fix` row of `.planning/phases/2/CLASSIFICATION.md` by the Presence test (the six `present` rows through `c895ced`), and no change under `CLAUDE.md`, `.claude/`, `queues/`, `docs/superpowers/`, `docs/design/` or `.planning/`
+- For every `fix` row, exactly one line of `git log --format='%an%x00%aI%x00%s' macos-fixes` equals `git log -1 --format='%an%x00%aI%x00%s' <sha>`; for every `visual` and `feature` row, no line equals it and `git cherry macos-fixes <snapshot>` prints `+`
 - On `macos-fixes`, `python3 -m py_compile app/*.py` and both accepted coverage commands exit 0, with all 7 `include` modules at or above 85 for lines and branches
 - Local `macos` contains `macos-fixes`, and `origin/macos` is still `29e22ae`
-- `personal` has merged `macos` with no conflict and no changed file, and `git rev-list personal..macos` is empty, so the next fix on `macos` reaches `personal` by a plain merge
+- `personal` carries the Merge-back prep reorder commit `R` (`.gitignore` only, line order only), then has merged `macos` with no conflict, `git diff --name-only R personal` prints nothing, and `git rev-list personal..macos` is empty, so the next fix on `macos` reaches `personal` by a plain merge
 
 ## Context
 
@@ -40,8 +40,8 @@ The ruled fix set sits on a branch off local `macos` and passes the repo gate. L
 ### Task 1: Build `macos-fixes` from the ruled classification
 
 - **Files:** app/, bin/, tests/, .github/, packaging/, install.sh, install.ps1, .gitignore
-- **Action:** First confirm the classification still holds. Every commit in `<snapshot>..personal` (the snapshot named in `CLASSIFICATION.md`) touches only `.planning/`. Every Borderline row has a ruling, and the Ruled trial section records zero skips. If any of these fails, stop and report it without building. Then create a worktree at `/Users/atom/dev/void-fixes` on a new branch `macos-fixes` at local `macos` (`c895ced`). The name is my choice: it says what the branch holds and where it goes, and the sibling path follows `~/dev/void-replies`. Cherry-pick every `fix` row in table order with plain `git cherry-pick <sha>`. Leave out `-x`, because the classification is the SHA map and the messages ship to `macos` unchanged. Build each Path-split row exactly as the Path-split section records. A conflict or an empty pick here contradicts the Ruled trial. Stop at it, `git cherry-pick --abort`, and report the commit and the shortest decisive line. Never resolve it by hand.
-- **Verify:** `git diff --name-only c895ced..macos-fixes` lists no path under `CLAUDE.md`, `.claude/`, `queues/`, `docs/superpowers/`, `docs/design/` or `.planning/` (AC2). `git rev-list --count c895ced..macos-fixes` equals the number of `fix` rows. `git rev-parse macos-fixes^{tree}` equals the ruled trial's tree SHA recorded in the Ruled trial section. `git cherry macos-fixes <snapshot>` shows `-` for every `fix` SHA not named in Path-split, and `+` for every `visual` and `feature` SHA (AC3, path-split exception per Plan 1's Path-split section). `git cherry` matches by patch-id, which hashes context lines, so a `fix` pick applied beside an excluded commit's hunk can print `+` while it is on the branch. Accept such a `+` only when that SHA's `git log -1 --format='%an%x00%aI%x00%s' <sha>` matches exactly one line of `git log --format='%an%x00%aI%x00%s' c895ced..macos-fixes`. List each one accepted this way in the report. A `+` with no such match is a missing commit: stop and report it, and never reclassify it. `git cat-file -e macos-fixes:app/voiceprint.py` fails. Testing scope: no test. The ref and path checks are the evidence, and the gate runs in Task 2.
+- **Action:** First confirm the classification still holds. Every commit in `<snapshot>..personal` (the snapshot named in `CLASSIFICATION.md`) touches only `.planning/`. Every Borderline row has a ruling, and the Ruled trial section records zero skips. If any of these fails, stop and report it without building. Then create a worktree at `/Users/atom/dev/void-fixes` on a new branch `macos-fixes` at local `macos` (`c895ced`). The name is my choice: it says what the branch holds and where it goes, and the sibling path follows `~/dev/void-replies`. Build every `fix` row in table order by the Trial section's Row construction (`present`, `plain`, `path-split` and `vehicle` kinds). Leave out `-x`, because the classification is the SHA map and the messages ship to `macos` unchanged. A conflict or an empty pick here contradicts the Ruled trial. Stop at it, `git cherry-pick --abort`, and report the commit and the shortest decisive line. Never resolve it by hand.
+- **Verify:** `git diff --name-only c895ced..macos-fixes` lists no path under `CLAUDE.md`, `.claude/`, `queues/`, `docs/superpowers/`, `docs/design/` or `.planning/` (AC2). `git rev-list --count c895ced..macos-fixes` equals the number of `fix` rows less the six `present` rows (87 at snapshot `74af430`). `git rev-parse macos-fixes^{tree}` equals the ruled trial's tree SHA recorded in the Ruled trial section. For every `fix` row, exactly one line of `git log --format='%an%x00%aI%x00%s' macos-fixes` equals `git log -1 --format='%an%x00%aI%x00%s' <sha>`; for every `visual` and `feature` row, no line equals it and `git cherry macos-fixes <snapshot>` prints `+` (AC3 by the Presence test). A `fix` row with no match or two matches is a missing or doubled commit: stop and report it, and never reclassify it. `git cat-file -e macos-fixes:app/voiceprint.py` fails. Testing scope: no test. The ref and path checks are the evidence, and the gate runs in Task 2.
 
 ### Task 2: Prove the repo gate on `macos-fixes`
 
@@ -55,17 +55,23 @@ The ruled fix set sits on a branch off local `macos` and passes the repo gate. L
 - **Action:** In `/Users/atom/dev/void-fixes`, switch to `macos` and run `git merge --ff-only macos-fixes`. I chose a fast-forward: `macos-fixes` is built directly on `macos`, so it is `macos`'s next state, and a merge commit would add nothing. Never push `macos` or `macos-fixes`, and never fetch (D-03, D-07). Then switch the worktree back to `macos-fixes`, so `macos` is not held checked out.
 - **Verify:** `git merge-base --is-ancestor macos-fixes macos` exits 0, and `git rev-parse macos` equals `git rev-parse macos-fixes`. `git rev-parse origin/macos` prints `29e22aead6f2667079097d2c238fdd3c284d0936` (AC5). Testing scope: no test. The ref checks are the evidence.
 
+### Task 3a: Reorder `.gitignore` on `personal`
+
+- **Files:** .gitignore
+- **Action:** In `/Users/atom/dev/void` on `personal`, make the Merge-back prep reorder commit `R` exactly as the Trial section's "Merge-back prep" recipe states, with the message `chore: list personal-only ignores above the shared ones, so macos merges in cleanly`. It changes line order only. Never push `personal`.
+- **Verify:** `git show --stat --format= R` lists `.gitignore` alone. `git show R:.gitignore | sort` equals `git show R^:.gitignore | sort`. The lines of `git show R:.gitignore` from `__pycache__/` to the end equal `git show macos-fixes:.gitignore` byte for byte. `git rev-parse origin/personal` is unchanged. Testing scope: no test. The diff checks are the evidence.
+
 ### Task 4: Trial-merge `macos` into a scratch copy of `personal`
 
 - **Files:** none (a scratch worktree, merged with `--no-commit` and aborted)
 - **Action:** In a scratch worktree under the executor's scratchpad, detached at the current `personal` tip, run `git merge --no-commit --no-ff macos`. Record whether it conflicts and what `git diff --cached --name-only HEAD` lists. Then `git merge --abort` and remove the worktree. This runs before the real merge (CONTEXT, flagged assumptions). A conflict or a changed file contradicts Plan 1's Ruled trial. Stop, report the paths and the shortest decisive line, and do not run Task 5.
-- **Verify:** The trial merge reports no conflict, `git diff --cached --name-only HEAD` prints nothing, and `git worktree list` no longer shows the scratch path. Testing scope: no test. The trial merge is the evidence.
+- **Verify:** With `personal` at `R`, the trial merge reports no conflict, `git diff --cached --name-only HEAD` prints nothing, and `git worktree list` no longer shows the scratch path. Testing scope: no test. The trial merge is the evidence.
 
 ### Task 5: Merge `macos` into `personal`
 
 - **Files:** none (a merge commit on `personal` that AC6 proves changes no file)
 - **Action:** In `/Users/atom/dev/void` on `personal`, first check that `git status --porcelain --untracked-files=no` is empty, and stop if it is not. Record `B`, the `git rev-parse personal` before the merge. Run `git merge macos` with git's default message ("Merge branch 'macos' into personal"). Never push `personal` (D-07). This merge is the flow D-04 and SPLIT-03 name for every later fix. A fix landed on local `macos` reaches `personal` by the same command, and nothing is cherry-picked again.
-- **Verify:** `git merge macos` exits 0 with no conflict, and `git diff --name-only $B personal` prints nothing (AC6). `git rev-list --count personal..macos` prints 0, and `git merge-base personal macos` equals `git rev-parse macos`, so the next commit on `macos` merges in alone (SPLIT-03). `git rev-parse origin/personal` is unchanged from before the merge. Testing scope: no test. The diff and ancestry checks are the evidence.
+- **Verify:** `git merge macos` exits 0 with no conflict, `B` equals `R`, and `git diff --name-only $B personal` prints nothing (AC6). `git rev-list --count personal..macos` prints 0, and `git merge-base personal macos` equals `git rev-parse macos`, so the next commit on `macos` merges in alone (SPLIT-03). `git rev-parse origin/personal` is unchanged from before the merge. Testing scope: no test. The diff and ancestry checks are the evidence.
 
 ### Task 6: Remove the build worktree
 
@@ -76,6 +82,6 @@ The ruled fix set sits on a branch off local `macos` and passes the repo gate. L
 ## Notes
 
 - This plan runs after Plan 1: it reads the ruled classification and the Ruled trial tip. The two plans declare no file in common, so their leases are disjoint, but they are sequential, not parallel. That ordering follows from the CONTEXT plan shape (classification with the owner's rulings first, then build, verify and merge).
-- The leases are directory leases on the paths the cherry-picks write onto `macos-fixes` and `macos`. The fast-forward and the merge into `personal` write no file of their own, and AC6 proves the merge changes none. Tasks 2, 4 and 6 commit nothing. Task 5's merge commit writes no file. Their `Files` say so.
+- The leases are directory leases on the paths the cherry-picks write onto `macos-fixes` and `macos`. The fast-forward and the merge into `personal` write no file of their own, and AC6 proves the merge changes none. Tasks 2, 4 and 6 commit nothing. Task 3a commits `.gitignore` on `personal` (line order only). Task 5's merge commit writes no file. Their `Files` say so.
 - Pushing `macos` happens at the version bump (Phase 7, D-03). Pushing `personal` or `macos-fixes` needs the owner's word in that turn (D-07). Neither is in this plan. So the `tests` job does not run on these commits here, and AC4 is proved by the local run in Task 2.
 - Recalled: D-03 and D-04 (`phases/2/CONTEXT.md`, phase 2). The `tests` workflow shape (`phases/1/UAT.md`, phase 1) is why the local gate run stands in for CI until a push.
