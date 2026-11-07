@@ -58,6 +58,34 @@ else:
 '''
 
 
+KEEP_LOGS = "VOID_TEST_LOGS"            # a directory the CI workflow names; a failed start copies its logs there
+TAIL = 3000
+
+
+class Logs:
+    """The failure message of a start that didn't happen: the tail of each log that bears on it. Built only when the
+    assertion fails (unittest formats `msg` then), and then, with KEEP_LOGS set, copies each log whole into that
+    directory under the test's id before cleanup deletes self.tmp."""
+
+    def __init__(self, test, head, *paths):
+        self.test, self.head, self.paths = test, head, paths
+
+    def __str__(self):
+        keep = os.environ.get(KEEP_LOGS)
+        out = [str(self.head)] if self.head else []
+        for p in map(Path, self.paths):
+            try:
+                raw = p.read_bytes()
+            except OSError:
+                out.append(f"--- {p.name}: not written")
+                continue
+            if keep:
+                os.makedirs(keep, exist_ok=True)
+                (Path(keep) / f"{self.test.id()}.{'_'.join(p.relative_to(self.test.tmp).parts)}").write_bytes(raw)
+            out.append(f"--- {p.name} (last {TAIL} bytes):\n" + raw[-TAIL:].decode(errors="replace"))
+        return "\n".join(out)
+
+
 def free_port():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -128,14 +156,21 @@ class Base(unittest.TestCase):
         """Another Void (its own data folder) serving on our port: its pids, which must survive."""
         home = self.tmp / "other"
         self.fake_app(home / "app")
-        p = subprocess.Popen([sys.executable, str(home / "app/server.py")], env=self.env(home),
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        log = home / "fake-server.log"
+        with open(log, "wb") as out:
+            p = subprocess.Popen([sys.executable, str(home / "app/server.py")], env=self.env(home),
+                                 stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
         self.pids.append(p.pid)
-        self.assertTrue(wait_for(lambda: (home / "data/void/child.pid").exists()), "the foreign server didn't start")
+        self.assertTrue(wait_for(lambda: (home / "data/void/child.pid").exists()),
+                        Logs(self, "the foreign server didn't start", log))
         return self.pidfiles(home)
 
 
 class LauncherQuit(Base):
+    @property
+    def server_log(self):                                  # what the launcher made of its server's output
+        return self.tmp / "home/data/void/server.log"
+
     def bundle(self):
         c = self.tmp / "Void.app" / "Contents"
         (c / "MacOS").mkdir(parents=True)
@@ -152,18 +187,18 @@ class LauncherQuit(Base):
     def test_quit_stops_the_server_it_started_and_its_children(self):
         launcher = self.bundle()
         r = self.run_launcher(launcher, "show")
-        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.returncode, 0, Logs(self, r.stderr, self.server_log))
         server, child = self.pidfiles(self.tmp / "home")
         self.assertTrue(alive(server) and alive(child))
         r = self.run_launcher(launcher, "quit")
-        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.returncode, 0, Logs(self, r.stderr, self.server_log))
         self.assertTrue(wait_for(lambda: not alive(server)), "the server it started is still running")
         self.assertTrue(wait_for(lambda: not alive(child)), "the server's child is still running")
 
     def test_quit_leaves_a_server_it_did_not_start(self):
         launcher = self.bundle()
         r = self.run_launcher(launcher, "show")
-        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.returncode, 0, Logs(self, r.stderr, self.server_log))
         mine = self.pidfiles(self.tmp / "home")
         for pid in mine:                                   # ours is gone (crashed); another Void now holds the port
             os.killpg(pid, signal.SIGKILL) if pid == mine[0] else None
@@ -200,11 +235,14 @@ class WindowKeepsTheRecord(Base):
     def start(self, rid, home=None):
         home = home or self.home
         self.fake_app(home / "app")
-        p = subprocess.Popen([sys.executable, str(home / "app/server.py")],
-                             env=self.env(home, VOID_RUN_ID=rid), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                             start_new_session=True)
+        log = home / "fake-server.log"
+        with open(log, "wb") as out:
+            p = subprocess.Popen([sys.executable, str(home / "app/server.py")],
+                                 env=self.env(home, VOID_RUN_ID=rid), stdout=out, stderr=subprocess.STDOUT,
+                                 start_new_session=True)
         self.pids.append(p.pid)
-        self.assertTrue(wait_for(lambda: (home / "data/void/child.pid").exists()))
+        self.assertTrue(wait_for(lambda: (home / "data/void/child.pid").exists()),
+                        Logs(self, "the fake server didn't start", log))
         return self.pidfiles(home)
 
     def test_stop_ends_the_recorded_server_and_its_children(self):
@@ -243,7 +281,8 @@ class WindowKeepsTheRecord(Base):
         with mock.patch.object(window_win, "APP", self.home / "app"), \
                 mock.patch.dict(os.environ, self.env(self.home)):
             window_win.VoidWindow._start_server(me)
-        self.assertTrue(wait_for(lambda: (self.home / "data/void/child.pid").exists()))
+        self.assertTrue(wait_for(lambda: (self.home / "data/void/child.pid").exists()),
+                        Logs(self, "the window's restart didn't start the server", self.home / "data/void/server.log"))
         server, child = self.pidfiles(self.home)
         window_win.Started.stop()
         self.assertTrue(wait_for(lambda: not alive(server) and not alive(child)))

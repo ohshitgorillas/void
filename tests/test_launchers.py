@@ -58,6 +58,34 @@ open(os.path.join(os.environ["XDG_DATA_HOME"], "window.args"), "w").write(" ".jo
 '''
 
 
+KEEP_LOGS = "VOID_TEST_LOGS"            # a directory the CI workflow names; a failed start copies its logs there
+TAIL = 3000
+
+
+class Logs:
+    """The failure message of a start that didn't happen: the tail of each log that bears on it. Built only when the
+    assertion fails (unittest formats `msg` then), and then, with KEEP_LOGS set, copies each log whole into that
+    directory under the test's id before cleanup deletes self.tmp."""
+
+    def __init__(self, test, head, *paths):
+        self.test, self.head, self.paths = test, head, paths
+
+    def __str__(self):
+        keep = os.environ.get(KEEP_LOGS)
+        out = [str(self.head)] if self.head else []
+        for p in map(Path, self.paths):
+            try:
+                raw = p.read_bytes()
+            except OSError:
+                out.append(f"--- {p.name}: not written")
+                continue
+            if keep:
+                os.makedirs(keep, exist_ok=True)
+                (Path(keep) / f"{self.test.id()}.{'_'.join(p.relative_to(self.test.tmp).parts)}").write_bytes(raw)
+            out.append(f"--- {p.name} (last {TAIL} bytes):\n" + raw[-TAIL:].decode(errors="replace"))
+        return "\n".join(out)
+
+
 def free_port():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -113,15 +141,17 @@ class Launchers(unittest.TestCase):
         """Another Void (its own data folder) already serving on our port."""
         home = self.tmp / "other"
         self.fake_app(home / "app")
-        p = subprocess.Popen([sys.executable, str(home / "app/server.py")], env=self.env(home),
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        log = home / "fake-server.log"
+        with open(log, "wb") as out:
+            p = subprocess.Popen([sys.executable, str(home / "app/server.py")], env=self.env(home),
+                                 stdout=out, stderr=subprocess.STDOUT)
         self.pids.append(p.pid)
         rt = home / "data/void/runtime.json"
         for _ in range(50):
             if rt.exists():
                 return
             time.sleep(0.1)
-        self.fail("the foreign fake server didn't start")
+        self.fail(str(Logs(self, "the foreign fake server didn't start", log)))
 
     def launch(self, launcher):
         r = subprocess.run([str(launcher), "show"], env=self.env(self.tmp / "home"), capture_output=True, text=True,
@@ -138,8 +168,10 @@ class Launchers(unittest.TestCase):
 
     def check_own_server(self, launcher):
         r, args = self.launch(launcher)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertTrue((self.tmp / "home/data/void/server.pid").exists(), "it didn't start its own server")
+        mine = self.tmp / "home/data/void/server.log"
+        self.assertEqual(r.returncode, 0, Logs(self, r.stderr, mine))
+        self.assertTrue((self.tmp / "home/data/void/server.pid").exists(),
+                        Logs(self, "it didn't start its own server", mine))
         self.assertIn(f"http://127.0.0.1:{self.port}/?native=1", args.read_text())
 
     def check_never_attaches(self, launcher):
