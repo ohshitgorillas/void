@@ -171,6 +171,23 @@ Path columns show directories at the depth the decision needs (`tests/` and `.pl
 | a44878021fc5f68ccee1b8c7e8d9ee401abed9dc | docs: capture context for phase 2 | dev tooling | .planning/ | only .planning/ (and docs/superpowers/) paths |
 | 74af430f7fc9e210d229beaf0e6a43d9389e0f63 | docs: plan phase 2 - Branch split | dev tooling | .planning/ | only .planning/ (and docs/superpowers/) paths |
 
+## Path-split
+
+A path-split commit is a `fix` row whose diff also touches a personal-only path. Task 2 looped over every `fix` row and found exactly four; no other `fix` row touches `CLAUDE.md`, `.claude/`, `queues/`, `docs/superpowers/`, `docs/design/` or `.planning/`.
+
+| Commit | Carried onto the fix branch | Left behind on `personal` |
+|---|---|---|
+| c378787 | `app/drops.py`, `app/gate.py`, `app/server.py`, `app/voiceprint.py` (deleted), `bin/void`, and the `tests/` paths (`scenes.py`, `suite_data.py`, `test_gate.py`, `test_hearing.py`, `test_listen_enrol.py` renamed to `test_listen_verdict.py`, `test_log_cases.py`, `test_scenes.py`, `test_suite_data_dir.py`, `test_voiceprint.py` deleted, `test_wake_loop.py`) | `docs/superpowers/specs/hearing-verdict-design.md` (its 2-line hunk; D-08) |
+| d015d26 | `.github/cadence/coverage-policy.json` (D-02, D-09) | `.planning/PROJECT.md`, `.planning/REQUIREMENTS.md`, `.planning/ROADMAP.md`, `.planning/STATE.md`, `.planning/config.json` |
+| 45d4f02 | `.github/cadence/coverage-policy.json` | `.planning/config.json` |
+| 4488777 | `.github/workflows/macos.yml`, `.github/workflows/tests.yml` (the `macos-15` runner; D-02, D-09) | `.planning/ROADMAP.md`, `.planning/phases/1/CONTEXT.md`, `.planning/phases/1/UAT.md` |
+
+Construction (Plan 2 builds each the same way): `git cherry-pick -n <sha>`, then every personal-only path is put back to its pre-pick state (restored from `HEAD` where it exists there, removed from the index and tree where the commit created it or where the pick leaves a modify/delete conflict on a path the fix branch never had), then `git commit -C <sha>` keeps the original author and message. 45d4f02 and 4488777 modify `.planning/` files that d015d26 left behind, so on the fix branch their `.planning/` paths come out of `cherry-pick -n` as modify/delete conflicts; the restore step removes them. That is the construction, not a hand resolution.
+
+`git cherry` marks every path-split commit `+` (absent), because the fix branch carries a different patch than `personal` has. AC3's exception therefore covers each commit this section names, not only c378787.
+
+A non-path-split `fix` pick can also print `+` by context drift: patch-id hashes context lines, and an excluded neighbour changes them. Plan 2 matches such a commit by author, author date and subject instead.
+
 ## Borderline
 
 Each row is a call for the owner's ruling. "Default" is the class the table holds until the owner rules. The ruling column stays empty until Task 6.
