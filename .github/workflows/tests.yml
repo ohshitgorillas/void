@@ -6,7 +6,7 @@ on:
     branches: [macos, personal]
 jobs:
   tests:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 45        # a hung test otherwise holds the runner for 6 hours
     env:
       UV_PYTHON: "3.12"        # install.sh pins 3.12: the speech libraries do not all support newer Pythons
