@@ -77,6 +77,12 @@ class Page(unittest.TestCase):
         return got[0] if got else None
 
     @classmethod
+    def conditions(cls, frames):
+        """What a failure message says the page ran under: its own reduced-motion state and lowFx (a CI runner's
+        accessibility setting or slow frames change what the notch and the eyes do), and the frames the test saw."""
+        return f"page: {cls.js('`RM.matches=${RM.matches} lowFx=${lowFx}`')}, {frames} frames seen"
+
+    @classmethod
     def wait_for(cls, cond, timeout=15.0):
         end = time.monotonic() + timeout
         while time.monotonic() < end:
@@ -109,13 +115,14 @@ class NotchShift(Page):
         self.wait_for(lambda: self.js("document.body.classList.contains('bar-done')"))
         for px in (30, 0):                                               # under the menu bar, and back to the edge
             before, seen, after = self.shift(px)
-            self.assertGreater(len(seen), 3)
-            self.assertAlmostEqual(after[1], 52 + px, delta=1)           # (the real notch: at the new depth)
+            why = f"shift to {px}, {self.conditions(len(seen))}"
+            self.assertGreater(len(seen), 3, why)
+            self.assertAlmostEqual(after[1], 52 + px, delta=1, msg=why)  # (the real notch: at the new depth)
             # the liquid's bar: its first frame no longer than the notch was, its last exactly the notch now (a
             # longer one is cut back in one frame when the real notch takes over: a snap)
-            self.assertAlmostEqual(seen[0][1], before[1], delta=2)
-            self.assertAlmostEqual(seen[-1][1], after[1], delta=1)
-            self.assertLessEqual(seen[-1][0], after[0] + 1)              # (and hangs from at least as high)
+            self.assertAlmostEqual(seen[0][1], before[1], delta=2, msg=why)
+            self.assertAlmostEqual(seen[-1][1], after[1], delta=1, msg=why)
+            self.assertLessEqual(seen[-1][0], after[0] + 1, why)         # (and hangs from at least as high)
 
 
 # every frame of a little Void's life (its state, how far it's split, its eyes' opacity) while it buds, splits for a
@@ -155,15 +162,16 @@ class SplitEyes(Page):
         self.wait_for(lambda: self.js("window.__life.at(-1)===null"), timeout=20)
         life = json.loads(self.js("JSON.stringify(window.__life)"))[:-1]
         self.js("window.__life=null")
+        why = self.conditions(len(life))
         split = [op for st, sv, op in life if sv >= .16]
-        self.assertTrue(split and life[0][0] == "bud" and any(sv == 1 for _, sv, _ in life))
-        self.assertEqual(max(split), 0)                                  # split: no eyes at all
+        self.assertTrue(split and life[0][0] == "bud" and any(sv == 1 for _, sv, _ in life), why)
+        self.assertEqual(max(split), 0, why)                             # split: no eyes at all
         bud = [i for i, (st, _, _) in enumerate(life) if st == "bud"]
-        self.assertEqual(life[bud[-1]][2], 1)                            # budded out: eyes on
+        self.assertEqual(life[bud[-1]][2], 1, why)                       # budded out: eyes on
         whole = [op for st, sv, op in life[bud[-1] + 1:] if st in ("orbit", "done") and sv == 0]
-        self.assertTrue(whole)
-        self.assertEqual(min(whole), 1)                                  # together again, before it's drunk in
-        self.assertEqual(next(op for st, _, op in life if st == "merge"), 1)
+        self.assertTrue(whole, why)
+        self.assertEqual(min(whole), 1, why)                             # together again, before it's drunk in
+        self.assertEqual(next(op for st, _, op in life if st == "merge"), 1, why)
 
 
 @unittest.skipUnless(QWebEngineView and sys.platform == "darwin", "macOS with PySide6's web view only")

@@ -58,6 +58,8 @@ INIT = r"""(() => {
       return cb(ts); });
     L.pending.add(id); L.maxPending = Math.max(L.maxPending, L.pending.size); return id; };
   window.cancelAnimationFrame = id => { L.pending.delete(id); return caf(id); };
+  // the browser's own frame rate, for the failure messages: a loop of ours through the unwrapped raf, not in L.pending
+  const R = window.__ref = {frames: 0}; (function tick() { R.frames++; raf(tick); })();
   window.__vis = v => { for (const [k, val] of [['visibilityState', v], ['hidden', v === 'hidden']])
       Object.defineProperty(document, k, {configurable: true, get: () => val});
     document.dispatchEvent(new Event('visibilitychange')); };
@@ -73,11 +75,11 @@ SCRIPT = r"""const { chromium } = require('playwright');
     await p.addInitScript(INIT);
     await p.goto('file://' + PAGE);
     await p.waitForFunction(() => typeof window.voidHidden === 'function' && window.__loop.calls > 5, null, {timeout: 10000});
-    const S = () => p.evaluate(() => ({calls: __loop.calls, pending: __loop.pending.size, max: __loop.maxPending}));
+    const S = () => p.evaluate(() => ({calls: __loop.calls, ref: __ref.frames, pending: __loop.pending.size, max: __loop.maxPending}));
     const reset = () => p.evaluate(() => { __loop.maxPending = __loop.pending.size; });
     const wait = ms => p.waitForTimeout(ms);
     const span = async ms => { await reset(); const a = await S(), t0 = Date.now(); await wait(ms); const z = await S();
-      return {n: z.calls - a.calls, secs: (Date.now() - t0) / 1000, max: z.max, pending: z.pending}; };
+      return {n: z.calls - a.calls, ref: z.ref - a.ref, secs: (Date.now() - t0) / 1000, max: z.max, pending: z.pending}; };
 
     out.shown = await span(1000);                                       // 1: shown
     await p.evaluate(() => voidHidden()); await wait(100);              // 2: hidden by the shell
@@ -130,13 +132,18 @@ class Idle(unittest.TestCase):
         s = self.r[k]
         return s["n"] / s["secs"]
 
+    def why(self, k):
+        """For a rate assertion's message: the page loop's rate beside the browser's own over the same span."""
+        s = self.r[k]
+        return f"{k}: page loop {s['n'] / s['secs']:.1f}/s, browser's own rAF {s['ref'] / s['secs']:.1f}/s over {s['secs']:.2f}s"
+
     def test_page_loads_without_fatal_errors(self):
         self.assertNotIn("fatal", self.r, self.r.get("fatal"))
         self.assertEqual(self.r["errors"], [])
 
     def test_shown_runs_one_loop_a_frame(self):
-        self.assertGreater(self.rate("shown"), 30)                       # (headless: ~60 a second)
-        self.assertLess(self.rate("shown"), 75)                          # (one frame() per display frame, no more)
+        self.assertGreater(self.rate("shown"), 30, self.why("shown"))       # (headless: ~60 a second)
+        self.assertLess(self.rate("shown"), 75, self.why("shown"))       # (one frame() per display frame, no more)
         self.assertEqual(self.r["shown"]["max"], 1)
 
     def test_hidden_stops_the_loop(self):
@@ -145,13 +152,15 @@ class Idle(unittest.TestCase):
 
     def test_shown_again_resumes_one_loop(self):
         self.assertEqual(self.r["hidden"]["n"], 0)                       # (it really stopped first)
-        self.assertGreater(self.rate("resumed"), 30)
+        self.assertGreater(self.rate("resumed"), 30, self.why("resumed"))
         self.assertEqual(self.r["resumed"]["max"], 1)
 
     def test_rapid_toggles_leave_one_loop(self):
         self.assertEqual(self.r["rapid"]["max"], 1)
-        self.assertLess(self.rate("rapid"), self.rate("shown") * 1.4)    # (two chains: twice the frames)
-        self.assertGreater(self.rate("rapid"), self.rate("shown") * 0.6)
+        self.assertLess(self.rate("rapid"), self.rate("shown") * 1.4,    # (two chains: twice the frames)
+                        f"{self.why('rapid')}; {self.why('shown')}")
+        self.assertGreater(self.rate("rapid"), self.rate("shown") * 0.6,
+                           f"{self.why('rapid')}; {self.why('shown')}")
 
     def test_resume_has_no_catch_up_jump(self):
         self.assertEqual(self.r["hidden"]["n"], 0)                       # (no frames while hidden: a real gap to jump)
@@ -161,12 +170,12 @@ class Idle(unittest.TestCase):
 
     def test_page_hidden_stops_and_visible_resumes(self):
         self.assertEqual(self.r["visHidden"]["n"], 0)
-        self.assertGreater(self.rate("visShown"), 30)
+        self.assertGreater(self.rate("visShown"), 30, self.why("visShown"))
         self.assertEqual(self.r["visShown"]["max"], 1)
 
     def test_page_visible_while_shell_hid_him_stays_stopped(self):
         self.assertEqual(self.r["visWhileHidden"]["n"], 0)
-        self.assertGreater(self.rate("visEnd"), 30)
+        self.assertGreater(self.rate("visEnd"), 30, self.why("visEnd"))
         self.assertEqual(self.r["visEnd"]["max"], 1)
 
 
