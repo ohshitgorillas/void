@@ -322,6 +322,17 @@ The three failures, one cause:
 
 Every failure is split-caused (none unexplained); the Borderline row is B-08. Two measurements for that row, neither a full-suite run: `git cherry-pick -n 283432f` applies to the trial tip with no conflict (2 files, 22 lines changed: `app/agents.py`, `app/static/index.html`); and `tests/test_agents.py` is the only test file that names `agents`, so with macos's own version of it (no f4acc7d) `app/agents.py` is 88.4% lines and 81.9% branches (172 of 210), under the 85 branch bar. 89f4bfe also edits `tests/test_agents.py`. After the run no pytest, Chrome or Qt process of the run was left (the run's PID 23006 was gone; the one QtWebEngine process listed belongs to HQPlayer6Client, up two days).
 
+### Merge-back trial (Task 5)
+
+Second scratch worktree, detached at the snapshot 74af430. First the Merge-back prep reorder was committed there (scratch only, never on `personal`): commit 96e059f, `.gitignore` only, 11 lines in and 11 out, the same set of lines in a new order. Then `git merge --no-commit --no-ff split-trial` (tip fead0c9):
+
+- merge exit 0 ("Automatic merge went well"); `.gitignore`, `app/server.py` and `app/static/index.html` auto-merged
+- conflicts: none
+- `git diff --cached --name-only HEAD` (files the merge would change relative to the reorder commit): empty
+- `git merge --abort`, then `git status --porcelain` empty
+
+So the cause the flagged assumption predicted (a later personal-only commit changing the same lines in `app/server.py` and `app/static/index.html`) does not occur; the only conflict, `.gitignore` (8935491 against 5a4f07d), is what the reorder removes. No Borderline row comes from this task.
+
 ## Borderline
 
 Each row is a call for the owner's ruling. "Default" is the class the table holds until the owner rules. The ruling column stays empty until Task 6.
