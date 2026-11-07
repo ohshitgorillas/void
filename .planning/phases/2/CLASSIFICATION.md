@@ -335,15 +335,60 @@ So the cause the flagged assumption predicted (a later personal-only commit chan
 
 ## Borderline
 
-Each row is a call for the owner's ruling. "Default" is the class the table holds until the owner rules. The ruling column stays empty until Task 6.
+Each row is one call for the owner's ruling, in plain words. "Default" is the class the table holds until the owner rules (rows B-01 to B-07 hold my first-pass class; B-08 is the one new row from the trial). Only owner rows are here; how a row is built is technical and settled in the Trial section. "Applies cleanly" below means `git cherry-pick -n` onto the trial tip (a stand-in for its table position); the exact build is redone in Task 7 after the rulings. The ruling stays empty until the owner gives it.
 
-| Id | Commit | Option A | Option B | Evidence | Default | Ruling |
-|---|---|---|---|---|---|---|
-| B-01 | e53ea7b | fix: Esc leaves hover mode on macOS | feature: hover mode gains a key, a `void hover-off` prompt line and new settings-hint text | The message says that as the cursor he takes no click or key, so on macOS "nothing you could do reached him"; touches `app/macsys.py`, `app/window_win.py`, one `app/server.py` prompt line and one `app/static/index.html` hint line | fix | |
-| B-02 | a3021dd | feature: smaller Claude sessions (cap Bash output, drop Grep/Glob/WebFetch, deny unused agent roles) | fix: it removes about 5.9k tokens a session | The message measures a saving; no defect is named; it changes which tools Mac users' Void sessions get | feature | |
-| B-03 | 8c38409 | visual: a faint spark on the page for a gate_drop event | fix: it shows the owner a dropped clip, part of the fix-bound gate | The message calls it "context-bleed step 4"; it edits `app/static/index.html` and `tests/test_page_sparks.py`, a file created by the Local-only 87344d3 | visual | |
-| B-04 | 14b64bf | visual: helper gaze motion on the page | fix: eyes follow helpers while his eyes are shut | One-line condition in `app/static/index.html`; the message calls it a stand-down fix | visual | |
-| B-05 | ed2fa27 | visual: the glow ring on the page | fix: his head no longer rises over the glow on a stretch | Two lines in `app/static/index.html`; the message says "since fd7f83e it held still" | visual | |
-| B-06 | f3b2947 | fix: delivers inbox alerts to his Claude session, which ping batching (8441f85, fix-bound) builds on | feature: inbox alerts are a capability macos lacks | One commit with no body; `app/server.py` and `tests/test_inbox.py`; `8441f85` and `7ef0a99` edit the same inbox code | fix | |
-| B-07 | fb16e92 | fix: pairs with ping batching (context-bleed step 7) | feature: changes what Claude is told to do with long jobs | Two `app/server.py` prompt lines and one test | fix | |
-| B-08 | f4acc7d (and 283432f) | carry 283432f onto the fix branch (it becomes class fix: Mac users get a thumbnail of images Claude reads, in the code panel) | keep f4acc7d (the agents stream-event tests, 322 lines) on `personal` with 283432f's class, so it stays off `macos` | Three tests in f4acc7d fail on the fix branch without 283432f (`tool_images` does not exist). 283432f applies cleanly. Without f4acc7d, `app/agents.py` is 81.9% branches on `tests/test_agents.py` alone, under the 85 bar the `tests` job enforces (D-09), and 89f4bfe edits the same test file | table keeps f4acc7d fix and 283432f feature. The plan's default is B, but B fails the agents.py bar; I recommend A | |
+**B-01. e53ea7b, hover mode: Esc takes him off your pointer, and Claude knows `void hover-off`.**
+- Option A, fix: on macOS, while he is the cursor he takes no click or key, so nothing you could do reached him; Esc is the way out.
+- Option B, feature: it also adds a key, a line in Claude's prompt about `void hover-off`, and new settings-hint text, so macos gains a capability.
+- Evidence: the message says that as the cursor he takes no click or key, so on macOS "nothing you could do reached him"; it touches `app/macsys.py`, `app/window_win.py`, one `app/server.py` prompt line and one `app/static/index.html` hint line.
+- Default: fix.
+- Ruling:
+
+**B-02. a3021dd, smaller Claude sessions (cap Bash output, drop Grep/Glob/WebFetch, deny unused agent roles).**
+- Option A, feature: it is a tuning change; no defect is named, and it changes which tools Mac users' Void sessions get.
+- Option B, fix: it removes about 5.9k tokens a session.
+- Evidence: the message measures a saving and names no defect; changes `app/server.py` only. If ruled fix it applies cleanly.
+- Default: feature (stays on `personal`).
+- Ruling:
+
+**B-03. 8c38409, a faint spark on the page for a gate_drop event.**
+- Option A, visual: it is a look-and-motion change on the page.
+- Option B, fix: it shows a dropped clip, part of the fix-bound gate ("context-bleed step 4").
+- Evidence: it edits `app/static/index.html` and `tests/test_page_sparks.py`, a file created by the Local-only 87344d3. If ruled fix it does not apply alone (conflicts in `app/static/index.html` and `tests/test_page_sparks.py`), and 87344d3 does not apply alone either: it needs the earlier Local-only spark commits (61975ea, 6bd5629, b554fd0). In the order 61975ea, 6bd5629, b554fd0, 87344d3, 8c38409 all five apply cleanly. A fix ruling therefore means taking those four "Local only" commits to `macos` too (their class would change with it), or dropping the page change.
+- Default: visual.
+- Ruling:
+
+**B-04. 14b64bf, helper gaze motion on the page ("Asleep, his helpers no longer catch his eye").**
+- Option A, visual: it changes where his eyes move.
+- Option B, fix: eyes no longer follow helpers while his eyes are shut; the message calls it a stand-down fix.
+- Evidence: one line of condition in `app/static/index.html`. If ruled fix it applies cleanly.
+- Default: visual.
+- Ruling:
+
+**B-05. ed2fa27, the glow ring on the page ("the glow takes his lift and squish").**
+- Option A, visual: it changes how the glow moves.
+- Option B, fix: his head no longer rises over the glow on a stretch.
+- Evidence: two lines in `app/static/index.html`; the message says "since fd7f83e it held still". If ruled fix it applies cleanly.
+- Default: visual.
+- Ruling:
+
+**B-06. f3b2947, inbox alerts reach his Claude session.**
+- Option A, fix: it is the base ping batching (8441f85, fix-bound) builds on.
+- Option B, feature: inbox alerts are a capability macos lacks.
+- Evidence: one commit with no body; `app/server.py` and `tests/test_inbox.py`; 8441f85 and 7ef0a99 edit the same inbox code. `macos` already holds this commit as 8c064eb, so no build step picks, skips or reverts it; the ruling changes only the table class.
+- Default: fix.
+- Ruling:
+
+**B-07. fb16e92, a prompt change that pairs with ping batching (context-bleed step 7).**
+- Option A, fix: it pairs with ping batching.
+- Option B, feature: it changes what Claude is told to do with long jobs.
+- Evidence: two `app/server.py` prompt lines and one test.
+- Default: fix.
+- Ruling:
+
+**B-08. f4acc7d (Phase 1 tests of the agents stream events), which needs 283432f (code panel thumbnails of images Claude reads).**
+- Option A: carry 283432f onto the fix branch, so it becomes class fix and Mac users get the thumbnail in the code panel (22 lines in `app/agents.py` and `app/static/index.html`; applies cleanly).
+- Option B: keep f4acc7d (322 lines of agents tests) on `personal` with 283432f's class, so it stays off `macos`.
+- Evidence: three tests in f4acc7d fail on the fix branch without 283432f (`module 'agents' has no attribute 'tool_images'`). Without f4acc7d, `app/agents.py` has 81.9% branch coverage, under the 85 bar the `tests` job enforces (D-09, measured on `tests/test_agents.py` alone, the only test file that names `agents`); 89f4bfe edits the same test file, so it would need the same ruling.
+- Default: the table keeps f4acc7d as fix and 283432f as feature. The plan's default is B, but B fails the agents.py bar, so I recommend A.
+- Ruling:
