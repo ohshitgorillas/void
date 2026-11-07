@@ -173,7 +173,7 @@ Path columns show directories at the depth the decision needs (`tests/` and `.pl
 
 ## Path-split
 
-A path-split commit is a `fix` row whose diff also touches a personal-only path. Task 2 looped over every `fix` row and found exactly four; no other `fix` row touches `CLAUDE.md`, `.claude/`, `queues/`, `docs/superpowers/`, `docs/design/` or `.planning/`.
+A path-split commit is a `fix` row whose diff also touches a personal-only path. Task 2 looped over every `fix` row and found exactly four touching a personal-only path (c378787, d015d26, 45d4f02, 4488777). The Task 3 trial found a fifth, bb02446, which touches no personal-only path but whose `tests/test_page_sparks.py` hunk is a file created by the Local-only 87344d3 (the case the plan names).
 
 | Commit | Carried onto the fix branch | Left behind on `personal` |
 |---|---|---|
@@ -181,12 +181,64 @@ A path-split commit is a `fix` row whose diff also touches a personal-only path.
 | d015d26 | `.github/cadence/coverage-policy.json` (D-02, D-09) | `.planning/PROJECT.md`, `.planning/REQUIREMENTS.md`, `.planning/ROADMAP.md`, `.planning/STATE.md`, `.planning/config.json` |
 | 45d4f02 | `.github/cadence/coverage-policy.json` | `.planning/config.json` |
 | 4488777 | `.github/workflows/macos.yml`, `.github/workflows/tests.yml` (the `macos-15` runner; D-02, D-09) | `.planning/ROADMAP.md`, `.planning/phases/1/CONTEXT.md`, `.planning/phases/1/UAT.md` |
+| bb02446 | `tests/test_page_held.py`, `tests/test_page_idle.py` | `tests/test_page_sparks.py` (1 line; the file exists only for 87344d3, class visual). Built by `cherry-pick -n`, then the modify/delete conflict on that file is removed from index and tree, then `commit -C`. |
 
 Construction (Plan 2 builds each the same way): `git cherry-pick -n <sha>`, then every personal-only path is put back to its pre-pick state (restored from `HEAD` where it exists there, removed from the index and tree where the commit created it or where the pick leaves a modify/delete conflict on a path the fix branch never had), then `git commit -C <sha>` keeps the original author and message. 45d4f02 and 4488777 modify `.planning/` files that d015d26 left behind, so on the fix branch their `.planning/` paths come out of `cherry-pick -n` as modify/delete conflicts; the restore step removes them. That is the construction, not a hand resolution.
 
 `git cherry` marks every path-split commit `+` (absent), because the fix branch carries a different patch than `personal` has. AC3's exception therefore covers each commit this section names, not only c378787.
 
 A non-path-split `fix` pick can also print `+` by context drift: patch-id hashes context lines, and an excluded neighbour changes them. Plan 2 matches such a commit by author, author date and subject instead.
+
+## Trial
+
+Status: Task 3 trial done and recorded; Task 3's Verify is met only by a construction the plan did not name (see "Construction findings"), so Plan 1 stopped at a structural checkpoint here. The trial worktrees and branches were removed again (nothing left behind); the recipe below rebuilds the tree in seconds.
+
+### First pass: table order, plain picks, as the plan wrote it
+
+Worktree on a throwaway branch at c895ced, every `fix` row in table order, path-split rows by Task 2's construction, a conflict recorded and skipped. A second pass in `--topo-order` gave the same skip set, so order is not the cause. Result: 76 picked (3 of them path-split), 6 already on macos (4 empty, 2 conflicting), 11 skipped, `app/voiceprint.py` still present at the tip (c378787 skipped), so the plan's Verify (voiceprint absent) could not be met.
+
+Six picks are empty or conflict only because macos already holds the same commit under another SHA (same author date and subject; `git cherry macos personal` still prints `+` for them because patch-id hashes drifted context):
+
+| Commit | Already on macos as |
+|---|---|
+| ad1da73 | 975c918 |
+| 0ba0fec | 16d33c7 |
+| 16b5829 | fabc753 |
+| f3b2947 | 8c064eb |
+| 3935571 | c63fdea |
+| 7ef0a99 | 5033bce |
+
+Eleven real skips, with the conflicting paths and the cause:
+
+| Pick | Conflicting paths | Cause |
+|---|---|---|
+| bb02446 | `tests/test_page_sparks.py` | the file is created by the Local-only 87344d3 (visual); path-split, see above |
+| d24b2b6 | `tests/test_page_idle.py` | follows bb02446 |
+| 044e7f9 | `app/server.py` (the `is_noise` comment and `stop_said` lines, 2 lines) | not an excluded commit. Merge 8cacc1d ("Merge commit '044e7f9' into mine/context-cloud") carries a resolution against macos's own 6091587 text ("a sentence looping ... a stop said over him"); a cherry-pick of 044e7f9 alone cannot reproduce it |
+| ae3ff8b, bfef46c, 7688517, c7a7ef7, 87d1faa, 74e983f, 89f4bfe | `app/server.py`, `app/gate.py`, `tests/test_gate.py`, `tests/test_echo.py`, `tests/test_wake_loop.py` | follow 044e7f9: ae3ff8b's context needs `stop_said`, which 044e7f9 introduces; each later one fails on the one before |
+| c378787 | `app/gate.py`, `app/server.py`, `tests/test_gate.py`, `tests/test_voiceprint.py` | follows the same chain (path-split pick, reset after the conflict) |
+
+### Second pass: the construction that clears every skip
+
+Rebuilt in a fresh worktree at c895ced, table order, 87 picks (93 `fix` rows less the 6 already on macos), zero skipped:
+
+- 81 plain `git cherry-pick <sha>`
+- 5 path-split rows (c378787, d015d26, 45d4f02, 4488777, bb02446) by Task 2's construction
+- 1 row, 044e7f9, taken as `git cherry-pick -m 1 8cacc1d` (the merge's net change over its first parent, resolution included; no hand step)
+
+Evidence from that tree (tip 91e6f4e, tree 93b23c2):
+
+- `git diff --name-only c895ced..tip` lists no path under `CLAUDE.md`, `.claude/`, `queues/`, `docs/superpowers/`, `docs/design/` or `.planning/`
+- `app/voiceprint.py` absent; `app/gate.py`, `app/hearing.py`, `app/drops.py`, `app/notifier.py` present and byte-identical to the snapshot's
+- `python3 -m py_compile app/*.py` exit 0
+- `git diff tip 74af430` over non-personal-only paths: 6 files (`.gitignore`, `app/agents.py`, `app/server.py` 32 lines, `app/static/index.html`, `tests/test_page_props.py`, `tests/test_page_sparks.py`). Cherry-picking every `visual` and `feature` row plus 8935491 onto that tip leaves one line of difference, the `tests/test_page_sparks.py` hunk of bb02446 left behind by design. So the fix set and the excluded set partition `personal`'s non-personal-only tree exactly, and `app/server.py`'s 32 lines are a3021dd alone.
+
+### Construction findings (technical, for the architect; not owner rows)
+
+1. 044e7f9 cannot be a plain pick: its effect on macos exists only in merge 8cacc1d's resolution. Taking it as `cherry-pick -m 1 8cacc1d` clears its own skip and eight downstream ones (d24b2b6 is cleared by the bb02446 path-split). Cost: the pick's message is the merge's ("Merge commit '044e7f9' into mine/context-cloud"), so Plan 2's author-date-and-subject match for 044e7f9 finds no commit by subject; the match must name 8cacc1d for that row. Merge 8cacc1d is class `merge`, "follows its parents"; the other merge with a resolution (aa91f20, 12 combined-diff lines) needed no vehicle, since 047b54f picked cleanly and the tree matches.
+2. The six commits already on macos are not picked. They stay class `fix` in the table; Plan 2's AC3 reads them as present by author date and subject.
+3. Probe of the merge-back (a throwaway worktree detached at the snapshot, `git merge --no-commit --no-ff` of the second-pass tip, aborted, worktree clean after): one conflict, `.gitignore`. Cause: 8935491 (dev tooling) adds its block next to the two coverage lines that 5a4f07d adds on both sides. `app/server.py` and `app/static/index.html` auto-merged. With the personal-only ignore block moved above `__pycache__/` on `personal` (one commit on `personal` before the merge) the same merge completes with no conflict and an empty `git diff --cached --name-only HEAD`. This was a probe on the snapshot; it is not Task 5's run and no commit was made on `personal`.
+4. Not run yet: Task 4 (suite and per-module gate) and Task 5/7 as written. The suite is about 270 s on Slate and was not started, since the tree to test depends on the architect's ruling on findings 1 and 3.
 
 ## Borderline
 
