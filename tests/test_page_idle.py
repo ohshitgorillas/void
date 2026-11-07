@@ -137,13 +137,28 @@ class Idle(unittest.TestCase):
         s = self.r[k]
         return f"{k}: page loop {s['n'] / s['secs']:.1f}/s, browser's own rAF {s['ref'] / s['secs']:.1f}/s over {s['secs']:.2f}s"
 
+    # One loop a frame is judged against the browser's own frame rate over the same span (the reference loop in INIT),
+    # not a number of frames a second: a machine without a GPU runs headless Chrome below 30 a second (a CI runner:
+    # 18-30), and that is the runner, not the page. The page loop's frames over the reference's must sit in this band:
+    # every other frame (0.5) or two chains (2.0) fall outside it, a frame lost or gained at either end of the span
+    # does not. And the reference must have run at least REF_MIN frames in the span, or the ratio says nothing (the
+    # shortest span is 0.5 s; the slowest runner rate seen, 17.7 a second, gives 8).
+    REF_MIN = 6
+    BAND = (0.75, 1.3)
+
+    def assertOneFramePerFrame(self, k, span=None):
+        s = span or self.r[k]
+        why = self.why(k) if span is None else f"{k}: {s}"
+        self.assertGreaterEqual(s["ref"], self.REF_MIN, f"too few browser frames to judge by — {why}")
+        self.assertGreater(s["n"] / s["ref"], self.BAND[0], f"the page loop misses frames — {why}")
+        self.assertLess(s["n"] / s["ref"], self.BAND[1], f"the page loop runs more than a frame — {why}")
+
     def test_page_loads_without_fatal_errors(self):
         self.assertNotIn("fatal", self.r, self.r.get("fatal"))
         self.assertEqual(self.r["errors"], [])
 
     def test_shown_runs_one_loop_a_frame(self):
-        self.assertGreater(self.rate("shown"), 30, self.why("shown"))       # (headless: ~60 a second)
-        self.assertLess(self.rate("shown"), 75, self.why("shown"))       # (one frame() per display frame, no more)
+        self.assertOneFramePerFrame("shown")
         self.assertEqual(self.r["shown"]["max"], 1)
 
     def test_hidden_stops_the_loop(self):
@@ -152,7 +167,7 @@ class Idle(unittest.TestCase):
 
     def test_shown_again_resumes_one_loop(self):
         self.assertEqual(self.r["hidden"]["n"], 0)                       # (it really stopped first)
-        self.assertGreater(self.rate("resumed"), 30, self.why("resumed"))
+        self.assertOneFramePerFrame("resumed")
         self.assertEqual(self.r["resumed"]["max"], 1)
 
     def test_rapid_toggles_leave_one_loop(self):
@@ -170,12 +185,12 @@ class Idle(unittest.TestCase):
 
     def test_page_hidden_stops_and_visible_resumes(self):
         self.assertEqual(self.r["visHidden"]["n"], 0)
-        self.assertGreater(self.rate("visShown"), 30, self.why("visShown"))
+        self.assertOneFramePerFrame("visShown")
         self.assertEqual(self.r["visShown"]["max"], 1)
 
     def test_page_visible_while_shell_hid_him_stays_stopped(self):
         self.assertEqual(self.r["visWhileHidden"]["n"], 0)
-        self.assertGreater(self.rate("visEnd"), 30, self.why("visEnd"))
+        self.assertOneFramePerFrame("visEnd")
         self.assertEqual(self.r["visEnd"]["max"], 1)
 
 
