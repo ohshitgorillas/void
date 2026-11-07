@@ -18,10 +18,19 @@ os.environ["QT_QPA_PLATFORM"] = "offscreen"
 os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu --num-raster-threads=1 --renderer-process-limit=1")
 try:
     from PySide6.QtCore import QEvent, QUrl
+    from PySide6.QtWebEngineCore import QWebEngineScript
     from PySide6.QtWebEngineWidgets import QWebEngineView
     from PySide6.QtWidgets import QApplication
 except ImportError:
     QWebEngineView = None
+
+# Full motion whatever the host's accessibility setting: the tests below prove the page's full-motion path (the liquid
+# shift, the eyes through a split with the glow on), and a host with Reduce Motion on (a CI runner's, or a Mac's) sends
+# the page down its reduced-motion path instead. Runs in the page's own world before its script, so the page's
+# `RM = matchMedia('(prefers-reduced-motion: reduce)')` reads "no". The reduced-motion path is covered by SWEEP's
+# explicit `rm` cases, not by the host.
+FULL_MOTION = """(()=>{ const real=window.matchMedia.bind(window);
+  window.matchMedia=q=>real(/prefers-reduced-motion\\s*:\\s*reduce/.test(q)?'not all':q); })();"""
 
 # every frame while the liquid stands in for the notch: where its bar reaches and where the real notch is
 WATCH = """(()=>{ window.__seen=[]; const bar=$('#gooBar'), pill=$('#barPill');
@@ -39,8 +48,14 @@ class Page(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
         cls.view = QWebEngineView()
+        script = QWebEngineScript()
+        script.setName("full-motion")
+        script.setSourceCode(FULL_MOTION)
+        script.setInjectionPoint(QWebEngineScript.DocumentCreation)
+        script.setWorldId(QWebEngineScript.MainWorld)
+        cls.view.page().scripts().insert(script)
         cls.view.resize(340, 460)
-        cls.view.show()                                                  # (offscreen: it only animates shown)
+        cls.view.show()                                                 # (offscreen: it only animates shown)
         cls.view.load(QUrl.fromLocalFile(str(PAGE)))
         cls.wait_for(lambda: cls.js("typeof voidBarInset==='function'&&typeof voidDock==='function'"))
 
