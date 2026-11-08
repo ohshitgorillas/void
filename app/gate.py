@@ -27,7 +27,11 @@ ECHO_TAIL = 1.0          # s after he stops talking that the room still rings: a
 ECHO_RUN = 2.0           # …unless it runs on this long past the ringing: then it's you, answering as he finished
 ECHO_KEEP, ECHO_RATIO, ECHO_MIN = 60, 0.55, 3    # remember what he said for 60 s · share of heard words matched · fewest words to judge
 ECHO_LIKE, ECHO_SKIP = 0.6, 0.25                 # how alike two words must be to count · cost of each of his words the burst skips
-ECHO_WORD = 0.5          # s either side of a played stop phrase that a heard one counts as Void's own
+ECHO_WORD = 0.60         # s either side of a played stop phrase that a heard one counts as Void's own. Measured, not guessed: the
+                         # largest |heard - played| start or end of his own stop phrases in the own-stop scenes (tests/test_scenes.py)
+                         # is 0.56 s (real Whisper base.en, his closing phrase: the played times are tidy_full's estimate, which
+                         # drifts late over a long line; the fast tier's fixture word times give 0.02 s, the room's delay),
+                         # rounded up to the next 0.05 s
 # the one list of stop phrases (regex fragments): those said inside a clause, then the rest. STOP_RE takes all of it,
 # STOP_IN_RE the clause ones: while he talks only these stop him, and only said as a stop, opening or closing a clause
 # of what the mic caught (his own voice heard back over him may carry the word inside a sentence, "ready to have a stop

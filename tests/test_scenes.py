@@ -358,9 +358,9 @@ class FastScenes(FreshRun):
                              f"his closing stop phrase ended {closing[-1].end - scenes.T0 - t.void_end:.2f} s after his sound")
         self.assertTrue([ln for ln in log if "echo (over): " in ln or "echo (follow): " in ln],
                         f"the burst holding his closing stop phrase wasn't judged by Wake.check and dropped as echo:{why}")
-        # the heard-versus-played offsets of his own stop phrases were measured (start and end, heard minus played)
-        self.assertTrue(t.offsets and all(isinstance(o["start"], float) and isinstance(o["end"], float) for o in t.offsets),
-                        f"no heard-versus-played offset of his own stop phrase was measured:{why}")
+        # the heard-versus-played offsets of his own stop phrases were measured (start and end, heard minus played), and
+        # ECHO_WORD covers every one
+        check_echo_word_covers(self, t, why)
         # nothing barged or woke, and his sound played to his line's last chunk
         self.assertEqual(did(t), [], f"Void acted on his own stop phrases heard back:{why}")
         self.assertGreaterEqual(t.void_end - t.void_from, scenes.void_stops(STOP_CLIP)[-1][1],
@@ -382,25 +382,13 @@ class FastScenes(FreshRun):
     # ---- the owner's own stop, said just past ECHO_WORD after the end of his played stop phrase, still stops him
     def _stop_just_past_his_stop(self, page):
         gate = scenes._gate()
-        said, word = "Stop, stop.", scenes._words()["you_stop.wav"]
-        length, opens = word[2][0], scenes.void_stops(STOP_CLIP)[0]     # (to where "that's" begins; his opening phrase)
+        kw, first, opens = owner_stop_after_his_own()
         err = io.StringIO()
         scenes.warm_up(scenes.Room())                              # (he has already spoken in this run)
         with contextlib.redirect_stderr(err), judged_bursts() as bursts:
-            t = scenes.play(scenes.Room(you_db=PAGE_STOP_DB) if page else scenes.Room(), void=STOP_CLIP,
-                            you="you_stop.wav", you_at=opens[1] + gate.ECHO_WORD + STOP_MARGIN - word[0][0],
-                            you_only=(said, length), page=page)
-        log = [ln for ln in err.getvalue().splitlines() if ln.startswith("[void]")]
-        why = instead(t, log)
-        gap = t.you_start + word[0][0] - (t.void_from + opens[1])    # (your first word, past the end of his opening phrase)
-        self.assertTrue(gate.ECHO_WORD < gap <= gate.ECHO_WORD + 0.1,
-                        f"your first word began {gap:.3f} s after his opening stop phrase ended, not just past "
-                        f"ECHO_WORD ({gate.ECHO_WORD} s){why}")
-        barge = [e for e in t.events if e["t"] == "barge"]
-        self.assertTrue(barge, f"\"{said}\" said {gap:.2f} s after his own stop phrase didn't stop him{why}")
-        self.assertLess(t.void_end - t.void_start, scenes.void_stops(STOP_CLIP)[-1][1],
-                        f"his playback didn't end before his line did: his sound ran {t.void_end - t.void_start:.1f} s{why}")
-        self.assertLessEqual(t.void_end - t.you_start, PROMPT + 0.5, f"he went on {t.void_end - t.you_start:.1f} s after you began{why}")
+            t = scenes.play(scenes.Room(you_db=PAGE_STOP_DB) if page else scenes.Room(), page=page, **kw)
+        why = instead(t, [ln for ln in err.getvalue().splitlines() if ln.startswith("[void]")])
+        barge = check_owner_stop_barged(self, t, first, opens, why)
         heard = [b for b in bursts if b["now"] <= scenes.T0 + barge[0]["scene_at"] + 1e-6]
         self.assertTrue(heard and heard[-1]["words"] and gate.stop_phrases(heard[-1]["words"]),
                         f"the burst that barged wasn't judged with timed words holding a stop phrase: {heard[-1:]}{why}")
@@ -421,6 +409,42 @@ class FastScenes(FreshRun):
         self.assertTrue(len(t.raw) > 0 and differ == 0,
                         f"the mic didn't come through unchanged: {len(t.raw)} samples picked up, {len(t.clean)} "
                         f"read, {differ} of them different")
+
+
+def owner_stop_after_his_own():
+    """The owner's "Stop, stop." said just past ECHO_WORD after his opening stop phrase ends, as keywords for scenes.play and
+    the clip's own word times: the cut-in is placed from scenes.void_stops and the manifest's word times, never by hand.
+    → (play keywords, your first word's start in the clip, his opening stop phrase as (start, end))"""
+    word, opens = scenes._words()["you_stop.wav"], scenes.void_stops(STOP_CLIP)[0]
+    length = word[2][0]                                             # (to where "that's" begins)
+    at = opens[1] + scenes._gate().ECHO_WORD + STOP_MARGIN - word[0][0]
+    return {"void": STOP_CLIP, "you": "you_stop.wav", "you_at": at, "you_only": ("Stop, stop.", length)}, word[0][0], opens
+
+
+def check_owner_stop_barged(test, t, first, opens, why):
+    """The owner's stop (placed by owner_stop_after_his_own) came just past ECHO_WORD on the scene's clock and stopped him:
+    a barge, and his playback ended before his line did."""
+    gate = scenes._gate()
+    gap = t.you_start + first - (t.void_from + opens[1])             # (your first word, past the end of his opening phrase)
+    test.assertTrue(gate.ECHO_WORD < gap <= gate.ECHO_WORD + 0.1,
+                    f"your first word began {gap:.3f} s after his opening stop phrase ended, not just past "
+                    f"ECHO_WORD ({gate.ECHO_WORD} s){why}")
+    barge = [e for e in t.events if e["t"] == "barge"]
+    test.assertTrue(barge, f"\"Stop, stop.\" said {gap:.2f} s after his own stop phrase didn't stop him{why}")
+    test.assertLess(t.void_end - t.void_start, scenes.void_stops(STOP_CLIP)[-1][1],
+                    f"his playback didn't end before his line did: his sound ran {t.void_end - t.void_start:.1f} s{why}")
+    test.assertLessEqual(t.void_end - t.you_start, PROMPT + 0.5, f"he went on {t.void_end - t.you_start:.1f} s after you began{why}")
+    return barge
+
+
+def check_echo_word_covers(test, t, why):
+    """Every heard-versus-played offset of his own stop phrases that the scene measured lies within ECHO_WORD, and there is
+    at least one: a later change that widens the offsets fails here."""
+    worst = max((max(abs(o["start"]), abs(o["end"])) for o in t.offsets), default=None)
+    test.assertIsNotNone(worst, f"no heard-versus-played offset of his own stop phrase was measured:{why}")
+    test.assertLessEqual(worst, scenes._gate().ECHO_WORD,
+                         f"his own stop phrase was heard {worst:.3f} s off where it played, more than ECHO_WORD "
+                         f"({scenes._gate().ECHO_WORD} s): {[(o['heard'], o['kind'], round(o['start'], 3), round(o['end'], 3)) for o in t.offsets]}")
 
 
 @contextlib.contextmanager
@@ -572,6 +596,45 @@ class SlowScenes(FreshRun):
 
     def test_hold_on_over_void_interrupts_him(self):
         self._interrupts("interrupt_hold_on")
+
+    # ---- the own-stop scenes of the fast tier, heard by real speech detection and Whisper (word times from Whisper's own)
+    def _his_stop_line_heard(self, page):
+        """Void's stop line alone: native with the canceller off (as in the fast tier), page with no reference. → Take, why."""
+        err = io.StringIO()
+        with contextlib.ExitStack() as st, contextlib.redirect_stderr(err):
+            if not page:
+                st.enter_context(mock.patch.object(server.hearing, "rtc", None))
+            t = scenes.play(scenes.Room(), void=STOP_CLIP, page=page, hear=True)
+        return t, instead(t, [ln for ln in err.getvalue().splitlines() if ln.startswith("[void]")])
+
+    def _his_own_stop_phrase_produces_nothing(self, page):
+        t, why = self._his_stop_line_heard(page)
+        self.assertEqual(did(t), [], f"Void acted on his own stop phrases heard back:{why}")
+        self.assertGreaterEqual(t.void_end - t.void_from, scenes.void_stops(STOP_CLIP)[-1][1],
+                                f"his line didn't play to its last chunk: his sound ended {t.void_end - t.void_from:.2f} s in{why}")
+        check_echo_word_covers(self, t, why)
+
+    def test_his_own_stop_phrase_heard_back_produces_nothing_on_the_native_path(self):
+        self._his_own_stop_phrase_produces_nothing(page=False)
+
+    def test_his_own_stop_phrase_heard_back_produces_nothing_on_the_page_path(self):
+        self._his_own_stop_phrase_produces_nothing(page=True)
+
+    def _stop_just_past_his_stop_heard(self, page):
+        kw, first, opens = owner_stop_after_his_own()
+        err = io.StringIO()
+        scenes.warm_up(scenes.Room())                              # (he has already spoken in this run)
+        with contextlib.redirect_stderr(err):
+            t = scenes.play(scenes.Room(you_db=PAGE_STOP_DB) if page else scenes.Room(), page=page, hear=True, **kw)
+        why = instead(t, [ln for ln in err.getvalue().splitlines() if ln.startswith("[void]")])
+        check_owner_stop_barged(self, t, first, opens, why)
+        self.assertTrue(t.offsets, f"the barging burst reached the rule with no timed stop phrase:{why}")
+
+    def test_stop_just_past_echo_word_after_his_own_stop_phrase_interrupts_him_on_the_native_path(self):
+        self._stop_just_past_his_stop_heard(page=False)
+
+    def test_stop_just_past_echo_word_after_his_own_stop_phrase_interrupts_him_on_the_page_path(self):
+        self._stop_just_past_his_stop_heard(page=True)
 
     def _follows_up(self, name, you_at):
         t, log = heard(SCENES[name], you_at=you_at)
