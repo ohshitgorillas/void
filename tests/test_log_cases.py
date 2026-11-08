@@ -1,7 +1,7 @@
 """Cases from the owner's own server.log of 26 Oct: the follow-ups of his that were thrown away must get through, and
 Void's own voice heard back must not. Every heard text below is copied from that log as it was logged (the log keeps
 the first 80 characters); his lines are copied from history.jsonl, what he had just said when the owner answered.
-`void drops` (app/drops.py) reads such a log back: every drop, and what gate.judge does with it now.
+`void drops` (app/drops.py) reads such a log back: every heard burst, kept or dropped, and what gate.judge does with it now.
 
     python3 -m unittest tests.test_log_cases -v
 """
@@ -118,7 +118,7 @@ LOG = """\
 
 
 class Replay(unittest.TestCase):
-    """`void drops` lists every drop in a log, old lines and stamped ones, and what today's gate does with each."""
+    """`void drops` lists every verdict in a log, old drops and stamped lines, and what today's gate does with each."""
 
     def drops(self, day=None):
         return [(d.line, d.at, d.why, d.kind, d.text, d.now) for d in drops.replay(LOG.splitlines(), day)]
@@ -133,14 +133,15 @@ class Replay(unittest.TestCase):
              "as logged"),
             (15, "2026-10-27 09:15:02", "low confidence", "follow", "I need my first single", "as logged"),
             (17, "2026-10-27 09:15:41", "no wake word", "wake", "God damn it", "no wake word"),
+            (18, "2026-10-27 09:16:00", "kept", "follow", "Keep it moving", "kept"),
         ])
 
     def test_one_day_alone(self):
-        self.assertEqual([d[0] for d in self.drops("2026-10-27")], [15, 17])
+        self.assertEqual([d[0] for d in self.drops("2026-10-27")], [15, 17, 18])
 
-    def test_the_report_counts_the_drops_and_those_kept_now(self):
+    def test_the_report_counts_the_bursts_the_drops_and_those_kept_now(self):
         lines = drops.report(drops.replay(LOG.splitlines()))
-        self.assertEqual(lines[-1].split(), ["7", "dropped", "in", "all;", "2", "of", "them", "kept", "now"])
+        self.assertEqual(lines[-1], "     8  heard in all; 7 dropped, 2 of them kept now")
         self.assertIn("KEPT", lines[0])
 
 

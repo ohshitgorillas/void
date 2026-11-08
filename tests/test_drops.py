@@ -1,4 +1,5 @@
-"""`void drops` (app/drops.py): a server log read back into its drops, the report printed, and the command's entry.
+"""`void drops` (app/drops.py): a server log read back into its heard bursts, kept and dropped, the report printed, and
+the command's entry.
 
 test_log_cases.py replays the owner's 26 Oct log through it; this file holds the other log forms, the report text and
 `main`.
@@ -20,6 +21,8 @@ sys.path.insert(0, str(ROOT / "tests"))
 import suite_data  # noqa: E402,F401  (Void's data folder: the suite's own)
 import drops  # noqa: E402
 
+LOOP = ("one two three four. " * 4)[:80]     # a looping sentence, cut by the log at 80 characters
+
 LOG = "\n".join([
     "Traceback (most recent call last):",                                   # 1: not a server log line
     "[void] heard 2.0s, 4 words (follow-up)",                               # 2
@@ -36,6 +39,7 @@ LOG = "\n".join([
     "[void] dropped as noise: " + "a" * 80,                                 # 13: logged at the cut, a looping sentence
     "[void] dropped as noise: ",                                            # 14: nothing was heard
     "[void] 2026-11-03 08:00:00 no speech (follow) (voice n/a): music",     # 15
+    "[void] 2026-12-01 10:00:00 kept (wake): " + LOOP,                      # 16: kept at the cut, a loop today's gate drops
 ])
 
 
@@ -43,30 +47,33 @@ class Replay(unittest.TestCase):
     def rows(self, day=None):
         return [(d.line, d.at, d.why, d.kind, d.text, d.now) for d in drops.replay(LOG.splitlines(), day)]
 
-    def test_each_log_form_is_a_drop_with_its_reason_and_kind(self):
+    def test_each_log_form_is_a_row_with_its_verdict_and_kind(self):
         self.assertEqual(self.rows(), [
             (3, "", "not your voice", "follow", "Keep it moving", "kept"),       # he said it: today it gets through
             (4, "", "while talking", "over", "and then the next step", "while talking"),
             (6, "", "echo", "over", "so the build is done", "as logged"),        # echo needs his words: not in the log
             (7, "2026-11-01 10:00:00", "no wake word", "wake", "what time is it", "no wake word"),
+            # (line 5's heard line still says "while talking", so his name over him reads as a stop)
+            (8, "2026-11-02 10:00:00", "kept", "wake", "hey Void what time is it", "kept: stops him"),
             (9, "2026-11-02 10:05:00", "while talking", "over", "stop", "kept: stops him"),
             (10, "", "no wake word", "wake", "turn it up", "no wake word"),
             (11, "", "stray word", "follow", "Keep it moving", "kept"),
             (13, "", "noise", "wake", "a" * 80, "as logged"),                    # a looping sentence needs all of it
             (14, "", "noise", "wake", "", "noise"),
             (15, "2026-11-03 08:00:00", "no speech", "follow", "music", "as logged"),
+            (16, "2026-12-01 10:00:00", "kept", "wake", LOOP, "as logged"),     # a loop needs all of it, as a drop's does
         ])
 
     def test_lines_that_are_not_server_log_lines_are_skipped_but_counted(self):
         got = drops.replay(["Traceback", "", "[void] dropped echo of own speech: hello there"])
         self.assertEqual([d.line for d in got], [3])
 
-    def test_a_kept_line_is_not_a_drop(self):
-        self.assertIsNone(drops.parse("kept (follow): Yes"))
+    def test_a_kept_line_is_a_row_too(self):
+        self.assertEqual(drops.parse("kept (follow): Yes"), ("kept", "follow", "Yes"))
         self.assertIsNone(drops.parse("listening"))
 
     def test_a_day_keeps_only_lines_stamped_that_day(self):
-        self.assertEqual([r[0] for r in self.rows("2026-11-02")], [9])
+        self.assertEqual([r[0] for r in self.rows("2026-11-02")], [8, 9])
         self.assertEqual(self.rows("2030-01-01"), [])
 
     def test_a_heard_line_names_the_kind_of_the_drop_after_it(self):
@@ -81,24 +88,27 @@ class Report(unittest.TestCase):
         drops.Drop(9, "2026-11-01 10:00:00", "echo", "over", "so the build", "as logged"),
         drops.Drop(12, "", "no wake word", "follow", "Keep it moving", "kept"),
         drops.Drop(13, "", "while talking", "over", "stop", "kept: stops him"),
+        drops.Drop(14, "", "kept", "wake", "hey Void hello", "kept"),
     ]
 
-    def test_one_row_per_drop_then_a_count_per_reason_and_of_those_kept(self):
+    def test_one_row_per_burst_then_a_count_per_verdict_and_of_the_drops_kept(self):
         dash = "-" + " " * 18
         self.assertEqual(drops.report(self.DROPS), [
             f"     4  {dash}  no wake word (wake)  ->  drops: no wake word  hello there",
             "     9  2026-11-01 10:00:00  echo (over)  ->  as logged  so the build",
             f"    12  {dash}  no wake word (follow)  ->  KEPT  Keep it moving",
             f"    13  {dash}  while talking (over)  ->  KEPT: STOPS HIM  stop",
+            f"    14  {dash}  kept (wake)  ->  KEPT  hey Void hello",
             "",
             "     2  no wake word",
             "     1  echo",
             "     1  while talking",
-            "     4  dropped in all; 2 of them kept now",
+            "     1  kept",
+            "     5  heard in all; 4 dropped, 2 of them kept now",
         ])
 
-    def test_no_drops_still_reports_the_total(self):
-        self.assertEqual(drops.report([]), ["", "     0  dropped in all; 0 of them kept now"])
+    def test_no_rows_still_reports_the_total(self):
+        self.assertEqual(drops.report([]), ["", "     0  heard in all; 0 dropped, 0 of them kept now"])
 
 
 class Main(unittest.TestCase):
@@ -116,7 +126,7 @@ class Main(unittest.TestCase):
 
     def test_prints_the_report_of_the_named_log(self):
         lines = self.out(str(self.log))
-        self.assertEqual(lines[-1], "    11  dropped in all; 3 of them kept now")
+        self.assertEqual(lines[-1], "    13  heard in all; 11 dropped, 3 of them kept now")
         self.assertIn("  no wake word (wake)  ->  drops: no wake word  what time is it", lines[3])
 
     def test_bytes_that_are_not_text_are_read_through(self):
@@ -125,13 +135,14 @@ class Main(unittest.TestCase):
     def test_day_filters_before_or_after_the_log_name(self):
         for argv in (("--day", "2026-11-02", str(self.log)), (str(self.log), "--day", "2026-11-02")):
             lines = self.out(*argv)
-            self.assertEqual(len(lines), 4)
-            self.assertIn("KEPT: STOPS HIM  stop", lines[0])
-            self.assertEqual(lines[-1], "     1  dropped in all; 1 of them kept now")
+            self.assertEqual(len(lines), 6)
+            self.assertIn("kept (wake)  ->  KEPT: STOPS HIM  hey Void what time is it", lines[0])
+            self.assertIn("KEPT: STOPS HIM  stop", lines[1])
+            self.assertEqual(lines[-1], "     2  heard in all; 1 dropped, 1 of them kept now")
 
     def test_without_a_name_it_reads_the_default_log(self):
         with mock.patch.object(drops, "LOG", self.log):
-            self.assertEqual(self.out("--day", "2026-11-04")[-1], "     1  dropped in all; 0 of them kept now")
+            self.assertEqual(self.out("--day", "2026-11-04")[-1], "     1  heard in all; 1 dropped, 0 of them kept now")
 
     def test_run_as_a_script_it_prints_the_same_report(self):
         buf = io.StringIO()
