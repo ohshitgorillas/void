@@ -195,6 +195,40 @@ class FastScenes(FreshRun):
         log = [ln for ln in err.getvalue().splitlines() if ln.startswith("[void]")]
         self.assertEqual(did(t), [], f"Void acted on his own voice:{instead(t, log)}")
 
+    # ---- his own line heard back: echo only while his sound or its ring (ECHO_TAIL) was in the air
+    def _heard_echo_scene(self, you_at):
+        """Void says `void_question`; your clip says his very words, `you_at` seconds into his voice (the stand-in
+        Whisper hears his words wherever he or you said them): → the Take and the "[void]" log it made."""
+        sc = SCENES["answer_after"]
+        his = CLIPS[sc["void"]]["text"]
+        scenes.warm_up(scenes.Room())                              # (he has already spoken in this run)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            t = scenes.play(scenes.Room(), void=sc["void"], you=sc["you"], you_at=you_at, you_only=(his, 2.4))
+        return t, [ln for ln in err.getvalue().splitlines() if ln.startswith("[void]")]
+
+    def _echo_verdicts(self, log, kind):
+        return [ln for ln in log if f"echo ({kind}): " in ln]
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_his_line_heard_back_while_it_plays_is_dropped_as_echo(self):
+        t, log = self._heard_echo_scene(you_at=seconds(SCENES["answer_after"]["void"]) / 2)
+        self.assertTrue(any("echo (" in ln for ln in log), f"his line heard over him wasn't dropped as echo:{instead(t, log)}")
+        self.assertEqual(did(t), [], f"Void acted on his own line heard back:{instead(t, log)}")
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_his_line_heard_half_a_second_after_his_sound_ends_is_dropped_as_echo(self):
+        t, log = self._heard_echo_scene(you_at=seconds(SCENES["answer_after"]["void"]) + AFTER)
+        self.assertTrue(self._echo_verdicts(log, "follow"), f"his line heard in his ring wasn't dropped as echo:{instead(t, log)}")
+        self.assertEqual(did(t), [], f"Void acted on his own line heard back:{instead(t, log)}")
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_the_same_text_heard_a_second_and_a_half_after_his_sound_ends_is_kept(self):
+        t, log = self._heard_echo_scene(you_at=seconds(SCENES["answer_after"]["void"]) + 1.5)
+        self.assertEqual(self._echo_verdicts(log, "follow"), [], f"words heard clear of him were dropped as echo:{instead(t, log)}")
+        self.assertTrue([e for e in did(t) if e["t"] == "wake" and e.get("follow")],
+                        f"the words heard 1.5 s after he went quiet weren't kept as a follow-up:{instead(t, log)}")
+
     def test_passes_the_mic_through_unchanged_without_the_canceller(self):
         sc = SCENES["interrupt_stop"]
         with mock.patch.object(server.hearing, "rtc", None):            # livekit missing: no canceller
