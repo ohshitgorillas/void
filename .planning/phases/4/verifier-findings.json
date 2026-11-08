@@ -1,0 +1,89 @@
+{
+  "status": "delivered",
+  "score": "7/7",
+  "truths": [
+    {
+      "n": 1,
+      "truth": "Every tests/test_log_cases.py row whose reason named Phase 4 (including \"It's good\" and \"Yes, do it\") passes with no expected-failure mark, kept and answered",
+      "status": "VERIFIED",
+      "uat_item": 2,
+      "evidence": "The AFTER_QUIET/AFTER_SPOKE/WHILE_TALKING constants (3345a37:tests/test_log_cases.py:42-44) are gone and no row sets phase= (grep -c 'phase=\"' = 0). The 23 rows are re-stated as kind follow with talking/rang read the way drops.rang reads the log flags (tests/test_log_cases.py:89-123). Ran `pytest tests/test_log_cases.py tests/test_gate.py tests/test_drops.py tests/test_listen_verdict.py`: 115 passed, 0 xfailed. -v shows PASSED for `[It's good (follow, logged over)]`, `[Yes, do it (follow)]` and `[Yes, do it (follow, logged wake)]`. The re-statement is backed by real Wake.check runs: tests/test_wake_loop.py PageSpeaking.test_its_good_said_after_the_page_went_quiet_is_a_follow_up and tests/test_echo.py test_yes_do_it_after_he_went_quiet_is_heard_as_a_follow_up_and_kept_not_dropped_as_echo both passed (111 passed in test_wake_loop.py + test_echo.py)."
+    },
+    {
+      "n": 2,
+      "truth": "Through the real hearing path, his own line heard back while it plays is dropped as echo, the same line 0.5 s after his sound ends is dropped, and the same text 1.5 s after is kept",
+      "status": "VERIFIED",
+      "uat_item": 3,
+      "evidence": "app/gate.py:139 runs the echo test only when `b.rang`. app/gate.py:48 adds the `rang` field. app/server.py Wake.air returns (heard_him, heard_him with ECHO_TAIL) and is what feeds Burst in check/heard/stop_in/Listen.run. `pytest tests/test_scenes.py -k FastScenes`: 17 passed, 0 skipped, which includes test_his_line_heard_back_while_it_plays_is_dropped_as_echo, test_his_line_heard_half_a_second_after_his_sound_ends_is_dropped_as_echo and test_the_same_text_heard_a_second_and_a_half_after_his_sound_ends_is_kept (tests/test_scenes.py:216-232; LIVEKIT imported, so none were skipped)."
+    },
+    {
+      "n": 3,
+      "truth": "A follow-up kept while Void speaks leaves his line playing to its last chunk and is sent exactly once after it ends; a stop phrase or \"Void\" said over him stops playback before the line ends",
+      "status": "VERIFIED",
+      "uat_item": 4,
+      "evidence": "In app/static/index.html, onEvent's follow branch now only does heldQ.push + heldTry (the busy->shush() is gone). send() calls shush() only `if(!opts.follow)`. heldTry waits on `busy||sounding()`. The barge event still calls shush(). Native scenes, all in the 17 FastScenes passes: test_a_reply_in_the_pause_before_his_next_sentence_is_kept_and_his_line_plays_to_its_last_chunk (one kept follow, no barge, owed==1 at keep, void_end past the second sentence), test_stop_said_over_his_line_ends_his_playback_before_the_line_ends, and test_hey_void_said_over_his_line_ends_his_playback_before_the_line_ends. Page, real index.html in headless Chrome: `pytest tests/test_page_held.py tests/test_page_sound.py` gave 24 passed, including test_kept_while_speaking_goes_out_once_his_sound_has_ended (sent == [[quiet, text, follow]], so exactly once and after quiet), test_kept_while_speaking_not_sent_and_speech_not_cut_off, test_barge_is_what_stops_him_mid_speech and test_a_reply_in_the_pause_between_two_sentences_waits_for_the_one_being_made. No Chrome process was left behind (ps)."
+    },
+    {
+      "n": 4,
+      "truth": "One record of his sound: the native Speaker and /api/speaking both write Wake.talked, which Wake.air reads; the page's hold reads the same record; index.html has one 'is he making sound' test; /api/speaking records no placeholder span",
+      "status": "VERIFIED",
+      "uat_item": 5,
+      "evidence": "In app/server.py, Speaker._write calls Wake.talking(at, at+n/prate, paid, chunk=True) for sound chunks only, and Speaker.say calls Wake.owe(). /api/speaking calls talking_until(now + left), talking_until(now, None), owe or pay, and no 60/0.8 literal remains (grep 'talking_until' shows only :1597, :3952 and :3954). Every change publishes BUS t=\"voice\" {left, owed, n}, and /api/events forwards the BUS unfiltered (Bus.pub, server.py:530). The page takes `voice` events and the /api/say, /api/say/stop and /api/speaking replies through takeRec. Its single `const sounding=()=>handing>0||vrec.owed>0||vrec.end>performance.now()` is the wait in untilQuiet, whenQuiet, followTry, heldTry and quietNative. A grep for playing/q.length/spkMap.size finds them only in face, idle, barge and player bookkeeping, never as a wait. The native trace was observed end to end, Speaker._write -> Wake.talked -> Wake.air -> Burst.rang -> echo drop, by the 'while it plays' FastScene. The pieces were also checked one at a time: NativeOwed.test_two_seconds_of_sound... (the span ends where _write put it) and test_air_says_whether_his_sound_and_its_ring_were_in_the_air_over_a_burst. The page trace /api/speaking {on,left} -> Wake.talked -> Wake.check was observed by PageSpeaking.test_speaking_on_records_talking_until_now_plus_left and test_its_good_said_after_the_page_went_quiet_is_a_follow_up. Page side: test_page_sound.py SoundingReadsTheRecord.test_player_state_does_not_decide_it and test_sound_ahead_holds_until_the_reported_end_with_the_player_idle both passed."
+    },
+    {
+      "n": 5,
+      "truth": "The phase diff on macos touches nothing under docs/superpowers/, docs/design/, .claude/, queues/ or CLAUDE.md, and merging macos into personal gives no conflicts",
+      "status": "VERIFIED",
+      "uat_item": 6,
+      "evidence": "`git diff --name-only b457a58..macos` (b457a58 = Phase 3 tip on macos, the plan's S; macos = de50846) lists only app/drops.py, app/gate.py, app/server.py, app/static/index.html and ten tests/ files. The same diff restricted to the five forbidden paths returns 0 lines. 53baa07 has parents fe86856 and de50846, and `git merge-tree --write-tree fe86856 de50846` exits 0 with tree f2111ae8, identical to 53baa07^{tree}. macos is an ancestor of HEAD."
+    },
+    {
+      "n": 6,
+      "truth": "The two accepted coverage-policy commands pass on the final tree, with app/gate.py, app/hearing.py and app/drops.py at or above 85% lines and branches",
+      "status": "VERIFIED",
+      "uat_item": 7,
+      "evidence": "coverage.json (meta timestamp 2026-11-08T01:36:35) post-dates the last change to app/ and tests/ (53baa07 at 01:30). `git diff --stat 53baa07..HEAD -- app tests` is empty. `node .github/ci/coverage-modules.mjs --report coverage.json` exit=0: gate.py lines 99.07%, branches 97.62%; hearing.py 98.12%, 87.50%; drops.py 100%, 100%; all other included modules also meet 85. The first command's own exit status rests on the main session's full-suite run, which this verifier was told not to repeat."
+    },
+    {
+      "n": 7,
+      "truth": "Every Burst on every path takes rang from one reading: Wake.air for wake, peek, check and push-to-talk, and drops.rang for `void drops` replay, where an echo the log cannot clear prints 'as logged'",
+      "status": "VERIFIED",
+      "uat_item": null,
+      "evidence": "In app/server.py, Wake.heard, Wake.stop_in and Wake.check build Burst from `*cls.air(started, now)` / `cls.air(began, ended)`, and Listen.run passes `Wake.air(t0, stopped)[1]` with talking=False. In app/drops.py, rang() reads the flags once, now() returns 'as logged' only for an echo that rang, and replay pairs each heard line with the verdict after it (mine is None -> rang True). tests/test_drops.py and tests/test_listen_verdict.py passed in the 115-test run, and test_echo.py's test_check_takes_talking_and_rang_from_air_over_the_burst_as_it_began passed."
+    }
+  ],
+  "passes": [
+    {
+      "k": 2,
+      "name": "Phase 4 replay rows pass unmarked",
+      "evidence": "Phase 4 mark constants removed, no row has phase=. tests/test_log_cases.py run on its own: all rows PASSED, 0 xfailed, including It's good (follow, logged over), Yes, do it (follow) and Yes, do it (follow, logged wake). The re-statement is backed by real Wake.check tests (test_its_good_said_after_the_page_went_quiet_is_a_follow_up, test_yes_do_it_after_he_went_quiet_is_heard_as_a_follow_up_and_kept_not_dropped_as_echo), both passing."
+    },
+    {
+      "k": 3,
+      "name": "Echo judged by when his sound ended",
+      "evidence": "gate.judge echo test gated on b.rang (app/gate.py:139). tests/test_scenes.py FastScenes 17 passed, 0 skipped, including the three echo scenes at during-play, +0.5 s (dropped) and +1.5 s (kept as follow-up)."
+    },
+    {
+      "k": 4,
+      "name": "A follow-up waits for his line; stop and Void cut it",
+      "evidence": "Native: the FastScenes pause-hold scene passed (one kept follow-up, no barge, line plays to its last chunk), as did the stop and 'hey Void' scenes (barge, playback ended early). Page: test_page_held.py ran against the real index.html in Chrome. test_kept_while_speaking_goes_out_once_his_sound_has_ended (sent exactly once, after quiet) and test_barge_is_what_stops_him_mid_speech passed, 24/24 page tests in all."
+    },
+    {
+      "k": 5,
+      "name": "One record of his sound",
+      "evidence": "Speaker._write and /api/speaking both write Wake.talked, and Wake.air reads only it. /api/speaking has no 60/0.8 literal span. The page's single sounding() reads the server's numbered copy (voice event plus post replies) and is the only wait in untilQuiet, whenQuiet, followTry, heldTry and quietNative. Passing tests: PageSpeaking.test_speaking_on_records_talking_until_now_plus_left, NativeOwed.test_its_first_sound_chunk_pays_it_in_the_same_change_as_the_span, test_air_says_whether_his_sound_and_its_ring_were_in_the_air_over_a_burst, test_page_sound.py SoundingReadsTheRecord.test_player_state_does_not_decide_it."
+    },
+    {
+      "k": 6,
+      "name": "Phase diff stays off docs and merges clean",
+      "evidence": "git diff --name-only b457a58..macos touches only app/ and tests/, with 0 paths under the five forbidden roots. git merge-tree --write-tree fe86856 de50846 exits 0 and gives tree f2111ae8 == 53baa07^{tree}."
+    },
+    {
+      "k": 7,
+      "name": "Coverage commands pass",
+      "evidence": "coverage-modules.mjs --report coverage.json exit 0 on a report taken after the final app/tests change. gate.py 99.07/97.62, hearing.py 98.12/87.50, drops.py 100/100 (lines/branches). The suite command's exit is settled by the main session's own full run."
+    }
+  ],
+  "gaps": [],
+  "human_checks": []
+}
