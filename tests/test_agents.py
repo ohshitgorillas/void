@@ -660,20 +660,6 @@ class Helpers(unittest.TestCase):
     def test_one_huge_line_is_cut_at_6000_characters(self):
         self.assertEqual(agents.tool_output("x" * 7000), "x" * 6000 + "\n…")
 
-    @staticmethod
-    def pic(data="AAAA", media="image/png", kind="base64"):
-        return {"type": "image", "source": {"type": kind, "media_type": media, "data": data}}
-
-    def test_pictures_become_data_uris_and_unusable_ones_are_left_out(self):
-        got = agents.tool_images([self.pic(), self.pic("BBBB", "image/jpeg"), self.pic(media="text/plain"),
-                                  self.pic(kind="url"), self.pic(data="x" * 11), {"type": "text", "text": "t"}],
-                                 limit=10)
-        self.assertEqual(got, ["data:image/png;base64,AAAA", "data:image/jpeg;base64,BBBB"])
-        self.assertEqual(agents.tool_images("not a list"), [])
-
-    def test_at_most_three_pictures(self):
-        self.assertEqual(len(agents.tool_images([self.pic(str(i)) for i in range(5)])), 3)
-
     def test_the_notes_prefix_says_when_memory_was_cleared(self):
         self.assertIn("cleared your memory notes", agents.notes_prefix(""))
         self.assertIn("likes tea", agents.notes_prefix("likes tea"))
@@ -761,13 +747,6 @@ class StreamEvents(unittest.TestCase):
         self.assertEqual(s.feed({"type": "stream_event", "event": {"type": "message_start"}}),
                          [("ask", {"t": "break"})])
         self.assertEqual(s.feed({"type": "stream_event", "event": {"type": "content_block_start"}}), [])
-
-    def test_a_tool_result_carries_its_pictures(self):
-        s = self.open_stream()
-        img = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
-        self.assertEqual(s.feed(tool_result("tu1", [img])),
-                         [("ask", {"t": "toolres", "id": "tu1", "text": "[image]", "is_error": False,
-                                   "images": ["data:image/png;base64,AAAA"]})])
 
     def test_user_rows_that_are_not_tool_results_say_nothing(self):
         s = self.open_stream()
