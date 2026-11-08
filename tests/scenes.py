@@ -64,7 +64,7 @@ SETTINGS = {              # every setting Wake.session, Wake.check and Speaker r
     "echo_cancel": True, "voice_out": "auto",
     "language": "en", "whisper_beam": 5, "whisper_model": "base.en", "whisper_device": "cpu",   # (hear=True)
     "voice_gate": True,                                         # (follow-ups judged on Whisper's confidence)
-}                         # (plus stt_hint: server's default, set in play)
+}                         # (plus stt_hint and speak_max_chars: server's defaults, set in play)
 
 
 def clip(name: str) -> np.ndarray:
@@ -622,10 +622,40 @@ def _whisper(scene, clean, void_text, you_text):
 # ---------------------------------------------------------------- a scene
 
 THEN = "And here is the rest of what I found."     # the second sentence of a line played with play(then=...)
+PAGE_LEAD = 0.05          # page voice: the page schedules a sentence this long after it is handed over (its `when`)
+
+
+def _page_player(sim, scene, server, text):
+    """The page's player, for a scene (room harness beside FakePlayer, not a hearing double): what pump/enqueue in
+    index.html do to the server for one sentence, through the server's own code for `/api/tts` (tts_reply) and
+    `/api/speaking` (speaking_post). Handed the line it posts the owe and has the server make the audio; PAGE_LEAD
+    later it posts the sentence's start (`left`: to its end plus the speakers' latency, with its text, played length
+    and word times) and the trimmed audio comes out of the speakers `scene.lat` after that; when it has played it posts
+    that he is quiet. The page's voice gives the echo canceller no reference, so nothing goes to PlayRef."""
+    server.speaking_post({"owe": 1})
+    reply = server.tts_reply(text)
+    if reply is None:                                             # (nothing to say: it is no longer owed)
+        server.speaking_post({"paid": 1})
+        return
+    audio, rate, _pause, words = reply
+    with wave.open(io.BytesIO(audio)) as w:
+        sr, pcm = w.getframerate(), w.readframes(w.getnframes())
+    x = np.frombuffer(pcm, np.int16).astype(np.float64)
+    r = sr * rate                                                 # (the player's rate: the clip's, sped by the voice's pitch)
+    dur = len(x) / r
+    sim.sleep(PAGE_LEAD)
+    left = dur + scene.lat
+    server.speaking_post({"on": True, "left": left, "paid": 1, "text": text, "dur": dur,
+                          "words": [[a / rate, b / rate] for a, b in words] if words else None})
+    ts = sim.now + scene.lat - T0                                 # (the sound reaches the room then)
+    k0, k1 = math.ceil((ts - RS_HALF / r) * SR), math.ceil((ts + (len(x) + RS_HALF) / r) * SR)
+    scene.put(k0, resample(x, r, (np.arange(k0, k1) / SR - ts) * r))
+    sim.sleep(left)
+    server.speaking_post({"on": False})
 
 
 def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch_at=None, switch_lat=None,
-         mic_at=None, you_only=None, then=None) -> Take:
+         mic_at=None, you_only=None, then=None, page=False) -> Take:
     """Play a scene on a simulated clock: `void` (a clip name) goes through the real Speaker player path into PlayRef
     and out of the room's speakers; `you` (a clip name) speaks into the room at `you_at` seconds after Void's voice
     starts coming out of the speakers; `you_only`: (words, seconds) to say only the opening of your clip, its first
@@ -646,8 +676,18 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
     0 opens it as his voice starts, more while he is already talking. None (the default) opens it at scene time 0,
     before he is handed his line. The Take's `mic_from` says when it opened.
 
+    `page`: Void speaks through the page's player instead of the native Speaker: a scene actor (_page_player) does to
+    the server what the page does, through the server's own tts_reply and speaking_post, and no fake player is
+    opened. It takes `void`, `you`, `you_at`, `you_only`, `hear` and `seconds`; any other argument raises ValueError.
+
     Scenes played one after another are one run of Void: whatever the app keeps across mic sessions in the process
     (a canceller kept warm) carries from one scene to the next. new_run() starts a fresh run."""
+    if page:
+        given = [k for k, v in (("switch_at", switch_at), ("switch_lat", switch_lat), ("mic_at", mic_at),
+                                ("then", then)) if v is not None]
+        if given or not void:
+            raise ValueError("page voice takes void, you, you_at, you_only, hear and seconds"
+                             + (f", not {', '.join(given)}" if given else ", and needs void"))
     server = _server()
     S, W, P = server.Speaker, server.Wake, server.hearing.PlayRef
     lat, texts = S.LAT, _texts()
@@ -659,7 +699,7 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
         you_text, n = you_only
         you_pcm = you_pcm[:round(n * SR)]
     if seconds is None:
-        ref = LEAD_IN + lat if void else LEAD_IN
+        ref = LEAD_IN + (PAGE_LEAD if page else 0.0) + lat if void else LEAD_IN
         ends = [LEAD_IN]
         if void:
             ends.append(ref + len(void_pcm) / SR)
@@ -708,7 +748,7 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
         clean.append(first)
         return RecordedMic(m, clean), name, first
 
-    cfg = dict(SETTINGS, stt_hint=server.DEFAULTS["stt_hint"])
+    cfg = dict(SETTINGS, stt_hint=server.DEFAULTS["stt_hint"], speak_max_chars=server.DEFAULTS["speak_max_chars"])
     with ExitStack() as st:
         def patch(obj, name, value):
             st.enter_context(mock.patch.object(obj, name, value))
@@ -718,6 +758,8 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
         patch(server, "SPOKEN", collections.deque(maxlen=200))
         patch(server, "PLAYED", collections.deque())            # (every scene's clock starts at T0: none hears another's stop phrases)
         patch(server, "make_player", lambda rate: FakePlayer(scene, rate))
+        if page:
+            patch(server, "tts_engine", lambda: "scene")             # (/api/tts has a voice: synth is the faked one)
         patch(server, "open_mic", open_mic)
         patch(server, "open_clean_mic", open_clean_mic)
         if void:                                                  # (his voice at Kokoro's rate, same duration)
@@ -744,7 +786,9 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
 
         try:
             wake.actor = sim.spawn("wake", W.session, T0 if mic_at is None else math.inf)
-            if void:
+            if void and page:
+                sim.spawn("void", lambda: _page_player(sim, scene, server, texts.get(void, "")), T0 + LEAD_IN)
+            elif void:
                 maker = sim.spawn("maker", S._maker, T0)
                 player = sim.spawn("player", S._player_loop, T0)
                 S.threads = [maker.thread, player.thread]          # (so say() finds them running and starts none)

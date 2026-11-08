@@ -1535,6 +1535,26 @@ def note_page_played(b: dict, end: float) -> None:
         print(f"[void] page played words: {e}", file=sys.stderr)
 
 
+def speaking_post(b: dict) -> None:
+    """The page's `/api/speaking` post `b`, taken into the record (the route calls this, and so does a scene's page player).
+    {"owe": 1}: a sentence was handed to the page's player · {"paid": 1}: one left it with no sound ·
+    {"on": true, "left": s[, "paid": 1][, "text", "dur", "words"]}: his sound runs `s` more seconds (and that sentence's
+    has begun), the sentence's own words noted by note_page_played · {"on": false}: it ends now, and nothing more is owed."""
+    if b.get("owe"):
+        Wake.owe()
+    if "on" not in b:
+        if b.get("paid"):
+            Wake.pay()
+    elif b.get("on"):
+        end = time.monotonic() + max(0.0, float(b.get("left") or 0))
+        note_page_played(b, end)                 # (this sentence's words, timed from where its sound starts)
+        Wake.talking_until(end, int(bool(b.get("paid"))))
+    else:
+        now = time.monotonic()
+        Wake.talking_until(now, None)
+        played_cut(now)                          # (the stop phrases of his that were still to play)
+
+
 def played_lately() -> "tuple[gate.Word, ...]":
     """The one reader of PLAYED: his stop phrases that ended no more than ECHO_KEEP ago (older ones are forgotten)."""
     with PLAYED_LOCK:
@@ -2331,6 +2351,20 @@ def _syllables(w):
 def tidy_and_time(wav, text):
     w2, times, _env = tidy_full(wav, text)[:3]
     return w2, times
+
+
+def tts_reply(text):
+    """The `/api/tts` work (the route calls this, and so does a scene's page player): `text` made speakable, noted as
+    spoken, synthesised and timed. → (wav bytes, playback rate, pause after it, word times or None), or None when there
+    is nothing to say or no voice engine."""
+    text = speakable(text)
+    if not text or not tts_engine():
+        return None
+    note_spoken(text)
+    audio, rate = synth(text)
+    audio, words = tidy_and_time(audio, langmark.unmark(text))
+    pause = 0.3 if re.search(r"[.!?]['\")}]*$", text) else 0.14 if re.search(r"[,;:—–]$", text) else 0.06
+    return audio, rate, pause, words
 
 
 def tidy_full(wav, text):
@@ -3830,15 +3864,12 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/ask":
                 return self.ask()
             if p == "/api/tts":
-                text = speakable(json.loads(self._body() or b"{}").get("text", ""))
-                if not text or not tts_engine():
+                reply = tts_reply(json.loads(self._body() or b"{}").get("text", ""))
+                if reply is None:
                     self.send_response(204)
                     self.end_headers()
                     return None
-                note_spoken(text)
-                audio, rate = synth(text)
-                audio, words = tidy_and_time(audio, langmark.unmark(text))
-                pause = 0.3 if re.search(r"[.!?]['\")}]*$", text) else 0.14 if re.search(r"[,;:—–]$", text) else 0.06
+                audio, rate, pause, words = reply
                 self.send_response(200)
                 self.send_header("Content-Type", "audio/wav")
                 self.send_header("X-Void-Rate", f"{rate:.3f}")
@@ -4028,23 +4059,7 @@ class Handler(BaseHTTPRequestHandler):
                 ans = b.get("ans") if b.get("ans") in ("yes", "no", "always") else "no"
                 return self._json({"ok": APPROVALS.answer(str(b.get("id")), ans)})
             if p == "/api/speaking":                 # the page tells us while he talks (so "hey Void" can't wake himself)
-                b = json.loads(self._body() or b"{}")
-                # {"owe": 1}: a sentence was handed to the page's player · {"paid": 1}: one left it with no sound ·
-                # {"on": true, "left": s[, "paid": 1]}: his sound runs `s` more seconds (and that sentence's has begun) ·
-                # {"on": false}: it ends now, and nothing more is owed
-                if b.get("owe"):
-                    Wake.owe()
-                if "on" not in b:
-                    if b.get("paid"):
-                        Wake.pay()
-                elif b.get("on"):
-                    end = time.monotonic() + max(0.0, float(b.get("left") or 0))
-                    note_page_played(b, end)         # (this sentence's words, timed from where its sound starts)
-                    Wake.talking_until(end, int(bool(b.get("paid"))))
-                else:
-                    now = time.monotonic()
-                    Wake.talking_until(now, None)
-                    played_cut(now)                  # (the stop phrases of his that were still to play)
+                speaking_post(json.loads(self._body() or b"{}"))
                 return self._json({"ok": True, **Wake.record()})
             if p == "/api/capture":
                 b = json.loads(self._body() or b"{}")

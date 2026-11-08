@@ -54,6 +54,7 @@ SWITCH = 3.0                # the speakers change this long after his voice star
 DELAYS = (0.010, 0.020, 0.030, 0.040)   # speakers this far off Speaker.LAT: the range real hardware lands in
 FIRST = 1.0                 # the first this-many seconds of every warm mic session must already have his echo out
 MID_VOICE = 2.0             # a session that opens while he is already talking opens this far into his voice
+PAGE_YOU_DB = 0.0           # on the page path nothing cancels his echo (-6 dB at the mic): you stop him this loud, 6 dB over it
 HOLD = 16.0                 # his second sentence takes this long to make: longer than your reply and the quiet after it
 REPLY = "Yes, that sounds good to me."   # (words of its own: not his, so the echo test has nothing to drop)
 CUT_IN = (1.0, 2.0, 3.0, 4.0)   # you tell him to stop this far into his voice (he talks for 7.7 s)
@@ -140,16 +141,16 @@ class FastScenes(FreshRun):
                                             f"only {removed:.1f} dB of Void's echo removed in the first {FIRST} s of a "
                                             f"later mic session in the run, opened {when}, speakers {delay * 1000:.0f} ms off Speaker.LAT")
 
-    def _stops_him(self, name):
+    def _stops_him(self, name, page=False, cut_in=CUT_IN):
         sc, (words, length) = SCENES[name], SAID[name]
-        for at in CUT_IN:
+        for at in cut_in:
             with self.subTest(said=words, into_his_voice=at):
                 scenes.new_run()
                 scenes.warm_up(scenes.Room())                      # (he has already spoken in this run)
                 err = io.StringIO()
                 with contextlib.redirect_stderr(err):
-                    t = scenes.play(scenes.Room(), void=sc["void"], you=sc["you"], you_at=at,
-                                    you_only=(words, length))
+                    t = scenes.play(scenes.Room(you_db=PAGE_YOU_DB) if page else scenes.Room(), void=sc["void"],
+                                    you=sc["you"], you_at=at, you_only=(words, length), page=page)
                 log = [ln for ln in err.getvalue().splitlines() if ln.startswith("[void]")]
                 self.assertTrue(any(e["t"] == "barge" for e in did(t)),
                                 f"\"{words}\" said {at} s into his voice didn't stop him: its opening came through "
@@ -198,7 +199,7 @@ class FastScenes(FreshRun):
         self.assertEqual(did(t), [], f"Void acted on his own voice:{instead(t, log)}")
 
     # ---- his own line heard back: echo only while his sound or its ring (ECHO_TAIL) was in the air
-    def _heard_echo_scene(self, you_at):
+    def _heard_echo_scene(self, you_at, page=False):
         """Void says `void_question`; your clip says his very words, `you_at` seconds into his voice (the stand-in
         Whisper hears his words wherever he or you said them): → the Take and the "[void]" log it made."""
         sc = SCENES["answer_after"]
@@ -206,7 +207,8 @@ class FastScenes(FreshRun):
         scenes.warm_up(scenes.Room())                              # (he has already spoken in this run)
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            t = scenes.play(scenes.Room(), void=sc["void"], you=sc["you"], you_at=you_at, you_only=(his, 2.4))
+            t = scenes.play(scenes.Room(), void=sc["void"], you=sc["you"], you_at=you_at, you_only=(his, 2.4),
+                            page=page)
         return t, [ln for ln in err.getvalue().splitlines() if ln.startswith("[void]")]
 
     def _echo_verdicts(self, log, kind):
@@ -217,6 +219,51 @@ class FastScenes(FreshRun):
         t, log = self._heard_echo_scene(you_at=seconds(SCENES["answer_after"]["void"]) / 2)
         self.assertTrue(any("echo (" in ln for ln in log), f"his line heard over him wasn't dropped as echo:{instead(t, log)}")
         self.assertEqual(did(t), [], f"Void acted on his own line heard back:{instead(t, log)}")
+
+    # ---- the same, with his voice coming from the page's player (its posts reach the server's own /api/speaking code)
+    def _page_alone(self):
+        scenes.warm_up(scenes.Room())                              # (he has already spoken in this run)
+        err, opened = io.StringIO(), mock.Mock()
+        with contextlib.redirect_stderr(err), mock.patch.object(scenes, "FakePlayer", opened):
+            t = scenes.play(scenes.Room(), void=SCENES["void_alone"]["void"], page=True)
+        return t, [ln for ln in err.getvalue().splitlines() if ln.startswith("[void]")], opened
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_on_the_page_path_his_sound_is_recorded_from_the_pages_posts_and_nothing_is_owed_at_the_end(self):
+        t, log, opened = self._page_alone()
+        opened.assert_not_called()                                 # (no fake player: the page plays, not the Speaker)
+        voice = [e for e in t.events if e["t"] == "voice"]
+        self.assertTrue(voice, "no voice event: the page's posts never reached the record")
+        self.assertEqual(voice[0]["owed"], 1, f"the first record wasn't the sentence handed over: {voice[0]}")
+        sounding = [e for e in voice if e["left"] > 0]
+        self.assertTrue(sounding and sounding[0]["owed"] == 0,
+                        f"his sound wasn't recorded as the sentence was paid: {voice}")
+        self.assertEqual((voice[-1]["owed"], voice[-1]["left"]), (0, 0.0), f"he still owed or sounded at the end: {voice[-1]}")
+        self.assertAlmostEqual(sounding[0]["scene_at"], scenes.LEAD_IN + scenes.PAGE_LEAD, delta=0.01)
+        self.assertAlmostEqual(voice[-1]["scene_at"] - t.void_start, seconds(SCENES["void_alone"]["void"]), delta=0.15,
+                               msg="his sound wasn't recorded over as long as it played")
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_on_the_page_path_him_talking_alone_does_nothing(self):
+        t, log, _ = self._page_alone()
+        self.assertEqual(did(t), [], f"Void acted on his own voice from the page:{instead(t, log)}")
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_on_the_page_path_his_line_heard_back_while_it_plays_is_dropped_as_echo(self):
+        t, log = self._heard_echo_scene(you_at=seconds(SCENES["answer_after"]["void"]) / 2, page=True)
+        self.assertTrue(any("echo (" in ln for ln in log), f"his line heard over him wasn't dropped as echo:{instead(t, log)}")
+        self.assertEqual(did(t), [], f"Void acted on his own line heard back:{instead(t, log)}")
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_on_the_page_path_stop_said_over_him_stops_him(self):
+        self._stops_him("interrupt_stop", page=True)
+
+    def test_the_page_path_takes_only_the_arguments_a_page_scene_needs(self):
+        for bad in ({"switch_at": 1.0}, {"switch_lat": 0.2}, {"mic_at": 0.0}, {"then": 1.0}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                scenes.play(scenes.Room(), void=SCENES["void_alone"]["void"], page=True, **bad)
+        with self.assertRaises(ValueError):
+            scenes.play(scenes.Room(), page=True)
 
     @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
     def test_his_line_heard_half_a_second_after_his_sound_ends_is_dropped_as_echo(self):
