@@ -208,32 +208,37 @@ class WakeLoop(unittest.TestCase):
         self.start(barge_in=True)
         self.idle()
         t0 = time.monotonic()
-        self.post("/api/speaking", {"on": True})
+        self.post("/api/speaking", {"on": True, "left": 5})      # (quiet-replies-design.md:71: `left` is his sound)
         self.assert_session_soon(t0, what="/api/speaking on (barge-in)")
 
     def test_speaking_without_barge_in_does_not(self):
         self.start(follow_up=4)                  # wanted only for the follow-up window
         self.idle()
-        self.post("/api/speaking", {"on": True})
+        self.post("/api/speaking", {"on": True, "left": 5})      # (quiet-replies-design.md:71, :76: no window while he sounds)
         time.sleep(0.4)
         self.assertEqual(self.sessions, [])
 
     def test_follow_up_window_opening_starts_a_session(self):
         self.start(follow_up=4)
         self.idle()
-        self.post("/api/speaking", {"on": True})
+        self.post("/api/speaking", {"on": True, "left": 5})
         time.sleep(0.2)
-        self.post("/api/speaking", {"on": False})        # stops talking: window opens 0.8 s from now
-        opens = server.Wake.talked[-1][1] + server.ECHO_TAIL
+        self.assertEqual(self.sessions, [])               # (quiet-replies-design.md:76: closed while he makes sound)
+        opens = time.monotonic()                         # the window opens at the end of his sound (:76)
+        self.post("/api/speaking", {"on": False})        # stops talking: his sound ends now (quiet-replies-design.md:71)
+        posted = time.monotonic()
+        self.assertGreaterEqual(server.Wake.talked[-1][1], opens, "his sound recorded as ending before the `off` post")
+        self.assertLessEqual(server.Wake.talked[-1][1], posted, "his sound recorded as ending after the `off` post")
         self.assertGreater(server.Wake.talked[-1][2], opens)
-        self.assertEqual(self.sessions, [])
         self.assert_session_soon(opens, what="the follow-up window opening")
 
     def test_talking_until_sets_follow_window_directly(self):  # (what the server-side Speaker calls per sentence)
         self.start(follow_up=4)
         self.idle()
-        server.Wake.talking_until(time.monotonic() + 0.3)
-        self.assert_session_soon(server.Wake.talked[-1][1] + server.ECHO_TAIL, what="Wake.talking_until's follow-up window")
+        ends = time.monotonic() + 0.3
+        server.Wake.talking_until(ends)
+        # (quiet-replies-design.md:76: the window opens at the end of his sound, not after the ring)
+        self.assert_session_soon(ends, what="Wake.talking_until's follow-up window")
 
     # ---- 3. switched off: the loop ends promptly, even while waiting
     def test_switching_everything_off_ends_the_loop(self):
@@ -605,6 +610,101 @@ class WhisperHeard(unittest.TestCase):
             heard = self.run_on("Open the", "Downloads folder.")
         self.assertEqual(len(seen), 1, f"gate.sure called {len(seen)}x on one transcription")
         self.assertEqual(heard.text, "Downloads folder.", "the text isn't made of the segments gate.sure kept")
+
+
+@unittest.skipIf(server is None, f"server.py doesn't import here: {IMPORT_ERR}")
+class PageSpeaking(unittest.TestCase):
+    """/api/speaking as the page posts it: `on` with the seconds of his scheduled sound still to come, per sentence it
+    schedules, and `off` once playback is quiet. His span is that sound, and nothing more."""
+
+    def setUp(self):
+        W = server.Wake
+        saved = {k: W.__dict__[k] for k in ("talked", "cut")}
+        self.addCleanup(lambda: [setattr(W, k, v) for k, v in saved.items()])
+        W.talked, W.cut = [], None
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.clock = [1000.0]
+        self.pub = mock.Mock()
+        self.text = ""
+        for p in (mock.patch.dict(server.CFG, {"wake_word": False, "barge_in": False, "follow_up": 30}),
+                  mock.patch.object(server, "time", mock.Mock(wraps=time, monotonic=lambda: self.clock[0])),
+                  mock.patch.object(server, "CONF_PATH", Path(tmp.name) / "config.json"),
+                  mock.patch.object(server, "state_info", lambda: {}),
+                  mock.patch.object(server, "whisper", lambda: None),
+                  mock.patch.object(server, "SPOKEN", type(server.SPOKEN)()),
+                  mock.patch.object(server.BUS, "pub", self.pub),
+                  mock.patch.object(server.MicAuto, "learn", lambda pcm: None),
+                  mock.patch.object(server.Speaker, "idle", classmethod(lambda cls: True)),
+                  mock.patch.object(server.Speaker, "stop", classmethod(lambda cls: None)),
+                  mock.patch.object(W, "ensure", classmethod(lambda cls: None)),
+                  mock.patch.object(W, "session", classmethod(lambda cls: None))):
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(ears(server, lambda pcm: self.text).close)
+        self.srv = LoopbackThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        self.srv.daemon_threads = True
+        threading.Thread(target=self.srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+        self.addCleanup(self.srv.server_close)
+        self.addCleanup(self.srv.shutdown)
+
+    def speaking(self, body):
+        c = http.client.HTTPConnection("127.0.0.1", self.srv.server_address[1], timeout=10)
+        c.request("POST", "/api/speaking", body=json.dumps(body),
+                  headers={"X-Void-Token": server.TOKEN, "Content-Type": "application/json"})
+        r = c.getresponse()
+        data = r.read()
+        c.close()
+        self.assertEqual(r.status, 200, data)
+
+    def test_speaking_on_records_talking_until_now_plus_left(self):
+        calls, real = [], server.Wake.__dict__["talking_until"].__func__
+        with mock.patch.object(server.Wake, "talking_until",
+                               classmethod(lambda cls, t, *a, **k: calls.append(t) or real(cls, t, *a, **k))):
+            self.speaking({"on": True, "left": 2.5})
+            self.clock[0] = 1001.0
+            self.speaking({"on": True, "left": 0.4})
+        self.assertEqual(len(calls), 2, f"talking_until called {len(calls)}x for two posts: {calls}")
+        self.assertAlmostEqual(calls[0], 1002.5, delta=1e-6)
+        self.assertAlmostEqual(calls[1], 1001.4, delta=1e-6)
+        spans = [list(s) for s in server.Wake.talked]
+        self.assertTrue(spans, "nothing recorded in Wake.talked for two `on` posts")
+        self.assertTrue(all(1000.0 - 1e-6 <= s[0] <= s[1] for s in spans), f"a span begun before the first post: {spans}")
+        self.assertLessEqual(max(s[1] for s in spans), 1002.5 + 1e-6, f"a span past any sound the page posted: {spans}")
+        self.assertAlmostEqual(spans[-1][1], 1001.4, delta=1e-6,
+                               msg=f"his sound doesn't end where the page last said it would: {spans}")
+        self.assertLessEqual(max(s[2] for s in spans), 1002.5 + server.ECHO_TAIL + 30 + 1e-6,
+                             f"a span held open past his sound's ring and follow-up: {spans}")
+
+    def test_its_good_said_after_the_page_went_quiet_is_a_follow_up(self):
+        """The 27 Oct reply: 'while talking (over): It's good', said after his last sound, in the ring and after it."""
+        burst = bytes(int(server.RATE * 2 * 1.9))
+        got = []
+        for after in (0.1, server.ECHO_TAIL + 0.2):                    # began in the ring / after it
+            server.Wake.talked = []
+            server.note_spoken("Both albums are in the 30K folder now, next to the original pressing.")
+            self.clock[0] = 1000.0
+            self.speaking({"on": True, "left": 1.5})                   # his first sentence, scheduled
+            self.clock[0] = 1000.1
+            self.speaking({"on": True, "left": 3.2})                   # his last, scheduled after it: sound to 1003.3
+            self.clock[0] = 1003.3
+            self.speaking({"on": False})                               # playback quiet
+            began = 1003.3 + after
+            self.clock[0] = began + 1.9 + 0.4
+            import gate
+            judged, real = [], gate.judge
+            err = io.StringIO()
+            self.text = "It's good"
+            self.pub.reset_mock()
+            with mock.patch.object(gate, "judge", lambda b, *a: judged.append(b) or real(b, *a)), \
+                    contextlib.redirect_stderr(err):
+                server.Wake.check(burst, began, ended=began + 1.9)
+            events = [(c.kwargs.get("t"), c.kwargs.get("text"), c.kwargs.get("follow")) for c in self.pub.call_args_list]
+            log = [ln for ln in err.getvalue().splitlines() if ln.startswith("[void]")]
+            got.append((round(after, 1), events, [b.kind for b in judged],
+                        any("while talking" in ln for ln in log)))
+        self.assertEqual(got, [(round(after, 1), [("wake", "It's good", True)], ["follow"], False)
+                               for after in (0.1, server.ECHO_TAIL + 0.2)])
 
 
 if __name__ == "__main__":

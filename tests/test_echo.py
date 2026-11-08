@@ -4,6 +4,9 @@ the mic catches then is taken for his own voice, however garbled, and dropped. P
 
     python3 -m unittest discover -s tests
 """
+import contextlib
+import inspect
+import io
 import sys
 import time
 import unittest
@@ -14,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import suite_data  # noqa: E402  (Void's data folder: the suite's own, set before server.py settles it)
 import fakes  # noqa: E402
+from test_hearing import SPK_RATE, FakePlayer, FakeRef  # noqa: E402  (the Speaker player stand-ins)
 
 try:
     import server
@@ -98,13 +102,27 @@ class Echo(unittest.TestCase):
         self.after_speech(server.ECHO_TAIL + 0.6)
         self.assertDropped(self.burst("I moved the meeting to Thursday at three"))
 
-    # the time gate
-    def test_follow_window_waits_for_tail(self):
+    # the time gate: his spans hold his sound only, and the ring is not talking
+    def test_span_at_is_the_span_of_his_sound_without_the_ring(self):
         now = time.monotonic()
         with mock.patch.dict(server.CFG, {"follow_up": 30}):
+            server.Wake.talking(now - 3, now)
+        span = server.Wake.span_at(now - 0.1)
+        self.assertIsNotNone(span, "no span while his sound is coming out")
+        self.assertAlmostEqual(span[0], now - 3, delta=1e-6)
+        self.assertAlmostEqual(span[1], now, delta=1e-6)
+        outside = (now - 3.05, now + 0.05, now + server.ECHO_TAIL - 0.05, now + server.ECHO_TAIL + 0.5)
+        self.assertEqual([server.Wake.span_at(t) is None for t in outside], [True] * len(outside),
+                         "a span found before his sound or after it, in the ring")
+
+    def test_follow_window_opens_at_the_end_of_his_sound_and_closes_at_until(self):
+        now = time.monotonic()
+        until = now + server.ECHO_TAIL + 30                 # end + ECHO_TAIL + follow_up
+        with mock.patch.dict(server.CFG, {"follow_up": 30}):
             server.Wake.talking(now - 1, now)
-        self.assertFalse(server.Wake.window_at(now + server.ECHO_TAIL - 0.05))
-        self.assertTrue(server.Wake.window_at(now + server.ECHO_TAIL))
+            at = (now - 0.5, now + 0.05, now + server.ECHO_TAIL, until - 0.05, until + 0.05)
+            self.assertEqual([server.Wake.window_at(t) for t in at], [False, True, True, True, False],
+                             "the window: shut while he sounds, open from his last sound to `until`, shut after")
 
     def assertFollowUp(self, ev, text="please add milk to the shopping list"):
         self.assertEqual([(e.get("t"), e.get("text"), e.get("follow")) for e in ev], [("wake", text, True)])
@@ -115,11 +133,6 @@ class Echo(unittest.TestCase):
     def test_words_in_tail_dropped(self):          # still his echo ringing: not a request
         self.after_speech(0.3)
         self.assertEqual(self.burst("please add milk to the shopping list", time.monotonic() - 0.5), [])
-
-    def test_words_started_before_tail_end_dropped(self):
-        self.after_speech(1.6)
-        started = self.last_word() + server.ECHO_TAIL - 0.2
-        self.assertEqual(self.burst("please add milk to the shopping list", started), [])
 
     def test_echo_in_tail_dropped(self):
         self.after_speech(0.3)
@@ -219,6 +232,29 @@ class Echo(unittest.TestCase):
             server.Wake.talking_until(1008.0)          # his next sentence starts after you stopped, before you're judged
             clock[0] = 1004.5
             self.assertFollowUp(self.burst("please add milk to the shopping list", 1002.0, 1004.0))
+
+    def test_check_classifies_a_burst_by_when_it_began(self):
+        T = server.ECHO_TAIL
+        cases = (  # (kind, his sound from/to, burst began/ended, judged at)
+            ("over", (1000.0, 1010.0), (1002.0, 1005.0), 1011.0),              # began while he made sound
+            ("follow", (1000.0, 1003.0), (1003.2, 1005.1), 1005.5),            # began in the ring after his sound
+            ("follow", (1000.0, 1003.0), (1003.0 + T + 0.5, 1005.4 + T), 1005.8 + T),   # began after the ring
+            ("follow", (1000.0, 1003.0), (1002.5, 1013.0), 1013.3),            # began in his last words and ran on
+            ("wake", (1000.0, 1003.0), (1003.0 + T + 32, 1004.9 + T + 32), 1005.3 + T + 32),  # window shut by then
+        )
+        clock = self.clocked()
+        calls = self.judged()
+        got = []
+        with mock.patch.dict(server.CFG, {"follow_up": 30}):
+            for _, (s, e), (began, ended), judged_at in cases:
+                server.Wake.talked = []
+                clock[0] = s
+                server.Wake.talking(s, e)
+                clock[0] = judged_at
+                calls.clear()
+                self.burst("please add milk to the shopping list", began, ended)
+                got.append([b.kind for b in calls])
+        self.assertEqual(got, [[kind] for kind, *_ in cases])
 
     # barge-in
     def test_barge_in_while_talking(self):
@@ -508,6 +544,112 @@ class GateSure(unittest.TestCase):
 
     def test_nothing_in_nothing_out(self):
         self.assertEqual(gate.sure([]), [])
+
+
+@unittest.skipIf(server is None, f"server.py doesn't import here: {IMPORT_ERR}")
+class HisSound(unittest.TestCase):
+    """Wake.talked holds the time his sound is coming out of the speakers, and nothing else: Speaker._write records a
+    chunk as talking only when it is sound, and a reply begun once his sound has stopped is his owner's follow-up."""
+
+    @classmethod
+    def setUpClass(cls):
+        """His reply played as a scene through the real Speaker player path (_maker and _player_loop: his last sentence
+        and the pause after it): the spans it left in Wake.talked, and when his last sound came out of the room's
+        speakers, read off the room's own output rather than off any time the code stamped."""
+        super().setUpClass()
+        import scenes                                                   # (needs numpy, as server.py does)
+        W, spans = server.Wake, []
+        real = scenes.Sim.run
+
+        def run(sim, end):                                              # (the scene over, before its patches unwind)
+            r = real(sim, end)
+            spans[:] = [list(s) for s in W.talked]
+            return r
+        scenes.new_run()
+        try:
+            with mock.patch.object(scenes.Sim, "run", run), contextlib.redirect_stderr(io.StringIO()):
+                t = scenes.play(scenes.Room(), void="void_question.wav")
+        finally:
+            scenes.new_run()
+        cls.reply_talked = spans
+        cls.reply_last_sound = None if t.void_end is None else scenes.T0 + t.void_end
+
+    def setUp(self):
+        S, W = server.Speaker, server.Wake
+        saved = {k: W.__dict__[k] for k in ("talked",)}
+        self.addCleanup(lambda: [setattr(W, k, v) for k, v in saved.items()])
+        W.talked = []
+        self.clock = [100.0]
+        self.ref = FakeRef()
+        self.player = FakePlayer(self.clock)
+        self.pub = mock.Mock()
+        self.text = ""
+        for k, v in (("gen", 7), ("proc", self.player), ("prate", SPK_RATE), ("written", 1000), ("t0", 100.0),
+                     ("filled", False), ("stats", {}), ("todo", []), ("ready", [])):
+            self.patch(S, k, v)
+        self.patch(server, "time", mock.Mock(wraps=time, monotonic=lambda: self.clock[0],
+                                             sleep=lambda s: self.clock.__setitem__(0, self.clock[0] + s)))
+        self.patch(server, "make_player", lambda rate: FakePlayer(self.clock))
+        self.patch(server.hearing, "PlayRef", self.ref)
+        self.patch(server.Wake, "hush", classmethod(lambda cls, at=None: None))
+        self.patch(server.MicAuto, "learn", lambda pcm: None)
+        self.patch(server.BUS, "pub", self.pub)
+        self.patch(server.Speaker, "idle", classmethod(lambda cls: True))
+        self.patch(server, "SPOKEN", type(server.SPOKEN)())
+        ears = fakes.ears(server, lambda pcm: self.text)
+        self.addCleanup(ears.close)
+
+    def patch(self, obj, name, value):
+        p = mock.patch.object(obj, name, value)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def talking_calls(self):
+        """Spy on Wake.talking. → the list each call's arguments are appended to."""
+        calls, real = [], server.Wake.__dict__["talking"].__func__
+        self.patch(server.Wake, "talking", classmethod(lambda cls, *a, **k: calls.append(a) or real(cls, *a, **k)))
+        return calls
+
+    def test_write_records_talking_only_for_sound(self):
+        self.assertIn("sound", inspect.signature(server.Speaker._write).parameters, "Speaker._write takes no `sound`")
+        calls = self.talking_calls()
+        data = bytes(range(256)) * 19
+        self.assertTrue(server.Speaker._write(data, 7, sound=False))
+        silent = list(calls)
+        self.assertEqual(server.Wake.talked, [], "a chunk that is not sound was recorded in Wake.talked")
+        self.assertEqual(self.player.got, data, "the silent chunk wasn't played")
+        self.assertEqual(b"".join(c[0] for c in self.ref.calls), data, "PlayRef wasn't told the silent chunk played")
+        self.assertTrue(server.Speaker._write(data, 7, sound=True))
+        self.assertEqual((silent, bool(calls[len(silent):])), ([], True),
+                         "talking recorded for a chunk that is not sound, or not for one that is")
+
+    def test_its_good_said_after_his_last_sentence_and_its_pause_is_a_follow_up(self):
+        """The 27 Oct reply: 'while talking (over): It's good', said after his last sound, in the ring and after it."""
+        self.assertIn("sound", inspect.signature(server.Speaker._write).parameters, "Speaker._write takes no `sound`")
+        self.assertTrue(self.reply_talked, "his reply, played through the player, left nothing in Wake.talked")
+        self.assertIsNotNone(self.reply_last_sound, "his reply never came out of the room's speakers")
+        burst = bytes(int(server.RATE * 2 * 1.9))
+        got = []
+        for after in (0.1, server.ECHO_TAIL + 0.2):                    # began in the ring / after it
+            server.Wake.talked = [list(s) for s in self.reply_talked]  # (what the player left: his sentence, its pause)
+            server.note_spoken("Both albums are in the 30K folder now, next to the original pressing.")
+            with mock.patch.dict(server.CFG, {"follow_up": 30}):
+                began = self.reply_last_sound + after
+                self.clock[0] = began + 1.9 + 0.4
+                judged = []
+                real = server.gate.judge
+                err = io.StringIO()
+                self.text = "It's good"
+                self.pub.reset_mock()
+                with mock.patch.object(server.gate, "judge", lambda b, *a: judged.append(b) or real(b, *a)), \
+                        contextlib.redirect_stderr(err):
+                    server.Wake.check(burst, began, ended=began + 1.9)
+            events = [(c.kwargs.get("t"), c.kwargs.get("text"), c.kwargs.get("follow")) for c in self.pub.call_args_list]
+            log = [ln for ln in err.getvalue().splitlines() if ln.startswith("[void]")]
+            got.append((round(after, 1), events, [b.kind for b in judged],
+                        any("while talking" in ln for ln in log)))
+        self.assertEqual(got, [(round(after, 1), [("wake", "It's good", True)], ["follow"], False)
+                               for after in (0.1, server.ECHO_TAIL + 0.2)])
 
 
 if __name__ == "__main__":
