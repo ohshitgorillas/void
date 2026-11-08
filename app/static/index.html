@@ -1702,7 +1702,7 @@ function enqueue(text,o={}){
     const ep=sayEpoch;      // sentences still queued when you cut him off must never be sent (or played) afterwards
     sayChain=sayChain.then(()=>ep===sayEpoch?post('/api/say',{text,id,epoch:ep}):null).catch(()=>{ const it=spkMap.get(id); spkMap.delete(id); if(it&&it.cap) karaNow(it.cap,it.fresh); quietNative(); });   // one after another: keeps them in order
     return; }
-  const g=gen; q.push({cap:o.cap?(o.cap===true?text:o.cap):'',fresh:!!o.fresh,
+  const g=gen; speaking({owe:1}); q.push({cap:o.cap?(o.cap===true?text:o.cap):'',fresh:!!o.fresh,
     p:post('/api/tts',{text}).then(async r=>{ if(r.status!==200) return null;
       const rate=+(r.headers.get('X-Void-Rate')||1), pause=+(r.headers.get('X-Void-Pause')||.08);
       let words=null; try{ words=JSON.parse(r.headers.get('X-Void-Words')||'null'); }catch(e){}
@@ -1799,7 +1799,13 @@ function karaPut(k,quiet){ if(!k.reset&&!quiet&&playing){ if(k.face) talkFace(k.
 function karaTick(n){ while(kara.length&&kara[0].at<=n){ const k=kara.shift(); if(!capOn) capShow(); karaPut(k); } }
 function karaFlush(){ while(kara.length) karaPut(kara.shift(),true); }
 function karaDrop(){ kara.length=0; }
-function speaking(on){ if(info.voice_native) return; if(info.wake_word||info.barge_in) post('/api/speaking',{on}).catch(()=>{}); }
+// What the page tells the server about its own voice (the server's record of his sound, Wake.talked/owed): {owe:1} a
+// sentence was handed to the player · {on:true,left:s,paid:1} it was scheduled, s seconds of sound to run · {paid:1} it had no
+// audio · {on:false} the sound is over and nothing more is owed. One after another, as the page made them, so a pay can't land
+// before its owe nor a stale pay after a clear. Always, whatever the hearing settings (the page's own hold reads the record).
+let spkPost=Promise.resolve();
+function speaking(body){ if(info.voice_native) return Promise.resolve();
+  return spkPost=spkPost.then(()=>post('/api/speaking',body)).then(()=>{},()=>{}); }
 /* tiny synth blips — soft and short. sfx('wake'|'menu'|'close'|'ok'|'done'|'error'|'remind'|'purr'|'pop') */
 function sfx(name){
   if(!info.sfx) return; let a; try{ a=ac(); }catch(e){ return; }
@@ -1825,10 +1831,10 @@ function sfx(name){
 // tiny fade in/out stops clicks at the joins.
 async function pump(){
   if(pumpGen===gen||!q.length) return; const g=pumpGen=gen;
-  if(!playing){ playing=true; speaking(true); }
+  if(!playing) playing=true;
   while(q.length&&g===gen){
     const it=curIt=q[0], item=await it.p; if(g!==gen) break; q.shift(); curIt=null;
-    if(!item){ if(it.cap) karaNow(it.cap,it.fresh); continue; }           // no audio for this one: just show it
+    if(!item){ speaking({paid:1}); if(it.cap) karaNow(it.cap,it.fresh); continue; }           // no audio for this one: just show it (and it is no longer owed)
     const a=ac(); if(!spkAn){ spkAn=a.createAnalyser(); spkAn.fftSize=1024; spkAn.connect(a.destination); }
     const src=a.createBufferSource(), gn=a.createGain(), r=item.rate||1, dur=item.b.duration/r;
     src.buffer=item.b; src.playbackRate.value=r; src.connect(gn); gn.connect(spkAn);
@@ -1836,6 +1842,7 @@ async function pump(){
     gn.gain.setValueAtTime(0,when); gn.gain.linearRampToValueAtTime(1,when+.006);
     gn.gain.setValueAtTime(1,Math.max(when+.006,when+dur-.01)); gn.gain.linearRampToValueAtTime(0,when+dur);
     src.start(when); srcs.push(src); nextAt=when+dur+(item.pause||.08);
+    speaking({on:true,left:when+dur-a.currentTime+(a.outputLatency||a.baseLatency||0),paid:1});
     src.onended=()=>{ srcs=srcs.filter(x=>x!==src); if(g===gen) quietCheck(); };
     if(it.cap){ const lat=(a.outputLatency||a.baseLatency||0); capSpeak(it.cap,dur,it.fresh,performance.now()+(when-a.currentTime+lat)*1000,item.words,r); }
   }
@@ -1847,12 +1854,12 @@ function quietNative(){ if(!spkMap.size&&playing&&info.voice_native&&!q.length){
 function spkLevel(ts){ for(const L of spkLv){ if(ts>=L.t0&&ts<L.t0+L.level.length*L.step){ return L.level[((ts-L.t0)/L.step)|0]/100; } }
   if(spkLv.length&&ts>spkLv[spkLv.length-1].t0+spkLv[spkLv.length-1].level.length*spkLv[spkLv.length-1].step+2000) spkLv=[];
   return null; }
-function quietCheck(){ if(!srcs.length&&!q.length&&pumpGen!==gen&&playing){ playing=false; speaking(false); } }
+function quietCheck(){ if(!srcs.length&&!q.length&&pumpGen!==gen&&playing){ playing=false; speaking({on:false}); } }
 // shush: stop talking. Anything he hadn't said yet still lands on screen (mute mid-answer, or you cut in)
 function shush(){ gen++; sayEpoch++; const rest=q.splice(0), pend=curIt; curIt=null; karaFlush();
   if(info.voice_native&&(spkMap.size||playing)){ post('/api/say/stop',{epoch:sayEpoch}).catch(()=>{}); for(const it of spkMap.values()) if(it.cap) karaNow(it.cap,it.fresh,true); spkMap.clear(); spkLv=[]; }
   if(pend&&pend.cap) karaNow(pend.cap,pend.fresh,true); for(const it of rest) if(it.cap) karaNow(it.cap,it.fresh,true);
-  for(const x of srcs) try{ x.stop(); }catch(e){} srcs=[]; nextAt=0; pumpGen=-1; if(playing) speaking(false); playing=false; }
+  for(const x of srcs) try{ x.stop(); }catch(e){} srcs=[]; nextAt=0; pumpGen=-1; if(playing) speaking({on:false}); playing=false; }
 const untilQuiet=async()=>{ for(let i=0;i<400 && (playing||q.length);i++) await sleep(100); };
 
 /* ================= his memory of the chat (context) ================= */
