@@ -144,6 +144,11 @@ class Main(unittest.TestCase):
         with mock.patch.object(drops, "LOG", self.log):
             self.assertEqual(self.out("--day", "2026-11-04")[-1], "     1  heard in all; 1 dropped, 0 of them kept now")
 
+    def test_one_log_replays_to_identical_lines(self):
+        first, second = self.out(str(self.log)), self.out(str(self.log))
+        self.assertGreater(len(first), 10)       # (old and stamped, kept and dropped rows went through both runs)
+        self.assertEqual(first, second)
+
     def test_run_as_a_script_it_prints_the_same_report(self):
         buf = io.StringIO()
         with mock.patch.object(sys, "argv", ["drops.py", str(self.log)]), contextlib.redirect_stdout(buf):
