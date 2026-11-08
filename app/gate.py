@@ -44,7 +44,8 @@ class Burst:
     speech: float              # speech_seconds of the burst
     seconds: float             # the burst's length
     kind: str                  # "listen" | "wake" | "follow" | "over" | "peek"
-    talking: bool              # he is talking now
+    talking: bool              # his sound was coming out at some moment of the burst
+    rang: bool                 # his sound, or its ring (ECHO_TAIL after it), was in the air at some moment of the burst
 
 
 @dataclass(frozen=True)
@@ -134,8 +135,8 @@ def judge(b: Burst, spoken: list[str], cfg: dict) -> Verdict:
     # 1. speech share: music or noise, not talking
     if not spoken_enough(b.speech, b.seconds, b.kind):
         return drop("no speech")
-    # 2. echo: his own voice through the mic
-    if is_echo(text, spoken):
+    # 2. echo: his own voice through the mic, only when it was in the air (a burst heard after he went quiet is not)
+    if b.rang and is_echo(text, spoken):
         return drop("echo")
     # 3. stop phrase, said over him or while he talks (a filler "thanks" heard while he talks is the room: 4 has it)
     if b.kind in ("over", "peek") or b.talking:

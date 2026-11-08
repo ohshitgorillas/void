@@ -621,8 +621,11 @@ def _whisper(scene, clean, void_text, you_text):
 
 # ---------------------------------------------------------------- a scene
 
+THEN = "And here is the rest of what I found."     # the second sentence of a line played with play(then=...)
+
+
 def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch_at=None, switch_lat=None,
-         mic_at=None, you_only=None) -> Take:
+         mic_at=None, you_only=None, then=None) -> Take:
     """Play a scene on a simulated clock: `void` (a clip name) goes through the real Speaker player path into PlayRef
     and out of the room's speakers; `you` (a clip name) speaks into the room at `you_at` seconds after Void's voice
     starts coming out of the speakers; `you_only`: (words, seconds) to say only the opening of your clip, its first
@@ -637,7 +640,9 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
     Speaker.LAT, the latency Void assumes; more stands in for speakers slower than he thinks). `mic_at`: seconds
     after his voice starts coming out of the speakers at which the mic session (Wake.session, through a fresh
     open_clean_mic session, with whatever canceller this run has kept) opens, as the always-on mic opens a new one
-    when he starts talking;
+    when he starts talking; `then`: Void is handed a second sentence (the same voice again, as `void` says it) right
+    after his first, and making it takes this many seconds from when he is handed his line (the pause between his
+    sentences while the next is still being made; None: a one-sentence line);
     0 opens it as his voice starts, more while he is already talking. None (the default) opens it at scene time 0,
     before he is handed his line. The Take's `mic_from` says when it opened.
 
@@ -658,6 +663,8 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
         ends = [LEAD_IN]
         if void:
             ends.append(ref + len(void_pcm) / SR)
+            if then is not None:
+                ends.append(max(ref + len(void_pcm) / SR, LEAD_IN + lat + then) + len(void_pcm) / SR + 0.5)
         if you:
             ends.append(ref + you_at + len(you_pcm) / SR)
         if room.music:
@@ -715,7 +722,11 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
         if void:                                                  # (his voice at Kokoro's rate, same duration)
             m = round(len(void_pcm) * VOICE_SR / SR)
             wav = _wav(resample(void_pcm.astype(np.float64), SR, np.arange(m) * SR / VOICE_SR), VOICE_SR)
-            patch(server, "synth", lambda text: (wav, 1.0))
+            def synth(text):
+                if then is not None and text == THEN:
+                    server.time.sleep(then)                   # (the maker takes this long over the second sentence)
+                return wav, 1.0
+            patch(server, "synth", synth)
         if not hear:
             hear_text, hear_speech = _whisper(scene, clean, texts.get(void, "") if void else "", you_text)
             st.enter_context(fakes.ears(server, hear_text, hear_speech))
@@ -724,7 +735,7 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
                      ("epoch", 0), ("proc", None), ("prate", None), ("t0", 0.0), ("written", 0), ("threads", []),
                      ("filled", False), ("stats", {})):
             patch(S, k, v)
-        for k, v in (("talked", []), ("follow_on", False),
+        for k, v in (("talked", []), ("owed", 0), ("seq", 0), ("told", 0.0), ("unsent", False), ("follow_on", False),
                      ("cut", None), ("asleep", False), ("thread", None), ("poke", threading.Event())):
             patch(W, k, v)
         for k, v in (("ring", np.zeros(len(P.ring), np.int16)), ("lo", None), ("hi", None), ("tail", None)):
@@ -736,7 +747,11 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
                 maker = sim.spawn("maker", S._maker, T0)
                 player = sim.spawn("player", S._player_loop, T0)
                 S.threads = [maker.thread, player.thread]          # (so say() finds them running and starts none)
-                sim.spawn("void", lambda: S.say(texts.get(void, ""), 1), T0 + LEAD_IN)
+                def hand_over():
+                    S.say(texts.get(void, ""), 1)
+                    if then is not None:
+                        S.say(THEN, 2)
+                sim.spawn("void", hand_over, T0 + LEAD_IN)
                 if switch_at is not None:
                     switch.actor = sim.spawn("switch", change, T0)
             sim.run(T0 + seconds)

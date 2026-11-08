@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import suite_data  # noqa: E402  (Void's data folder: the suite's own, set before server.py settles it)
 from fakes import hiss, ears  # noqa: E402
 from loopback_http import LoopbackThreadingHTTPServer  # noqa: E402
+from test_hearing import SPK_RATE, FakePlayer, FakeRef  # noqa: E402  (the Speaker player stand-ins)
 
 try:
     import server
@@ -208,32 +209,37 @@ class WakeLoop(unittest.TestCase):
         self.start(barge_in=True)
         self.idle()
         t0 = time.monotonic()
-        self.post("/api/speaking", {"on": True})
+        self.post("/api/speaking", {"on": True, "left": 5})      # (quiet-replies-design.md:71: `left` is his sound)
         self.assert_session_soon(t0, what="/api/speaking on (barge-in)")
 
     def test_speaking_without_barge_in_does_not(self):
         self.start(follow_up=4)                  # wanted only for the follow-up window
         self.idle()
-        self.post("/api/speaking", {"on": True})
+        self.post("/api/speaking", {"on": True, "left": 5})      # (quiet-replies-design.md:71, :76: no window while he sounds)
         time.sleep(0.4)
         self.assertEqual(self.sessions, [])
 
     def test_follow_up_window_opening_starts_a_session(self):
         self.start(follow_up=4)
         self.idle()
-        self.post("/api/speaking", {"on": True})
+        self.post("/api/speaking", {"on": True, "left": 5})
         time.sleep(0.2)
-        self.post("/api/speaking", {"on": False})        # stops talking: window opens 0.8 s from now
-        opens = server.Wake.talked[-1][1] + server.ECHO_TAIL
+        self.assertEqual(self.sessions, [])               # (quiet-replies-design.md:76: closed while he makes sound)
+        opens = time.monotonic()                         # the window opens at the end of his sound (:76)
+        self.post("/api/speaking", {"on": False})        # stops talking: his sound ends now (quiet-replies-design.md:71)
+        posted = time.monotonic()
+        self.assertGreaterEqual(server.Wake.talked[-1][1], opens, "his sound recorded as ending before the `off` post")
+        self.assertLessEqual(server.Wake.talked[-1][1], posted, "his sound recorded as ending after the `off` post")
         self.assertGreater(server.Wake.talked[-1][2], opens)
-        self.assertEqual(self.sessions, [])
         self.assert_session_soon(opens, what="the follow-up window opening")
 
     def test_talking_until_sets_follow_window_directly(self):  # (what the server-side Speaker calls per sentence)
         self.start(follow_up=4)
         self.idle()
-        server.Wake.talking_until(time.monotonic() + 0.3)
-        self.assert_session_soon(server.Wake.talked[-1][1] + server.ECHO_TAIL, what="Wake.talking_until's follow-up window")
+        ends = time.monotonic() + 0.3
+        server.Wake.talking_until(ends)
+        # (quiet-replies-design.md:76: the window opens at the end of his sound, not after the ring)
+        self.assert_session_soon(ends, what="Wake.talking_until's follow-up window")
 
     # ---- 3. switched off: the loop ends promptly, even while waiting
     def test_switching_everything_off_ends_the_loop(self):
@@ -416,7 +422,7 @@ class FollowUpGate(unittest.TestCase):
         server.Wake.talked = [[now, now + 5, now + 5]]           # (no follow-up window after it)
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            stopped = server.Wake.stop_in(pcm)
+            stopped = server.Wake.stop_in(pcm, now)
         events = []
         while not self.q.empty():
             events.append(self.q.get_nowait())
@@ -449,7 +455,7 @@ class FollowUpGate(unittest.TestCase):
         self.heard_text[pcm] = SAID["you_hey_void.wav"]
         server.Wake.talked = []
         with contextlib.redirect_stderr(io.StringIO()):
-            said = server.Wake.heard(pcm)
+            said = server.Wake.heard(pcm, time.monotonic())
         self.assertEqual(len(calls), 1, f"gate.judge called {len(calls)}x on one quick listen")
         self.assertIsInstance(calls[0], gate.Burst, f"gate.judge not handed a gate.Burst: {calls[0]!r}")
         self.assertEqual(calls[0].kind, "wake", f"the quick listen not judged as a 'wake' burst: {calls[0]!r}")
@@ -605,6 +611,329 @@ class WhisperHeard(unittest.TestCase):
             heard = self.run_on("Open the", "Downloads folder.")
         self.assertEqual(len(seen), 1, f"gate.sure called {len(seen)}x on one transcription")
         self.assertEqual(heard.text, "Downloads folder.", "the text isn't made of the segments gate.sure kept")
+
+
+@unittest.skipIf(server is None, f"server.py doesn't import here: {IMPORT_ERR}")
+class PageSpeaking(unittest.TestCase):
+    """/api/speaking as the page posts it: `on` with the seconds of his scheduled sound still to come, per sentence it
+    schedules, and `off` once playback is quiet. His span is that sound, and nothing more."""
+
+    def setUp(self):
+        W = server.Wake
+        saved = {k: W.__dict__[k] for k in ("talked", "cut", "owed")}
+        self.addCleanup(lambda: [setattr(W, k, v) for k, v in saved.items()])
+        W.talked, W.cut, W.owed = [], None, 0
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.clock = [1000.0]
+        self.pub = mock.Mock()
+        self.text = ""
+        for p in (mock.patch.dict(server.CFG, {"wake_word": False, "barge_in": False, "follow_up": 30}),
+                  mock.patch.object(server, "time", mock.Mock(wraps=time, monotonic=lambda: self.clock[0])),
+                  mock.patch.object(server, "CONF_PATH", Path(tmp.name) / "config.json"),
+                  mock.patch.object(server, "state_info", lambda: {}),
+                  mock.patch.object(server, "whisper", lambda: None),
+                  mock.patch.object(server, "SPOKEN", type(server.SPOKEN)()),
+                  mock.patch.object(server.BUS, "pub", self.pub),
+                  mock.patch.object(server.MicAuto, "learn", lambda pcm: None),
+                  mock.patch.object(server.Speaker, "idle", classmethod(lambda cls: True)),
+                  mock.patch.object(server.Speaker, "stop", classmethod(lambda cls: None)),
+                  mock.patch.object(W, "ensure", classmethod(lambda cls: None)),
+                  mock.patch.object(W, "session", classmethod(lambda cls: None))):
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(ears(server, lambda pcm: self.text).close)
+        self.srv = LoopbackThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        self.srv.daemon_threads = True
+        threading.Thread(target=self.srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+        self.addCleanup(self.srv.server_close)
+        self.addCleanup(self.srv.shutdown)
+
+    def call(self, path, body):
+        """POST `body` to `path`. → the JSON reply."""
+        c = http.client.HTTPConnection("127.0.0.1", self.srv.server_address[1], timeout=10)
+        c.request("POST", path, body=json.dumps(body),
+                  headers={"X-Void-Token": server.TOKEN, "Content-Type": "application/json"})
+        r = c.getresponse()
+        data = r.read()
+        c.close()
+        self.assertEqual(r.status, 200, data)
+        return json.loads(data)
+
+    def speaking(self, body):
+        return self.call("/api/speaking", body)
+
+    def told(self):
+        """The copies of the record published so far (BUS, t="voice")."""
+        return [c.kwargs for c in self.pub.call_args_list if c.kwargs.get("t") == "voice"]
+
+    def test_speaking_on_records_talking_until_now_plus_left(self):
+        calls, real = [], server.Wake.__dict__["talking_until"].__func__
+        with mock.patch.object(server.Wake, "talking_until",
+                               classmethod(lambda cls, t, *a, **k: calls.append(t) or real(cls, t, *a, **k))):
+            self.speaking({"on": True, "left": 2.5})
+            self.clock[0] = 1001.0
+            self.speaking({"on": True, "left": 0.4})
+        self.assertEqual(len(calls), 2, f"talking_until called {len(calls)}x for two posts: {calls}")
+        self.assertAlmostEqual(calls[0], 1002.5, delta=1e-6)
+        self.assertAlmostEqual(calls[1], 1001.4, delta=1e-6)
+        spans = [list(s) for s in server.Wake.talked]
+        self.assertTrue(spans, "nothing recorded in Wake.talked for two `on` posts")
+        self.assertTrue(all(1000.0 - 1e-6 <= s[0] <= s[1] for s in spans), f"a span begun before the first post: {spans}")
+        self.assertLessEqual(max(s[1] for s in spans), 1002.5 + 1e-6, f"a span past any sound the page posted: {spans}")
+        self.assertAlmostEqual(spans[-1][1], 1001.4, delta=1e-6,
+                               msg=f"his sound doesn't end where the page last said it would: {spans}")
+        self.assertLessEqual(max(s[2] for s in spans), 1002.5 + server.ECHO_TAIL + 30 + 1e-6,
+                             f"a span held open past his sound's ring and follow-up: {spans}")
+
+    def test_owe_and_paid_count_the_sentences_handed_to_the_page_s_player(self):
+        W = server.Wake
+        self.speaking({"owe": 1})
+        self.speaking({"owe": 1})
+        self.assertEqual((W.owed, W.talked), (2, []), "an owe made a span, or didn't count")
+        self.speaking({"on": True, "left": 1, "paid": 1})
+        self.assertEqual(W.owed, 1)
+        self.assertAlmostEqual(W.talked[-1][1] - W.talked[-1][0], 1.0, delta=1e-6)
+        self.speaking({"paid": 1})
+        self.assertEqual((W.owed, len(W.talked)), (0, 1), "a pay alone moved the span, or didn't count")
+        self.speaking({"paid": 1})
+        self.assertEqual(W.owed, 0, "a pay with nothing owed went below 0")
+
+    def test_a_post_with_left_publishes_where_his_sound_ends_and_the_replies_carry_the_record(self):
+        for body in ({"owe": 1}, {"on": True, "left": 1.5, "paid": 1}, {"paid": 1}, {"on": False}):
+            reply = self.speaking(body)
+            self.assertEqual(sorted(k for k in reply if k != "ok"), ["left", "n", "owed"], f"{body}: reply {reply}")
+        events = self.told()
+        self.assertEqual([(e["left"], e["owed"]) for e in events], [(0.0, 1), (1.5, 0), (1.5, 0), (0.0, 0)],
+                         "a change of the record wasn't published once, with its new left and owed")
+
+    def test_n_rises_strictly_across_the_events_and_the_replies(self):
+        order = []
+        for body in ({"owe": 1}, {"on": True, "left": 1.5, "paid": 1}, {"on": False}):
+            before = len(self.told())
+            reply = self.speaking(body)
+            order += [e["n"] for e in self.told()[before:]] + [reply["n"]]
+        self.assertEqual(order, sorted(set(order)), f"n didn't rise strictly: {order}")
+        self.assertGreater(len(order), 3)
+
+    def test_say_and_say_stop_reply_with_the_record(self):
+        S = server.Speaker
+        for k in ("todo", "ready", "epoch"):
+            p = mock.patch.object(S, k, [] if k != "epoch" else 0)
+            p.start()
+            self.addCleanup(p.stop)
+        for p in (mock.patch.object(S, "_start", classmethod(lambda cls: None)),
+                  mock.patch.object(S, "stop", classmethod(lambda cls, epoch=None: None)),
+                  mock.patch.object(server, "tts_engine", lambda: True)):
+            p.start()
+            self.addCleanup(p.stop)
+        reply = self.call("/api/say", {"text": "Hello there.", "id": 1})
+        self.assertEqual((reply["owed"], reply["left"]), (1, 0.0), f"/api/say reply: {reply}")
+        self.assertIn("n", reply)
+        stop = self.call("/api/say/stop", {})                 # (Speaker.stop is stubbed: the reply only reports the record)
+        self.assertEqual(sorted(k for k in stop if k != "ok"), ["left", "n", "owed"])
+        self.assertGreater(stop["n"], reply["n"])
+
+    def test_off_ends_his_sound_now_and_clears_what_he_owed(self):
+        W = server.Wake
+        self.speaking({"owe": 1})
+        self.speaking({"owe": 1})
+        self.speaking({"on": True, "left": 5})
+        self.speaking({"on": False})
+        self.assertEqual(W.owed, 0)
+        self.assertAlmostEqual(W.talked[-1][1], self.clock[0], delta=1e-6)
+
+    def test_its_good_said_after_the_page_went_quiet_is_a_follow_up(self):
+        """The 27 Oct reply: 'while talking (over): It's good', said after his last sound, in the ring and after it."""
+        burst = bytes(int(server.RATE * 2 * 1.9))
+        got = []
+        for after in (0.1, server.ECHO_TAIL + 0.2):                    # began in the ring / after it
+            server.Wake.talked = []
+            server.note_spoken("Both albums are in the 30K folder now, next to the original pressing.")
+            self.clock[0] = 1000.0
+            self.speaking({"on": True, "left": 1.5})                   # his first sentence, scheduled
+            self.clock[0] = 1000.1
+            self.speaking({"on": True, "left": 3.2})                   # his last, scheduled after it: sound to 1003.3
+            self.clock[0] = 1003.3
+            self.speaking({"on": False})                               # playback quiet
+            began = 1003.3 + after
+            self.clock[0] = began + 1.9 + 0.4
+            import gate
+            judged, real = [], gate.judge
+            err = io.StringIO()
+            self.text = "It's good"
+            self.pub.reset_mock()
+            with mock.patch.object(gate, "judge", lambda b, *a: judged.append(b) or real(b, *a)), \
+                    contextlib.redirect_stderr(err):
+                server.Wake.check(burst, began, ended=began + 1.9)
+            events = [(c.kwargs.get("t"), c.kwargs.get("text"), c.kwargs.get("follow")) for c in self.pub.call_args_list]
+            log = [ln for ln in err.getvalue().splitlines() if ln.startswith("[void]")]
+            got.append((round(after, 1), events, [b.kind for b in judged],
+                        any("while talking" in ln for ln in log)))
+        self.assertEqual(got, [(round(after, 1), [("wake", "It's good", True)], ["follow"], False)
+                               for after in (0.1, server.ECHO_TAIL + 0.2)])
+
+
+SPK_STEP_BYTES = 640                    # (two 20 ms chunks at SPK_RATE)
+
+
+class _Done(BaseException):
+    """Ends a Speaker worker after it has handled what it was given (raised by its Condition when it would wait)."""
+
+
+class _OneRound(threading.Condition):
+    def wait(self, timeout=None):
+        raise _Done
+
+
+@unittest.skipIf(server is None, f"server.py doesn't import here: {IMPORT_ERR}")
+class NativeOwed(unittest.TestCase):
+    """Wake.owed with the native Speaker: Speaker.say owes the sentence, the first chunk of its sound pays it (inside
+    the Wake.talking call that records the chunk), every road that ends it with no sound pays it too, and a sentence
+    dropped as stale pays nothing (Speaker.stop's hush settled it). Wake.air reads none of it."""
+
+    def setUp(self):
+        S, W = server.Speaker, server.Wake
+        saved = {k: W.__dict__[k] for k in ("talked", "owed")}
+        self.addCleanup(lambda: [setattr(W, k, v) for k, v in saved.items()])
+        W.talked, W.owed = [], 0
+        self.clock = [100.0]
+        self.player = FakePlayer(self.clock)
+        self.q = server.BUS.sub()
+        self.addCleanup(server.BUS.unsub, self.q)
+        for k, v in (("gen", 7), ("epoch", 0), ("proc", self.player), ("prate", SPK_RATE), ("written", 1000),
+                     ("t0", 100.0), ("filled", False), ("stats", {}), ("todo", []), ("ready", []), ("making", False),
+                     ("cv", _OneRound())):
+            self.patch(S, k, v)
+        self.patch(S, "_start", classmethod(lambda cls: None))
+        self.patch(server, "time", mock.Mock(wraps=time, monotonic=lambda: self.clock[0],
+                                             sleep=lambda s: self.clock.__setitem__(0, self.clock[0] + s)))
+        self.patch(server.hearing, "PlayRef", FakeRef())
+        self.patch(server, "SPOKEN", type(server.SPOKEN)())
+        self.patch(W, "nudge", classmethod(lambda cls: None))
+
+    def events(self, kind="voice"):
+        """The BUS events of `kind` published since the last call."""
+        got = []
+        while not self.q.empty():
+            got.append(self.q.get_nowait())
+        return [e for e in got if e.get("t") == kind]
+
+    def patch(self, obj, name, value):
+        p = mock.patch.object(obj, name, value)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def work(self, loop):
+        """Run a Speaker worker on a thread until it would wait for more."""
+        def run():
+            try:
+                loop()
+            except _Done:
+                pass
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        t.join(10)
+        self.assertFalse(t.is_alive(), "the Speaker worker didn't finish its round")
+
+    def made(self, text="Hello there.", pcm=b"\x01\x00" * 800):
+        """A sentence the maker has finished: waiting in `ready` for the player."""
+        server.Speaker.ready.append((server.Speaker.gen, 1, text, pcm, SPK_RATE, None, 0.0, 0.0))
+
+    def test_say_owes_the_sentence_and_changes_nothing_else(self):
+        server.Speaker.say("Hello there.", 1)
+        self.assertEqual(server.Wake.owed, 1)
+        self.assertEqual((server.Wake.talked, server.Wake.air(0.0, 1e6)), ([], (False, False)),
+                         "owing a sentence put sound in the record, or in the air")
+
+    def test_a_sentence_sent_before_the_cut_off_is_not_owed(self):
+        server.Speaker.epoch = 3
+        server.Speaker.say("Hello there.", 1, epoch=2)
+        self.assertEqual(server.Wake.owed, 0)
+
+    def test_its_first_sound_chunk_pays_it_in_the_same_change_as_the_span(self):
+        server.Speaker.say("Hello there.", 1)
+        self.made()
+        seen, real = [], server.Wake.__dict__["talking"].__func__
+
+        def talking(cls, *a, **k):
+            before = cls.owed
+            r = real(cls, *a, **k)
+            seen.append((before, cls.owed, len(cls.talked)))
+            return r
+        with mock.patch.object(server.Wake, "talking", classmethod(talking)):
+            self.work(server.Speaker._player_loop)
+        self.assertGreater(len(seen), 1, "the sentence was written in one chunk")
+        self.assertEqual(seen[0], (1, 0, 1), "the first chunk didn't pay the sentence and add its span in one call")
+        self.assertTrue(all(b == 0 and a == 0 for b, a, _ in seen[1:]), f"a later chunk moved the owe: {seen}")
+
+    def test_a_sentence_with_no_samples_pays(self):
+        server.Speaker.say("Hello there.", 1)
+        self.made(pcm=b"")
+        self.work(server.Speaker._player_loop)
+        self.assertEqual((server.Wake.owed, server.Wake.talked), (0, []))
+
+    def test_a_failing_player_pays(self):
+        server.Speaker.say("Hello there.", 1)
+        self.made()
+        with mock.patch.object(server.Speaker, "_player", classmethod(lambda cls, rate: 1 / 0)), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.work(server.Speaker._player_loop)
+        self.assertEqual(server.Wake.owed, 0)
+        self.assertEqual([e["id"] for e in self.events("spk_skip")], [1])
+
+    def test_a_failing_synth_pays(self):
+        server.Speaker.say("Hello there.", 1)
+        with mock.patch.object(server, "synth", lambda text: 1 / 0), contextlib.redirect_stderr(io.StringIO()):
+            self.work(server.Speaker._maker)
+        self.assertEqual(server.Wake.owed, 0)
+        self.assertEqual([e["id"] for e in self.events("spk_skip")], [1])
+
+    def test_a_sentence_dropped_as_stale_leaves_the_next_ones_owe(self):
+        server.Speaker.say("First one.", 1)
+        server.Speaker.stop()                                     # (the maker had already taken the first one)
+        self.assertEqual(server.Wake.owed, 0, "a cut-off left a sentence owed")
+        server.Speaker.say("Second one.", 2)
+        server.Speaker.todo[:] = [(7, 1, "First one.")]           # (the old generation's, which the maker had taken; the
+                                                                  # second is on its way, owed, not in this maker's hands)
+        self.work(server.Speaker._maker)
+        self.assertEqual(server.Wake.owed, 1, "a stale sentence paid the next one's owe")
+
+    def test_hush_clears_what_he_owed(self):
+        server.Wake.owe()
+        server.Wake.owe()
+        server.Wake.hush()
+        self.assertEqual(server.Wake.owed, 0)
+
+    # ---- the copies of the record the page is told
+    def test_two_seconds_of_sound_are_told_at_a_bounded_rate_and_the_last_copy_has_the_true_end(self):
+        data = bytes(SPK_RATE * 2 * 2)                              # 2 s, written in 20 ms chunks
+        self.assertTrue(server.Speaker._write(data, 7))
+        events = self.events()
+        self.assertGreater(len(events), 1, "the page was told once for two seconds of sound")
+        self.assertLessEqual(len(events), 2 * 10 + 2, f"{len(events)} copies for two seconds of sound")
+        self.assertTrue(all(e["left"] > 0 for e in events), f"the page was told he'd gone quiet mid-sound: {events}")
+        self.assertAlmostEqual(self.clock[0] + events[-1]["left"], server.Wake.talked[-1][1], delta=0.05,
+                               msg="the last copy doesn't put his end where the record has it")
+        ns = [e["n"] for e in events]
+        self.assertEqual(ns, sorted(set(ns)), "n didn't rise strictly")
+
+    def test_an_owe_a_pay_and_a_cut_off_each_publish_at_once(self):
+        W = server.Wake
+        W.owe()
+        W.owe()
+        W.pay()
+        W.talking(self.clock[0], self.clock[0] + 5)
+        W.hush(self.clock[0])
+        self.assertEqual([(e["left"], e["owed"]) for e in self.events()],
+                         [(0.0, 1), (0.0, 2), (0.0, 1), (5.0, 1), (0.0, 0)])
+
+    def test_the_first_chunk_pays_and_tells_in_one_copy(self):
+        server.Wake.owe()
+        self.events()                                               # (the owe's own copy)
+        server.Speaker._write(bytes(SPK_STEP_BYTES), 7, owe=[True])
+        first = self.events()[0]
+        self.assertEqual((first["owed"], first["left"] > 0), (0, True), f"the copy showed the sentence neither owed nor sounding: {first}")
 
 
 if __name__ == "__main__":

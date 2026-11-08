@@ -54,6 +54,8 @@ SWITCH = 3.0                # the speakers change this long after his voice star
 DELAYS = (0.010, 0.020, 0.030, 0.040)   # speakers this far off Speaker.LAT: the range real hardware lands in
 FIRST = 1.0                 # the first this-many seconds of every warm mic session must already have his echo out
 MID_VOICE = 2.0             # a session that opens while he is already talking opens this far into his voice
+HOLD = 16.0                 # his second sentence takes this long to make: longer than your reply and the quiet after it
+REPLY = "Yes, that sounds good to me."   # (words of its own: not his, so the echo test has nothing to drop)
 CUT_IN = (1.0, 2.0, 3.0, 4.0)   # you tell him to stop this far into his voice (he talks for 7.7 s)
 SAID = {                    # each way to stop him, said on its own, as people say it: its words and how long they take
     "interrupt_stop": ("Stop, stop.", 1.02),
@@ -194,6 +196,81 @@ class FastScenes(FreshRun):
             t = scenes.play(scenes.Room(), void=SCENES["void_alone"]["void"])
         log = [ln for ln in err.getvalue().splitlines() if ln.startswith("[void]")]
         self.assertEqual(did(t), [], f"Void acted on his own voice:{instead(t, log)}")
+
+    # ---- his own line heard back: echo only while his sound or its ring (ECHO_TAIL) was in the air
+    def _heard_echo_scene(self, you_at):
+        """Void says `void_question`; your clip says his very words, `you_at` seconds into his voice (the stand-in
+        Whisper hears his words wherever he or you said them): → the Take and the "[void]" log it made."""
+        sc = SCENES["answer_after"]
+        his = CLIPS[sc["void"]]["text"]
+        scenes.warm_up(scenes.Room())                              # (he has already spoken in this run)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            t = scenes.play(scenes.Room(), void=sc["void"], you=sc["you"], you_at=you_at, you_only=(his, 2.4))
+        return t, [ln for ln in err.getvalue().splitlines() if ln.startswith("[void]")]
+
+    def _echo_verdicts(self, log, kind):
+        return [ln for ln in log if f"echo ({kind}): " in ln]
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_his_line_heard_back_while_it_plays_is_dropped_as_echo(self):
+        t, log = self._heard_echo_scene(you_at=seconds(SCENES["answer_after"]["void"]) / 2)
+        self.assertTrue(any("echo (" in ln for ln in log), f"his line heard over him wasn't dropped as echo:{instead(t, log)}")
+        self.assertEqual(did(t), [], f"Void acted on his own line heard back:{instead(t, log)}")
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_his_line_heard_half_a_second_after_his_sound_ends_is_dropped_as_echo(self):
+        t, log = self._heard_echo_scene(you_at=seconds(SCENES["answer_after"]["void"]) + AFTER)
+        self.assertTrue(self._echo_verdicts(log, "follow"), f"his line heard in his ring wasn't dropped as echo:{instead(t, log)}")
+        self.assertEqual(did(t), [], f"Void acted on his own line heard back:{instead(t, log)}")
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_the_same_text_heard_a_second_and_a_half_after_his_sound_ends_is_kept(self):
+        t, log = self._heard_echo_scene(you_at=seconds(SCENES["answer_after"]["void"]) + 1.5)
+        self.assertEqual(self._echo_verdicts(log, "follow"), [], f"words heard clear of him were dropped as echo:{instead(t, log)}")
+        self.assertTrue([e for e in did(t) if e["t"] == "wake" and e.get("follow")],
+                        f"the words heard 1.5 s after he went quiet weren't kept as a follow-up:{instead(t, log)}")
+
+    # ---- a reply never cuts him off: kept while his next sentence is still being made, his line plays on
+    def _two_sentence_line(self, you, you_at, you_only):
+        """Void says `void_question`, then a second sentence that takes HOLD s to make (the pause between his
+        sentences); → the Take and the "[void]" log it made."""
+        sc = SCENES["answer_after"]
+        scenes.warm_up(scenes.Room())                              # (he has already spoken in this run)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            t = scenes.play(scenes.Room(), void=sc["void"], you=you, you_at=you_at, you_only=you_only, then=HOLD)
+        return t, [ln for ln in err.getvalue().splitlines() if ln.startswith("[void]")]
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_a_reply_in_the_pause_before_his_next_sentence_is_kept_and_his_line_plays_to_its_last_chunk(self):
+        sc = SCENES["answer_after"]
+        one = seconds(sc["void"])
+        t, log = self._two_sentence_line(sc["you"], one + AFTER, (REPLY, seconds(sc["you"])))
+        kept = [i for i, e in enumerate(t.events) if e["t"] == "wake" and e.get("follow")]
+        self.assertEqual(len(kept), 1, f"the reply wasn't kept as one follow-up:{instead(t, log)}")
+        self.assertEqual([e for e in t.events if e["t"] == "barge"], [], f"the reply stopped him:{instead(t, log)}")
+        owed = [e["owed"] for e in t.events[:kept[0]] if e["t"] == "voice"]
+        self.assertEqual(owed[-1:], [1], "when the reply was kept, his next sentence wasn't the one sentence owed")
+        self.assertGreaterEqual(t.void_end, t.events[kept[0]]["scene_at"] + one - 1.0,
+                                f"his next sentence didn't play to its last chunk after the reply was kept: his sound "
+                                f"ended at {t.void_end:.1f} s, the reply was kept at {t.events[kept[0]]['scene_at']:.1f} s")
+
+    def _stops_the_line(self, name):
+        sc, (words, length) = SCENES[name], SAID[name]
+        t, log = self._two_sentence_line(sc["you"], CUT_IN[1], (words, length))
+        self.assertTrue(any(e["t"] == "barge" for e in t.events), f"\"{words}\" over him didn't stop him:{instead(t, log)}")
+        self.assertLessEqual(t.void_end - t.void_start, CUT_IN[1] + PROMPT + 0.5,
+                             f"\"{words}\" over him didn't end his playback before his line's end: his sound ran "
+                             f"{t.void_end - t.void_start:.1f} s of {2 * seconds(sc['void']):.1f} s")
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_stop_said_over_his_line_ends_his_playback_before_the_line_ends(self):
+        self._stops_the_line("interrupt_stop")
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_hey_void_said_over_his_line_ends_his_playback_before_the_line_ends(self):
+        self._stops_the_line("interrupt_hey_void")
 
     def test_passes_the_mic_through_unchanged_without_the_canceller(self):
         sc = SCENES["interrupt_stop"]

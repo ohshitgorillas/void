@@ -8,8 +8,11 @@ every hear and verdict line); without it every verdict line in the log is listed
     <line>  <time>  <why> (<kind>)  ->  <now>  <what was heard>
 
 where <why> is the verdict as logged ("kept" for a burst that got through) and <now> is "KEPT" when today's gate would
-keep it, "drops: <why>" when it drops, or "as logged" when the log doesn't hold what the check needs (echo needs his
-words, low confidence needs Whisper's numbers, a sentence looping needs more than the 80 characters the log keeps).
+keep it, "drops: <why>" when it drops, or "as logged" when the log doesn't hold what the check needs (an echo drop heard
+with his voice in the air needs his words, which the log doesn't keep; low confidence needs Whisper's numbers, a sentence
+looping needs more than the 80 characters the log keeps). An echo drop whose own heard line shows it clear of him is
+judged again, as heard after he went quiet (echo is only ever judged on a burst that rang); one with no heard line of
+its own is "as logged", because nothing in the log shows it clear of him.
 Older logs, from before the stamp, are read too, for their drops: their lines name the drop in words of their own
 ("ignored while talking", "dropped follow-up, not your voice (voice 0.43)"), mapped here onto gate.WHY. Their kept lines
 ("follow-up request ...") are not listed.
@@ -36,7 +39,7 @@ OLD = [(re.compile(r"^dropped follow-up, (?P<why>[a-z ]+?)" + SCORE + r": (?P<te
        (re.compile(r"^dropped as noise: (?P<text>.*)$"), "noise", None),
        (re.compile(r"^dropped echo of own speech: (?P<text>.*)$"), "echo", None)]
 GONE = {"not your voice", "stray word"}           # drops no check makes any more
-UNSEEN = {"echo", "no speech", "low confidence"}  # drops whose inputs the log doesn't hold
+UNSEEN = {"no speech", "low confidence"}  # drops whose inputs the log doesn't hold (echo: only when it rang, see now)
 CUT = 80                                          # the log keeps this many characters of what was heard
 
 
@@ -67,14 +70,19 @@ def _kind(flags):
     return "follow" if "follow-up" in flags else "over" if "while talking" in flags else "wake"
 
 
-def now(why, kind, text, talking=False):
+def rang(flags: str, kind: str) -> bool:
+    """The one reading of a logged burst's flags: it was heard with his sound, or its ring, in the air."""
+    return kind in ("over", "peek") or any(f in flags for f in ("while talking", "after his last word", "in his echo"))
+
+
+def now(why, kind, text, talking=False, rang=True):
     """What gate.judge makes of a logged verdict today, from what the log holds (`talking`: he still was when it was
-    judged, as its heard line says)."""
-    if why in UNSEEN:
+    judged, as its heard line says; `rang`: his sound or its ring was in the air, as drops.rang reads it)."""
+    if why in UNSEEN or (why == "echo" and rang):         # (an echo that rang needs his words, which the log lacks)
         return "as logged"
     # (a burst that reached its check had speech enough; Whisper's numbers aren't logged, so a follow-up is judged on
     # its words, which is how it reached the voiceprint: its confidence had passed)
-    b = gate.Burst(text=text, heard=None, speech=1.0, seconds=1.0, kind=kind, talking=talking)
+    b = gate.Burst(text=text, heard=None, speech=1.0, seconds=1.0, kind=kind, talking=talking, rang=rang)
     v = gate.judge(b, [], {"voice_gate": True})
     if len(text) >= CUT and (why == "noise" or (why == "kept" and v.why == "noise")):
         return "as logged"       # (a sentence looping needs all of it)
@@ -84,7 +92,7 @@ def now(why, kind, text, talking=False):
 def replay(lines, day=None):
     """Every verdict line in `lines` (a log's lines, in order), kept or dropped, as Drops. `day`: only lines stamped
     that day."""
-    out, flags = [], ""
+    out, flags = [], None                        # (flags: of the heard line just before this one, else None)
     for n, line in enumerate(lines, 1):
         m = LINE.match(line)
         if not m:
@@ -95,11 +103,16 @@ def replay(lines, day=None):
             flags = h.group("flags")
             continue
         got = parse(rest)
-        if got is None or (day and not at.startswith(day)):
+        if got is None:
+            continue
+        mine, flags = flags, None                # (a heard line pairs with the one verdict line after it)
+        if day and not at.startswith(day):
             continue
         why, kind, text = got
-        kind = kind or _kind(flags)
-        out.append(Drop(n, at, why, kind, text, now(why, kind, text, "while talking" in flags)))
+        kind = kind or _kind(mine or "")
+        # (no heard line of its own: nothing in the log shows it clear of him, so an echo replays as logged)
+        out.append(Drop(n, at, why, kind, text, now(why, kind, text, "while talking" in (mine or ""),
+                                                     mine is None or rang(mine, kind))))
     return out
 
 
