@@ -67,6 +67,8 @@ Deferred. Tracked, not in the current roadmap.
 | SPLIT-02 | Phase 2 | Complete |
 | SPLIT-03 | Phase 2 | Complete |
 | HEAR-05 | Phase 3 | Complete |
+| HEAR-01 | Phase 4 | Pending |
+| HEAR-02 | Phase 4 | Pending |
 
 Bare headers - `/cad-plan` seeds a row per requirement when its phase is planned (`references/req-traceability.md`).
 

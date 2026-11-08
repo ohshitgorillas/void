@@ -18,7 +18,7 @@ page's hold and its tests).
 
 ## Durable decisions
 
-- D-01 (One record): `Wake.talked` in `app/server.py` is the one record of when Void's sound is coming out of the
+- D-01 (One record; amended by D-10 and D-11): `Wake.talked` in `app/server.py` is the one record of when Void's sound is coming out of the
   speakers; it holds his sound only, never the ring. Two writers feed it: `Speaker._write` (sound chunks) and
   `/api/speaking` (`{"on": true, "left": <s>}` from the page's player, `{"on": false}` ends it now). Every "is he making
   sound" test reads it: the server's `Burst` timing through `Wake.air`, and the page's hold, which gets it from the
@@ -64,6 +64,26 @@ page's hold and its tests).
 - D-09 (Replay): `drops.py` builds each replayed `Burst` with `rang` from one reading of the logged flags; a verdict
   resting on what the log never recorded still prints "as logged". Evidence: branch diff of `app/drops.py`
   (`drops.rang`); `app/drops.py:77`; Phase 3 D-06.
+- D-10 (D-01 amended: what he still owes): the record of Void's voice has two parts, both in `Wake`. `Wake.talked`
+  holds his sound only, never the ring; `Wake.air` and the gate read nothing else, and D-06's rule on the pause after a
+  sentence stands for it. `Wake.owed` holds every sentence handed to a player whose sound has not begun. Native:
+  `Speaker.say` adds it; it is paid inside the same `Wake.talking` call that records its first sound chunk, or when it
+  is skipped or dropped. Page voice: `enqueue` posts `/api/speaking {"owe": 1}`, and `pump` posts
+  `{"on": true, "left": s, "paid": 1}` for each sentence it schedules, or `{"paid": 1}` for one with no audio.
+  `Wake.hush` and `{"on": false}` clear what is owed. Each record change publishes Plan 1 Task 7's event, carrying
+  `left`, `owed` and a sequence number `n`; `/api/say`, `/api/say/stop` and `/api/speaking` return the same fields. The
+  page's one test `sounding()` is true while the newest record copy shows sound ahead or `owed > 0`, or while one of its
+  own hand-off posts is unanswered (`handing > 0`, raised in `enqueue`, lowered when that post settles or is skipped).
+  Nothing tests `playing`, `q.length` or `spkMap.size` as a wait for him. Closes the mid-answer gap the plan review
+  found (a reply held while his next sentence is still being made going out before his line ends; AC3). Architect
+  ruling under the 26 Oct ruling, 2026-11-07. Evidence: `app/server.py:1535`-`1546` (paid and first span under
+  `talk_lock`), `app/server.py:2380`, `:2402`, `:2488` (sentence waiting before sound), `app/server.py:2406`, `:2496`,
+  `:3680` (native skips); `app/static/index.html:1754` (chained `/api/say` posts), `:2229`, `:2241` (`busy=false`
+  before the last `flush(true)`).
+- D-11 (No start-bound): `untilQuiet` and `whenQuiet` wait only while `sounding()`, which is already true right after
+  `enqueue` (D-10); their 40 s and 60 s caps remain the only time limits. A sentence with no audio ends the wait by its
+  paid mark. Architect ruling, 2026-11-07. Evidence: `app/static/index.html:1907`, `:2282` (caps), `:1881` (no-audio
+  sentence).
 
 ## Acceptance criteria
 
