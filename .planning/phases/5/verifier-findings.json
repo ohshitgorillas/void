@@ -1,0 +1,108 @@
+{
+  "status": "gaps",
+  "score": "6/8",
+  "truths": [
+    {
+      "n": 1,
+      "truth": "The server boots from clean state and the suite exits 0 on a clean runner (CI tests job)",
+      "status": "FAILED",
+      "uat_item": 1,
+      "evidence": "Not observed, which is not the same as observed failing. Under the testing policy it counts as a gap. The boot tests (tests/test_quit.py:187 test_quit_stops_the_server_it_started_and_its_children, :198) start a real server, which this verifier may not do, and the dispatch reserved the full-suite run for the main session. The CI tests job (.github/workflows/tests.yml) has not run on this code because nothing was pushed. SUMMARY.md ends 'complete locally, not CI-verified'. The only record of a passing suite on HEAD's code is SUMMARY's claim (813 passed / 15 skipped after merge 691f604). coverage.json (mtime 14:15, after the merge at 14:10) shows a run took place but not its exit code."
+    },
+    {
+      "n": 2,
+      "truth": "AC1 / HEAR-03: his own stop phrase heard back, during the line and in the ring after, goes through Wake.stop_in and Wake.check, never stops him, and starts no turn, on both the native Speaker and the page's player",
+      "status": "VERIFIED",
+      "uat_item": 2,
+      "evidence": "Ran tests/test_scenes.py::FastScenes::test_his_own_stop_phrase_heard_back_never_stops_him_on_the_native_path and ..._on_the_page_path: both PASSED. The scene (tests/test_scenes.py:342-372) asserts an 'echo (peek)' drop of a stop phrase under ECHO_MIN words, a closing stop phrase ending within ECHO_TAIL judged by Wake.check ('echo (over|follow)'), did(t)==[], and that his sound plays to the line's last chunk. It then reruns with gate.own_stop patched to False and asserts a barge, so the rule is what holds him. Wiring: app/server.py:1901, :1918, :1987 pass played_lately() and h.words into gate.judge. The drop is at app/gate.py:188 (own_stop gated on kind != 'listen' and words not None). tests/test_echo.py::Callers (3 tests) PASSED. Caveat (plan-3 report, open item 5): on the page path the closing 9 s burst in Wake.check is dropped by is_echo's text, so there the rule decides only at the stop peeks. The slow real-Whisper twins (:617, :620) were skipped, not run here."
+    },
+    {
+      "n": 3,
+      "truth": "AC2 / HEAR-04: the owner's 'Stop, stop.' starting just past ECHO_WORD after his played stop stops his playback before the line ends, on both paths",
+      "status": "VERIFIED",
+      "uat_item": 3,
+      "evidence": "Ran tests/test_scenes.py::FastScenes::test_stop_said_just_past_echo_word_after_his_own_stop_phrase_stops_him_on_the_native_path and ..._on_the_page_path: both PASSED. check_owner_stop_barged (tests/test_scenes.py:418-433) asserts ECHO_WORD < gap <= ECHO_WORD+0.1 on the scene clock, a barge event, and void_end - void_start shorter than the line. _stop_just_past_his_stop also asserts that the barging burst was judged on timed words. Replay row 'the owner's Stop, stop. just past ECHO_WORD after his' (tests/test_log_cases.py:189) PASSED with kept/barge. Caveat: the page-path scenes run the owner at +6 dB (PAGE_STOP_DB), a harness setting recorded in SUMMARY's Open items."
+    },
+    {
+      "n": 4,
+      "truth": "AC3: the phase SUMMARY lists the heard-versus-played offsets measured in the own-stop scenes (fixture word times and real Whisper), and ECHO_WORD in app/gate.py is no smaller than the largest",
+      "status": "FAILED",
+      "uat_item": 4,
+      "evidence": "ECHO_WORD = 0.60 (app/gate.py:30) is at least the largest recorded own offset, 0.56 s. check_echo_word_covers (tests/test_scenes.py:436-444) enforces this in the fast AC1 scenes, which PASSED here. But .planning/phases/5/SUMMARY.md lists no offsets: it gives only 'the largest measured own offset of 0.56 s' (Goal check) and 'closing phrase estimated 0.50-0.56 s late' (Open items). The fixture-word-time offsets (+0.020 s, the room's delay) and the real-Whisper opening offsets (-0.090/+0.130 and so on) are missing from it. The full list exists only in .planning/phases/5/reports/plan-3.md (Task 5 and 6 rows), and the 0.02 s figure appears in the app/gate.py:31-34 comment. The real-Whisper half rests on the slow tier (VOID_SCENES=1), which the suite skips and which was not run here."
+    },
+    {
+      "n": 5,
+      "truth": "AC4: a burst near no played stop phrase is transcribed with Heard.words None, and one overlapping a played stop phrase has timed words",
+      "status": "VERIFIED",
+      "uat_item": 5,
+      "evidence": "Ran tests/test_echo.py::HeardWordTimes: 9 passed. Among them, test_a_burst_near_no_played_stop_is_untimed (words None, word_timestamps False) and test_a_burst_overlapping_a_played_stop_gets_its_kept_words_at_monotonic_times (word_timestamps True, monotonic Word times). Code: app/server.py:1145 timed = at is not None and gate.stop_near(played_lately(), at, at + len/RATE*2), and run_whisper_heard passes word_timestamps=words."
+    },
+    {
+      "n": 6,
+      "truth": "AC5: every replay row and scene that passed at bf7b120 still passes, and the new own-stop rows pass with no expected-failure mark",
+      "status": "VERIFIED",
+      "uat_item": 6,
+      "evidence": "Ran tests/test_log_cases.py whole: 65 passed, 9 subtests, 0 xfail. OWN_STOPS has 8 parametrized rows plus test_an_own_stop_row_leans_on_no_default_flag, all PASSED, with no xfail mark. 'diff <(git show bf7b120:tests/test_log_cases.py) tests/test_log_cases.py' removes no line. Ran tests/test_scenes.py whole: 32 passed, 13 skipped (all 'slow tier: set VOID_SCENES=1'), 34 subtests. 'git diff bf7b120 personal -- tests/test_log_cases.py tests/test_scenes.py' removes no test def and adds no xfail or expectedFailure. The main session's full-suite run is the final 'in a full suite run' confirmation."
+    },
+    {
+      "n": 7,
+      "truth": "AC6: the phase diff on macos touches no docs/superpowers, docs/design, .claude, queues, .planning or CLAUDE.md path; macos merges into personal without conflict; the coverage floors hold for gate.py, hearing.py and drops.py",
+      "status": "VERIFIED",
+      "uat_item": 7,
+      "evidence": "'git diff --name-only c2bf596 macos' covers 15 paths under app/ and tests/ only, and the forbidden-path grep matched nothing. Of the existing scene fixtures only manifest.json changed, plus the new void_stop.wav (D-09). 691f604 has parents 5ac57f1 and 2de8032 (= macos). A trivial 'git merge-tree' of the base and the two parents gives 0 conflict markers, and the 3 files changed on both sides merge automatically. 'node .github/ci/coverage-modules.mjs --report coverage.json' exited 0 on the saved report (mtime 14:15, after merge 691f604 at 14:10; the only later commit, 7e2b114, is docs): gate.py 99.27/97.92, hearing.py 98.59/89.29, drops.py 100/100. The exit code of the first accepted command (the pytest run) is what the main session's suite run confirms."
+    },
+    {
+      "n": 8,
+      "truth": "D-02/D-05: Void's played stop phrases are timed from the Phase 4 record on both paths (the native first sound chunk; the page's /api/speaking on-post), and a hush or cut drops what was still to play",
+      "status": "VERIFIED",
+      "uat_item": null,
+      "evidence": "Native: app/server.py:2668-2671 calls note_played(text, at, dur, words) at the first sound chunk, with the same `at` passed to Wake.talking. Page: speaking_post (app/server.py:1540-1557) calls note_page_played(b, end) with the same `end` it hands to Wake.talking_until, and index.html pump sends text, dur and words/r on the on-post. Wake.hush calls played_cut(at) (app/server.py:1761). Ran: tests/test_wake_loop.py NativeOwed::test_a_stop_in_a_sentence_is_noted_at_the_first_chunks_time_plus_the_words_offset, Played (4), Hush (4) and PageSpeaking::test_words_that_are_null_or_malformed... all PASSED. tests/test_page_played.py (real page in headless Chromium): 7 passed. tests/test_gate.py: 69 passed. No debt markers in the phase's added lines under app/ and tests/."
+    }
+  ],
+  "passes": [
+    {
+      "k": 2,
+      "name": "His own stop heard back never stops him, both paths",
+      "evidence": "FastScenes::test_his_own_stop_phrase_heard_back_never_stops_him_on_the_native_path and _on_the_page_path PASSED. Each asserts the peek and Wake.check echo drops, no barge or turn, and play to the last chunk, then reruns with own_stop patched to False and requires a barge. Callers wiring: app/server.py:1901, :1918, :1987."
+    },
+    {
+      "k": 3,
+      "name": "The owner's stop just past ECHO_WORD still stops him, both paths",
+      "evidence": "FastScenes::test_stop_said_just_past_echo_word_after_his_own_stop_phrase_stops_him_on_the_native_path and _on_the_page_path PASSED (ECHO_WORD < gap <= ECHO_WORD+0.1, barge, playback ended before the line). The OWN_STOPS BARGE row passed."
+    },
+    {
+      "k": 5,
+      "name": "Only a burst near a played stop phrase is word-timed",
+      "evidence": "tests/test_echo.py::HeardWordTimes 9 passed, including test_a_burst_near_no_played_stop_is_untimed (words None, no word_timestamps) and test_a_burst_overlapping_a_played_stop_gets_its_kept_words_at_monotonic_times."
+    },
+    {
+      "k": 6,
+      "name": "Replay rows and scenes still pass; own-stop rows pass unmarked",
+      "evidence": "tests/test_log_cases.py: 65 passed, with no line removed since bf7b120 and the 8 OWN_STOPS rows unmarked. tests/test_scenes.py: 32 passed, 13 skipped (slow tier only), with no test removed and no xfail added since bf7b120."
+    },
+    {
+      "k": 7,
+      "name": "Phase diff stays off docs, merges clean, coverage floors hold",
+      "evidence": "The c2bf596..macos diff touches only app/ and tests/. merge-tree shows 0 conflict markers, and 691f604's second parent is macos. coverage-modules.mjs exited 0 on coverage.json written after the merge: gate.py 99.27/97.92, hearing.py 98.59/89.29, drops.py 100/100."
+    }
+  ],
+  "gaps": [
+    {
+      "k": 1,
+      "name": "Clean start: the server boots from clean state",
+      "reason": "unverified, not observed failing: no automated check was exercised on HEAD in this verification. The boot tests start a real server, which is outside the verifier's allowance, the suite run was reserved for the main session, and the CI tests job has never run on this code (nothing pushed; SUMMARY says 'not CI-verified').",
+      "evidence": "tests/test_quit.py:187, :198 (start a real server) were not run. .github/workflows/tests.yml has had no run on 2de8032 or 691f604. SUMMARY.md's 813 passed / 15 skipped is a claim, not an observed run.",
+      "severity": "minor",
+      "missing": "The main session's full-suite run on HEAD exiting 0, with tests/test_quit.py passing, settles the local half; no code change is implied. The CI tests job itself runs only once the branch is pushed, which needs the owner's word."
+    },
+    {
+      "k": 4,
+      "name": "ECHO_WORD covers the measured offsets",
+      "reason": "missing: the phase SUMMARY does not list the measured heard-versus-played offsets that AC3 and D-04 require it to record. It gives only the 0.56 s maximum and a 0.50-0.56 s range for the closing phrase, and no fixture-word-time offsets at all. The value itself (0.60 >= 0.56) holds.",
+      "evidence": ".planning/phases/5/SUMMARY.md: Goal check ('largest measured own offset of 0.56 s') and Open items ('closing phrase estimated 0.50-0.56 s late') are the only offset figures. The per-scene offsets (fast tier +0.020/+0.020 on both paths; slow native opening -0.090/+0.100..+0.120, closing -0.560/-0.290 .. -0.520/-0.350; slow page opening -0.060/+0.090..+0.130, closing -0.530/-0.300 .. -0.510/-0.340) appear only in .planning/phases/5/reports/plan-3.md (Task 5 and Task 6 rows). app/gate.py:30 ECHO_WORD = 0.60.",
+      "severity": "minor",
+      "missing": "Add to SUMMARY.md the measured own-stop offsets, fixture word times and real Whisper, per path and phrase (start/end, heard minus played), copied from reports/plan-3.md Task 5 and 6, next to the chosen ECHO_WORD and its round-up from 0.56 s."
+    }
+  ],
+  "human_checks": []
+}
