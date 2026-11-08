@@ -358,6 +358,9 @@ class FastScenes(FreshRun):
                              f"his closing stop phrase ended {closing[-1].end - scenes.T0 - t.void_end:.2f} s after his sound")
         self.assertTrue([ln for ln in log if "echo (over): " in ln or "echo (follow): " in ln],
                         f"the burst holding his closing stop phrase wasn't judged by Wake.check and dropped as echo:{why}")
+        # the heard-versus-played offsets of his own stop phrases were measured (start and end, heard minus played)
+        self.assertTrue(t.offsets and all(isinstance(o["start"], float) and isinstance(o["end"], float) for o in t.offsets),
+                        f"no heard-versus-played offset of his own stop phrase was measured:{why}")
         # nothing barged or woke, and his sound played to his line's last chunk
         self.assertEqual(did(t), [], f"Void acted on his own stop phrases heard back:{why}")
         self.assertGreaterEqual(t.void_end - t.void_from, scenes.void_stops(STOP_CLIP)[-1][1],

@@ -192,7 +192,9 @@ class Take:
     absent) and events: the BUS events published during the scene. switched: when the speakers changed mid-sentence
     (play's switch_at), in seconds on the scene's clock: the moment the old speakers fell silent and the new ones took
     over (None: no switch happened). opening_db: how far under how you said them the first OPENING seconds of your
-    voice came through in clean (opening_db; None when you didn't speak). void_from: the scene second the first sample
+    voice came through in clean (opening_db; None when you didn't speak). offsets: each stop phrase the hearing judged, with
+    word times, against the nearest stop phrase of his in the record of what he played then (see play), as
+    {"heard": text, "kind", "start", "end"}, the last two heard minus played in seconds. void_from: the scene second the first sample
     Void's player wrote comes out of the speakers (None when he didn't play): the clip's first sample after the trim."""
 
     def __init__(self):
@@ -200,6 +202,7 @@ class Take:
         self.raw = self.clean = self.echo = self.you = self.music = empty
         self.void_start = self.void_end = self.you_start = self.you_end = self.opening_db = self.void_from = None
         self.events = []
+        self.offsets = []
         self.switched = None
         self.mic_from = 0.0
 
@@ -789,6 +792,10 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
     the server what the page does, through the server's own tts_reply and speaking_post, and no fake player is
     opened. It takes `void`, `you`, `you_at`, `you_only`, `hear` and `seconds`; any other argument raises ValueError.
 
+    The Take's `offsets` are measured by watching gate.judge (a call-through: it changes no verdict, and it is not a
+    hearing double): for each stop phrase in a judged burst's timed words, how far its start and end lie from the
+    nearest stop phrase in the played record that judge was handed, heard minus played.
+
     Scenes played one after another are one run of Void: whatever the app keeps across mic sessions in the process
     (a canceller kept warm) carries from one scene to the next. new_run() starts a fresh run."""
     if page:
@@ -871,6 +878,16 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
         patch(server, "SPOKEN", collections.deque(maxlen=200))
         patch(server, "PLAYED", collections.deque())            # (every scene's clock starts at T0: none hears another's stop phrases)
         patch(server, "make_player", lambda rate: FakePlayer(scene, rate))
+        gate, judged, real_judge = _gate(), [], _gate().judge
+
+        def judge(b, spoken, cfg, played=()):
+            v = real_judge(b, spoken, cfg, played)
+            for w in gate.stop_phrases(b.words or ()):
+                near = min(played, key=lambda p: abs((p.start + p.end - w.start - w.end) / 2), default=None)
+                if near is not None:
+                    judged.append({"heard": w.text, "kind": b.kind, "start": w.start - near.start, "end": w.end - near.end})
+            return v
+        patch(gate, "judge", judge)
         if page:
             patch(server, "tts_engine", lambda: "scene")             # (/api/tts has a voice: synth is the faked one)
         patch(server, "open_mic", open_mic)
@@ -933,6 +950,7 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
     t.mic_from = a / SR
     t.clean = np.concatenate((np.zeros(min(a, k), np.int16), np.frombuffer(b"".join(clean), np.int16)))[:k]
     t.events = events.got
+    t.offsets = judged
     t.switched = switch.at
     if void:
         t.void_start = scene.void_start()
