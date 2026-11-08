@@ -21,12 +21,13 @@ def _server():
     return server
 
 
-def heard(text: str = "something was said here", sure: bool = True, seconds: float = 0.0):
+def heard(text: str = "something was said here", sure: bool = True, seconds: float = 0.0, words=None):
     """What Whisper reports for a burst: `text`, and either sure of it (confident words, someone talking) or kept no
-    segment it was sure of (Heard's documented 'none' numbers). `seconds`: the burst's speech_seconds. → server.Heard"""
+    segment it was sure of (Heard's documented 'none' numbers). `seconds`: the burst's speech_seconds. `words`: its
+    timed words (gate.Word, monotonic seconds), or None when not timed. → server.Heard"""
     if sure:
-        return _server().Heard(text=text, logprob=-0.2, no_speech=0.02, seconds=seconds)
-    return _server().Heard(text=text, logprob=float("-inf"), no_speech=1.0, seconds=seconds)
+        return _server().Heard(text=text, logprob=-0.2, no_speech=0.02, seconds=seconds, words=words)
+    return _server().Heard(text=text, logprob=float("-inf"), no_speech=1.0, seconds=seconds, words=words)
 
 
 def hiss(seconds: float, seed: int) -> bytes:
@@ -42,18 +43,20 @@ def pieces(pcm: bytes, ms: int = 20) -> list[bytes]:
     return [pcm[i:i + n] for i in range(0, len(pcm) - n + 1, n)]
 
 
-def ears(server, text_for, speech_for=None) -> contextlib.ExitStack:
+def ears(server, text_for, speech_for=None, words_for=None) -> contextlib.ExitStack:
     """Patch `server`'s speech-to-text: Whisper hears `text_for(pcm)` in a burst, sure of it when it made out any
     words, and `speech_for(pcm)` seconds of it are someone talking (default: all of it). speech_seconds,
-    transcribe_pcm and transcribe_pcm_heard all agree. → the open patches; close the stack (or leave its `with`) to
-    undo them."""
+    transcribe_pcm and transcribe_pcm_heard all agree. transcribe_pcm_heard given `at` (when the clip's first sample
+    was caught) fills Heard.words with `words_for(pcm, at)`; with `words_for` None, or no `at`, Heard.words is None.
+    → the open patches; close the stack (or leave its `with`) to undo them."""
     if speech_for is None:
         def speech_for(pcm):
             return len(pcm) / (SR * 2)
 
-    def transcribe_heard(pcm, **_kw):
+    def transcribe_heard(pcm, at=None, **_kw):
         text = text_for(pcm)
-        return heard(text, sure=bool(text), seconds=speech_for(pcm))
+        words = words_for(pcm, at) if words_for is not None and at is not None else None
+        return heard(text, sure=bool(text), seconds=speech_for(pcm), words=words)
 
     stack = contextlib.ExitStack()
     try:

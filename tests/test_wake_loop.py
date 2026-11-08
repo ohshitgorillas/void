@@ -30,6 +30,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import suite_data  # noqa: E402  (Void's data folder: the suite's own, set before server.py settles it)
+import fakes  # noqa: E402
 from fakes import hiss, ears  # noqa: E402
 from loopback_http import LoopbackThreadingHTTPServer  # noqa: E402
 from test_hearing import SPK_RATE, FakePlayer, FakeRef  # noqa: E402  (the Speaker player stand-ins)
@@ -459,7 +460,68 @@ class FollowUpGate(unittest.TestCase):
         self.assertEqual(len(calls), 1, f"gate.judge called {len(calls)}x on one quick listen")
         self.assertIsInstance(calls[0], gate.Burst, f"gate.judge not handed a gate.Burst: {calls[0]!r}")
         self.assertEqual(calls[0].kind, "wake", f"the quick listen not judged as a 'wake' burst: {calls[0]!r}")
-        self.assertEqual(said, SAID["you_hey_void.wav"], "the quick listen didn't hand back what was heard")
+        self.assertIsInstance(said, server.Heard, f"the quick listen didn't hand back a Heard: {said!r}")
+        self.assertEqual(said.text, SAID["you_hey_void.wav"], "the quick listen didn't hand back what was heard")
+
+    # ---- Wake.heard hands back the Heard itself, and Wake.check takes that Heard in place of its text
+    def quick_listen(self, name, said):
+        """Wake.heard on fixture `name`, heard as `said`, its first sample caught `len(pcm)` ago, its words timed.
+        → (what Wake.heard returned, the words its Heard should carry, the `at` each timing was asked for, `at`)."""
+        import gate
+        pcm = clip(name)
+        at = time.monotonic() - len(pcm) / (server.RATE * 2)
+        words = tuple(gate.Word(w, at + 0.4 * i, at + 0.4 * i + 0.3) for i, w in enumerate(said.split()))
+        asked = []
+
+        def words_for(p, a):
+            asked.append(a)
+            return words
+
+        server.Wake.talked = []
+        with ears(server, lambda p: said, words_for=words_for), contextlib.redirect_stderr(io.StringIO()):
+            got = server.Wake.heard(pcm, time.monotonic(), at)
+        return got, words, asked, at
+
+    def test_the_quick_listen_hands_back_the_heard_with_its_word_times(self):
+        got, words, asked, at = self.quick_listen("you_hey_void.wav", SAID["you_hey_void.wav"])
+        self.assertIsInstance(got, server.Heard, f"Wake.heard didn't hand back a Heard: {got!r}")
+        self.assertEqual(got.text, SAID["you_hey_void.wav"], f"the Heard handed back isn't what was heard: {got!r}")
+        self.assertEqual(asked, [at], "the quick listen wasn't timed from when its first sample was caught")
+        self.assertEqual(got.words, words, f"the Heard handed back lost its word times: {got!r}")
+
+    def test_the_quick_listen_hands_back_the_heard_when_dropped_for_more_than_no_speech(self):
+        got, words, asked, at = self.quick_listen("room_music.wav", SAID["room_music.wav"])   # (no wake word in it)
+        self.assertIsInstance(got, server.Heard, f"Wake.heard didn't hand back a Heard on a dropped burst: {got!r}")
+        self.assertEqual(got.text, SAID["room_music.wav"], f"the Heard handed back isn't what was heard: {got!r}")
+
+    def test_check_judges_the_text_and_word_times_of_the_heard_it_is_handed_without_hearing_it_again(self):
+        import gate
+        calls = self.judged()
+        pcm = clip("you_hey_void.wav")
+        now = time.monotonic()
+        said = SAID["you_hey_void.wav"]
+        words = (gate.Word("Hey", now, now + 0.3), gate.Word("Void,", now + 0.3, now + 0.7))
+        handed = fakes.heard(said, seconds=len(pcm) / (server.RATE * 2), words=words)
+        transcribed = []
+
+        def text_for(p):
+            transcribed.append(p)
+            return "something else was heard the second time"
+
+        server.Wake.talked = []
+        err = io.StringIO()
+        with ears(server, text_for), contextlib.redirect_stderr(err):
+            server.Wake.check(pcm, now, handed)
+        events = []
+        while not self.q.empty():
+            events.append(self.q.get_nowait())
+        self.assertEqual(transcribed, [], "Wake.check heard the burst again instead of judging the Heard it was handed")
+        self.assertEqual(len(calls), 1, f"gate.judge called {len(calls)}x on one burst")
+        b = calls[0]
+        self.assertEqual(b.text, said, f"not judged as the Heard it was handed: {b!r}")
+        self.assertEqual(b.words, words, f"not judged with the Heard's word times: {b!r}")
+        self.assertEqual(len(self.wakes(events)), 1, f"the wake word in the Heard handed it not taken: {events}\n"
+                         + err.getvalue())
 
     def test_gate_switched_off_takes_room_music_as_before(self):
         server.CFG["voice_gate"] = False

@@ -1077,6 +1077,12 @@ class Heard:
     logprob: float        # mean avg_logprob over kept segments (-inf when none)
     no_speech: float      # max no_speech_prob over kept segments (1.0 when none)
     seconds: float        # speech_seconds of the clip
+    words: "tuple[gate.Word, ...] | None" = None   # the heard words, in monotonic seconds; None: not timed
+
+    @classmethod
+    def nothing(cls, seconds: float) -> "Heard":
+        """Nothing heard (no transcription ran): no text, no confidence, `seconds` of speech in the clip."""
+        return cls(text="", logprob=float("-inf"), no_speech=1.0, seconds=seconds)
 
 
 def run_whisper_heard(audio, beam=None, hint=None, sure=False) -> Heard:
@@ -1125,10 +1131,11 @@ def pcm_audio(pcm: bytes):
     return audio
 
 
-def transcribe_pcm_heard(pcm: bytes, **kw) -> Heard:
-    """Raw s16le 16 kHz mono → what was heard, with Whisper's confidence."""
+def transcribe_pcm_heard(pcm: bytes, at: float | None = None, **kw) -> Heard:
+    """Raw s16le 16 kHz mono → what was heard, with Whisper's confidence. `at`: when the clip's first sample was caught
+    (monotonic), for the word times of a burst near a stop phrase of his."""
     if len(pcm) < 16000 * 2 * 0.3:          # < 0.3 s: nothing worth sending
-        return Heard(text="", logprob=float("-inf"), no_speech=1.0, seconds=0.0)
+        return Heard.nothing(0.0)
     return run_whisper_heard(pcm_audio(pcm), **kw)
 
 
@@ -1789,7 +1796,7 @@ class Wake:
                         if (not req and cls.span_at(started) and now - peek_at >= STOP_PEEK
                                 and len(seg) >= RATE * 2 * STOP_PEEK):
                             peek_at = now
-                            if cls.stop_in(bytes(seg), started):
+                            if cls.stop_in(bytes(seg), started, seg_at):
                                 in_speech, seg, said = False, bytearray(), None
                                 continue
                         if req:
@@ -1801,8 +1808,8 @@ class Wake:
                                                 else (TURN_QUIET, TURN_VAD, TURN_MAX))
                             done = now - last_voice > quiet or now - vad_last > vad or len(seg) > RATE * 2 * most
                             if done and not cls.speaking() and len(seg) > RATE * 2 * 0.35:
-                                said = cls.heard(bytes(seg), started)
-                                if WAKE_RE.match(said or ""):     # "hey Void, ...": hear the rest of it out
+                                said = cls.heard(bytes(seg), started, seg_at)
+                                if WAKE_RE.match(said.text if said else ""):     # "hey Void, ...": hear the rest of it out
                                     req, done, said = True, False, None
                         if done:
                             in_speech = False
@@ -1823,36 +1830,41 @@ class Wake:
             mic.close()
 
     @classmethod
-    def heard(cls, pcm, started):
-        """A quick listen for his name at the first pause: what Whisper heard, kept or dropped (Wake.check judges it
-        again as its own kind). None: too little speech to be worth transcribing."""
+    def heard(cls, pcm, started, at=None):
+        """A quick listen for his name at the first pause: the Heard, kept or dropped (Wake.check judges it again as its
+        own kind). None: too little speech to be worth transcribing. `started`: when the burst was detected (for
+        Wake.air) · `at`: when its first sample was caught (for its word times)."""
         now = time.monotonic()
         try:
             ss, secs = speech_seconds(pcm), len(pcm) / (RATE * 2)
-            text = (transcribe_pcm(pcm, beam=1, hint="Hey Void.", sure=True)
-                    if gate.spoken_enough(ss, secs, "wake") else "")
+            h = (transcribe_pcm_heard(pcm, at=at, beam=1, hint="Hey Void.", sure=True)
+                 if gate.spoken_enough(ss, secs, "wake") else Heard.nothing(ss))
         except Exception as e:  # noqa: BLE001
             print(f"[void] wake word stt: {e}", file=sys.stderr)
             return None
-        v = gate.judge(gate.Burst(text, None, ss, secs, "wake", *cls.air(started, now)), said_lately(), CFG)
-        verdict_out(v, text, "wake")
-        return None if v.why == "no speech" else text
+        v = gate.judge(gate.Burst(h.text, None, ss, secs, "wake", *cls.air(started, now), words=h.words),
+                       said_lately(), CFG, played_lately())
+        verdict_out(v, h.text, "wake")
+        return None if v.why == "no speech" else h
 
     @classmethod
-    def stop_in(cls, pcm, started):
-        """A burst begun over him, still going: if what's said so far holds a stop phrase, stop him now (True)."""
+    def stop_in(cls, pcm, started, at=None):
+        """A burst begun over him, still going: if what's said so far holds a stop phrase, stop him now (True).
+        `started` and `at` as for Wake.heard."""
         now = time.monotonic()
         try:
             ss, secs = speech_seconds(pcm), len(pcm) / (RATE * 2)
-            text = transcribe_pcm(pcm, beam=1, sure=True) if gate.spoken_enough(ss, secs, "peek") else ""
+            h = (transcribe_pcm_heard(pcm, at=at, beam=1, sure=True)
+                 if gate.spoken_enough(ss, secs, "peek") else Heard.nothing(ss))
         except Exception as e:  # noqa: BLE001
             print(f"[void] stop check stt: {e}", file=sys.stderr)
             return False
-        v = gate.judge(gate.Burst(text, None, ss, secs, "peek", *cls.air(started, now)), said_lately(), CFG)
-        verdict_out(v, text, "peek")
+        v = gate.judge(gate.Burst(h.text, None, ss, secs, "peek", *cls.air(started, now), words=h.words),
+                       said_lately(), CFG, played_lately())
+        verdict_out(v, h.text, "peek")
         if v.act != "barge":
             return False
-        cls.barge(text)
+        cls.barge(h.text)
         return True
 
     @classmethod
@@ -1876,9 +1888,9 @@ class Wake:
         return None
 
     @classmethod
-    def check(cls, pcm, started, text=None, ended=None, at=None):
+    def check(cls, pcm, started, heard=None, ended=None, at=None):
         """One burst heard out. `at`: when its first sample was caught (monotonic), so a reply begun over him can be cut
-        free of his voice."""
+        free of his voice. `heard`: the Heard from Wake.heard, if it listened already."""
         ended = time.monotonic() if ended is None else ended     # (when you last made a sound)
         began = started                          # (when Wake.session passed it, before ran_on moves it)
         # started after he finished talking, inside the follow-up window → it's a request, no "hey Void" needed
@@ -1897,26 +1909,27 @@ class Wake:
                 cut = 0
         talking, rang = cls.air(began, ended)    # (his sound, or its ring, was in the air while it was heard)
         kind = "over" if over else "follow" if follow else "wake"
-        heard = None
+        when = (began if at is None else at) + cut / (RATE * 2)    # (when pcm's first sample was caught)
+        if kind == "follow":
+            heard = None                         # (heard whole as a wake listen: not this burst's follow-up kind)
         try:
             ss, secs = speech_seconds(pcm), len(pcm) / (RATE * 2)
             if not gate.spoken_enough(ss, secs, kind):   # (music or noise, not talking: Whisper would dream up words)
-                text = ""
-            else:
-                if kind == "follow":             # (a judged follow-up needs Whisper's confidence, not just words)
-                    heard = transcribe_pcm_heard(pcm, sure=True)
-                    text = heard.text
-                elif text is None:
-                    text = (transcribe_pcm(pcm, sure=True) if over
-                            else transcribe_pcm(pcm, beam=1, hint="Hey Void.", sure=True))
+                heard = Heard.nothing(ss)
+            elif heard is None:
+                if kind == "follow" or over:     # (a judged follow-up needs Whisper's confidence, not just words)
+                    heard = transcribe_pcm_heard(pcm, at=when, sure=True)
+                else:
+                    heard = transcribe_pcm_heard(pcm, at=when, beam=1, hint="Hey Void.", sure=True)
         except Exception as e:  # noqa: BLE001
             print(f"[void] wake word stt: {e}", file=sys.stderr)
             return
-        text = text or ""
+        text = heard.text or ""
         hear_out(f"heard {secs:.1f}s, {len(text.split())} words"
                  f"{', follow-up' if follow else ''}{f', after his last word ({cut / (RATE * 2):.1f}s of him cut)' if cut else ''}"
                  f"{', wake word' if WAKE_RE.match(text) else ''}{', while talking' if talking else ', in his echo' if rang else ''}")
-        v = gate.judge(gate.Burst(text, heard, ss, secs, kind, talking, rang), said_lately(), CFG)
+        v = gate.judge(gate.Burst(text, heard if kind == "follow" else None, ss, secs, kind, talking, rang, heard.words),
+                       said_lately(), CFG, played_lately())
         verdict_out(v, text, kind)
         if v.act == "barge":
             cls.barge(text)
