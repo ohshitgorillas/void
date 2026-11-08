@@ -16,7 +16,7 @@
 #   void stop       stop the background server (and the window)
 #   void restart    restart the server (after editing config)
 #   void log        follow the server log
-#   void drops [log] [--day YYYY-MM-DD]  everything his hearing dropped, and what it would do with each now
+#   void drops [log] [--day YYYY-MM-DD]  every burst he heard, kept or dropped, and what it would do with each now
 #   void setup      first run after a system-wide install (ninja install): your voice + speech models
 set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH"
