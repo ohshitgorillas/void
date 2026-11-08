@@ -955,6 +955,123 @@ class Sure(unittest.TestCase):
                          "Please add milk. to the list")
 
 
+class TimedWord:
+    """A word Whisper timed, as faster-whisper hands it back with word_timestamps: seconds into the clip."""
+
+    def __init__(self, word, start, end, probability=0.9):
+        self.word, self.start, self.end, self.probability = word, start, end, probability
+
+
+class TimedSeg(Seg):
+    def __init__(self, text, words, **kw):
+        super().__init__(text, **kw)
+        self.words = words
+
+
+@unittest.skipIf(server is None or gate is None, f"server.py or gate.py doesn't import here: {IMPORT_ERR or GATE_ERR}")
+class HeardWordTimes(unittest.TestCase):
+    """transcribe_pcm_heard given `at`, with a stop phrase of his played near the clip, runs Whisper with word
+    timestamps, and Heard.words holds the kept segments' words at `at` plus each word's time; otherwise Heard.words is
+    None and Whisper runs untimed. run_whisper_heard passes `words` to Whisper as word_timestamps."""
+
+    SEGS = [TimedSeg(" Okay, stop.", [TimedWord(" Okay,", 0.1, 0.4), TimedWord(" stop.", 0.5, 0.8)]),
+            TimedSeg(" Oh my god.", [TimedWord(" Oh", 0.9, 1.0), TimedWord(" my", 1.0, 1.1),
+                                     TimedWord(" god.", 1.1, 1.3)], avg_logprob=-1.4)]
+    SECS = len(PCM) / (server.RATE * 2) if server else 0.0           # the clip PCM is this long
+
+    def setUp(self):
+        server.PLAYED.clear()
+        self.addCleanup(server.PLAYED.clear)
+        self.model = mock.Mock()
+        self.model.transcribe.side_effect = lambda *a, **k: (iter(self.SEGS), None)
+        p = mock.patch.object(server, "whisper", lambda: self.model)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def asked_for_word_times(self):
+        return [bool(c.kwargs.get("word_timestamps", False)) for c in self.model.transcribe.call_args_list]
+
+    def times(self, words):
+        return [(w.text.strip(), round(w.start, 6), round(w.end, 6)) for w in words]
+
+    def test_a_burst_overlapping_a_played_stop_gets_its_kept_words_at_monotonic_times(self):
+        at = time.monotonic()
+        server.note_played("Stop.", at + 0.2, 0.4, [[0.0, 0.4]])     # his "stop" plays at+0.2 s to at+0.6 s
+        heard = server.transcribe_pcm_heard(PCM, at=at, sure=True)
+        self.assertEqual(self.asked_for_word_times(), [True], "Whisper not asked for word times near his stop")
+        self.assertIsNotNone(heard.words, "a burst near his played stop came back untimed")
+        self.assertEqual(self.times(heard.words),                    # (the segment gate.sure dropped is not in it)
+                         [("Okay,", round(at + 0.1, 6), round(at + 0.4, 6)),
+                          ("stop.", round(at + 0.5, 6), round(at + 0.8, 6))])
+        for w in heard.words:
+            self.assertIsInstance(w, gate.Word)
+        self.assertEqual(heard.text, "Okay, stop.")
+
+    def test_a_burst_ending_within_echo_word_of_a_played_stop_is_timed(self):
+        at = time.monotonic()
+        server.note_played("Stop.", at + self.SECS + gate.ECHO_WORD / 2, 0.4, [[0.0, 0.4]])
+        heard = server.transcribe_pcm_heard(PCM, at=at, sure=True)
+        self.assertEqual(self.asked_for_word_times(), [True])
+        self.assertIsNotNone(heard.words)
+
+    def test_a_burst_begun_within_echo_word_after_a_played_stop_is_timed(self):
+        at = time.monotonic()
+        server.note_played("Stop.", at - gate.ECHO_WORD / 2 - 0.4, 0.4, [[0.0, 0.4]])
+        heard = server.transcribe_pcm_heard(PCM, at=at, sure=True)
+        self.assertEqual(self.asked_for_word_times(), [True])
+        self.assertIsNotNone(heard.words)
+
+    def test_a_played_stop_at_the_end_of_a_long_clip_makes_it_timed(self):
+        # "near" spans the clip's whole length, from `at` to `at` plus len(pcm) / (16 kHz * 2 bytes)
+        seconds = gate.ECHO_WORD + 6.0
+        pcm = bytes(int(seconds * 16000) * 2)
+        at = time.monotonic() - seconds
+        server.note_played("Stop.", at + seconds - 0.6, 0.4, [[0.0, 0.4]])
+        heard = server.transcribe_pcm_heard(pcm, at=at, sure=True)
+        self.assertEqual(self.asked_for_word_times(), [True], "Whisper not asked for word times near the clip's end")
+        self.assertIsNotNone(heard.words)
+
+    def test_a_burst_near_no_played_stop_is_untimed(self):
+        # one stop he played past ECHO_WORD after the clip ends, one that ended past ECHO_WORD before it began (both
+        # kept, inside ECHO_KEEP): the burst is untimed because neither is near it, not because one expired
+        at = time.monotonic()
+        server.note_played("Stop.", at + self.SECS + gate.ECHO_WORD + 0.1, 0.4, [[0.0, 0.4]])
+        server.note_played("Stop.", at - gate.ECHO_WORD - 0.1 - 0.4, 0.4, [[0.0, 0.4]])
+        self.assertEqual(len(server.played_lately()), 2, "(the played stops this test needs were not kept)")
+        heard = server.transcribe_pcm_heard(PCM, at=at, sure=True)
+        self.assertIsNone(heard.words)
+        self.assertEqual(self.asked_for_word_times(), [False])
+        self.assertEqual(heard.text, "Okay, stop.")                  # (heard as before)
+
+    def test_a_burst_with_nothing_played_is_untimed(self):
+        heard = server.transcribe_pcm_heard(PCM, at=time.monotonic(), sure=True)
+        self.assertIsNone(heard.words)
+        self.assertEqual(self.asked_for_word_times(), [False])
+
+    def test_a_burst_without_at_is_untimed(self):
+        server.note_played("Stop.", time.monotonic(), 0.4, [[0.0, 0.4]])
+        heard = server.transcribe_pcm_heard(PCM, sure=True)
+        self.assertIsNone(heard.words)
+        self.assertEqual(self.asked_for_word_times(), [False])
+
+    def test_a_clip_too_short_to_send_keeps_words_none(self):
+        at = time.monotonic()
+        server.note_played("Stop.", at, 0.4, [[0.0, 0.4]])
+        heard = server.transcribe_pcm_heard(bytes(1000), at=at, sure=True)
+        self.assertIsNone(heard.words)
+        self.assertEqual(self.model.transcribe.call_count, 0)
+
+    def test_run_whisper_heard_passes_words_as_word_timestamps(self):
+        audio = server.pcm_audio(PCM)
+        timed = server.run_whisper_heard(audio, sure=True, words=True)
+        untimed = server.run_whisper_heard(audio, sure=True)
+        server.run_whisper_heard(audio, sure=True, words=False)
+        self.assertEqual(self.asked_for_word_times(), [True, False, False])
+        self.assertEqual(self.times(timed.words), [("Okay,", 0.1, 0.4), ("stop.", 0.5, 0.8)],
+                         "run_whisper_heard's word times are not the clip's own")
+        self.assertIsNone(untimed.words)
+
+
 @unittest.skipIf(gate is None, f"app/gate.py doesn't import here: {GATE_ERR}")
 class GateSure(unittest.TestCase):
     """gate.sure(segments), the one Whisper segment filter: keeps only the segments Whisper is sure of, in order."""

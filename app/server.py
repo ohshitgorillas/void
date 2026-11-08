@@ -1085,9 +1085,10 @@ class Heard:
         return cls(text="", logprob=float("-inf"), no_speech=1.0, seconds=seconds)
 
 
-def run_whisper_heard(audio, beam=None, hint=None, sure=False) -> Heard:
+def run_whisper_heard(audio, beam=None, hint=None, sure=False, words=False) -> Heard:
     """Transcribe, with Whisper's confidence; if the GPU path blows up at run time (missing CUDA libs etc.), drop to CPU
-    for good. `sure`: keep only what Whisper is fairly sure it heard (the always-on mic hears the room all day)."""
+    for good. `sure`: keep only what Whisper is fairly sure it heard (the always-on mic hears the room all day).
+    `words`: also time each word (Heard.words, seconds into the clip; None when not asked for)."""
     global _whisper
 
     def go():
@@ -1095,7 +1096,7 @@ def run_whisper_heard(audio, beam=None, hint=None, sure=False) -> Heard:
             audio, language=CFG["language"] or None, beam_size=int(beam or CFG.get("whisper_beam") or 5),
             vad_filter=True, vad_parameters={"min_silence_duration_ms": 600, "speech_pad_ms": 300},
             condition_on_previous_text=False, initial_prompt=(hint if hint is not None else CFG.get("stt_hint")) or None,
-            no_speech_threshold=0.5)
+            no_speech_threshold=0.5, word_timestamps=words)
         segs = list(segs)                                          # segments are lazy: errors surface here
         if sure:     # (a guess at noise: low log-prob, the same few words looping, or "probably nobody talking")
             segs = gate.sure(segs)
@@ -1103,7 +1104,9 @@ def run_whisper_heard(audio, beam=None, hint=None, sure=False) -> Heard:
         return Heard(text=out,
                      logprob=sum(s.avg_logprob for s in segs) / len(segs) if segs else float("-inf"),
                      no_speech=max((s.no_speech_prob for s in segs), default=1.0),
-                     seconds=_speech_seconds(audio))
+                     seconds=_speech_seconds(audio),
+                     words=tuple(gate.Word(w.word.strip(), w.start, w.end) for s in segs for w in (s.words or ())
+                                 ) if words else None)
     try:
         return go()
     except Exception as e:  # noqa: BLE001
@@ -1133,10 +1136,15 @@ def pcm_audio(pcm: bytes):
 
 def transcribe_pcm_heard(pcm: bytes, at: float | None = None, **kw) -> Heard:
     """Raw s16le 16 kHz mono → what was heard, with Whisper's confidence. `at`: when the clip's first sample was caught
-    (monotonic), for the word times of a burst near a stop phrase of his."""
+    (monotonic): given, and a stop phrase of his played near the clip, the words are timed too (Heard.words, monotonic
+    seconds); otherwise Whisper runs without word times, which cost more, and Heard.words is None."""
     if len(pcm) < 16000 * 2 * 0.3:          # < 0.3 s: nothing worth sending
         return Heard.nothing(0.0)
-    return run_whisper_heard(pcm_audio(pcm), **kw)
+    timed = at is not None and gate.stop_near(played_lately(), at, at + len(pcm) / (RATE * 2))
+    h = run_whisper_heard(pcm_audio(pcm), words=timed, **kw)
+    if h.words is not None:                  # (Whisper's times are into the clip: here they become monotonic)
+        h.words = tuple(gate.Word(w.text, at + w.start, at + w.end) for w in h.words)
+    return h
 
 
 def transcribe_pcm(pcm: bytes, **kw) -> str:
