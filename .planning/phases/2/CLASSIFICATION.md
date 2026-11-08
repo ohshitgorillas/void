@@ -142,7 +142,7 @@ Path columns show directories at the depth the decision needs (`tests/` and `.pl
 | 2f4b0f3eca4db77fab1c06b6567a968397a4fe63 | fix(1-1): fail the per-module coverage gate when the policy includes no module | fix | .github/ci/coverage-modules.mjs, tests/ | Phase 1 CI and tests (D-02) |
 | 18c56ef9322e0bf060590cb8540de5c4b8d8bbaf | docs(1): carry the missing-include runner fix into Plan 2 | dev tooling | .planning/ | only .planning/ (and docs/superpowers/) paths |
 | cc0e7b931239f679e753c75dcde8e857811792dd | test(1-2): cover the drops log forms, report text and command entry | fix | tests/ | Phase 1 CI and tests (D-02) |
-| f4acc7d57bb5e57d48681d27c8a4ee37d686a060 | test(1-2): cover the agents stream events, kill tree and Brain restart and stop paths | feature | tests/ | agents stream-event tests; owner ruled B-08 option B, stays on personal with 283432f (class feature), was fix |
+| f4acc7d57bb5e57d48681d27c8a4ee37d686a060 | test(1-2): cover the agents stream events, kill tree and Brain restart and stop paths | fix | tests/ | agents stream-event tests; owner ruled B-09 ("Only the thumbnail"): class moved feature to fix (the owner ruled it), built as a line-split row that leaves its 21 thumbnail-test lines on personal (Line-split section) |
 | 4aac55c01b1c800143f22b3f3cb8d8c24deb6458 | test(1-2): cover macsys at the process boundary and its Cocoa helpers | fix | tests/ | Phase 1 CI and tests (D-02) |
 | 3ad520933453a6cfff9378b98cb7b41bc1d29b77 | fix(1-2): fail the per-module coverage gate when the policy has no usable include list | fix | .github/ci/coverage-modules.mjs, tests/ | Phase 1 CI and tests (D-02) |
 | 13a1d40a74de614c1a21f626f3a06135dcc70b7f | test(1-2): run the suite and the per-module coverage gate on macos-14 | fix | .github/workflows/tests.yml | Phase 1 CI and tests (D-02) |
@@ -165,7 +165,7 @@ Path columns show directories at the depth the decision needs (`tests/` and `.pl
 | 486b45e015aea93f9370e9b0414572ad8745b393 | docs: plan phase 1 - Coverage gate (plan 4: fake servers that bind without a name lookup) | dev tooling | .planning/ | only .planning/ (and docs/superpowers/) paths |
 | f7cef2529fd0a43ac4640c24b1156ff305925442 | test(1-4): record the diagnosed cause of the fake-server failures in UAT item 4 | dev tooling | .planning/ | only .planning/ (and docs/superpowers/) paths |
 | 6271a78456f741b5c18d7ad944ea3f4169fa1eb6 | test(1-4): bind the child-process fake servers without a name lookup | fix | tests/ | Phase 1 CI and tests (D-02) |
-| 89f4bfe451bf296c9196708243f1a86cca7d03fe | test(1-4): bind the in-process test servers without a name lookup | feature | tests/ | test servers bound without a name lookup; owner ruled B-08 option B, stays on personal with 283432f (class feature), was fix |
+| 89f4bfe451bf296c9196708243f1a86cca7d03fe | test(1-4): bind the in-process test servers without a name lookup | fix | tests/ | test servers bound without a name lookup; it touches no thumbnail code (it moves three test files onto 6271a78's loopback_http servers), so class moved feature to fix under the B-09 ruling ("Only the thumbnail"; the owner ruled it); a plain pick |
 | 9b309e085a37533cf7362e4ed8238cd91b52d057 | docs(1): phase 1 summary | dev tooling | .planning/ | only .planning/ (and docs/superpowers/) paths |
 | ae7042a5d4bbfb1ef22b8de00b30ed9a58b356cf | docs: phase 1 UAT - 7 passed, 0 failed | dev tooling | .planning/ | only .planning/ (and docs/superpowers/) paths |
 | a44878021fc5f68ccee1b8c7e8d9ee401abed9dc | docs: capture context for phase 2 | dev tooling | .planning/ | only .planning/ (and docs/superpowers/) paths |
@@ -173,7 +173,7 @@ Path columns show directories at the depth the decision needs (`tests/` and `.pl
 
 ## Path-split
 
-A path-split commit is a `fix` row whose diff also touches a personal-only path. Task 2 looped over every `fix` row and found exactly four touching a personal-only path (c378787, d015d26, 45d4f02, 4488777). The Task 3 trial found a fifth, bb02446, which touches no personal-only path but whose `tests/test_page_sparks.py` hunk was a file created by the Local-only 87344d3 (the case the plan names). After the owner's B-03 ruling 87344d3 is class fix and sits before bb02446 on the branch, so `tests/test_page_sparks.py` exists there and bb02446 is a plain pick (checked in the Ruled trial: it applies with no conflict and no left-behind path). It is no longer path-split and its row is gone from the table below. The Ruled trial section records one new candidate, 0e6cd82, which is not entered here until the stop it caused is ruled.
+A path-split commit is a `fix` row whose diff touches a personal-only path or a path only a non-`fix` row creates. Task 2 looped over every `fix` row and found exactly four touching a personal-only path (c378787, d015d26, 45d4f02, 4488777). The Task 3 trial found a fifth, bb02446, which touches no personal-only path but whose `tests/test_page_sparks.py` hunk was a file created by the Local-only 87344d3 (the case the plan names). After the owner's B-03 ruling 87344d3 is class fix and sits before bb02446 on the branch, so `tests/test_page_sparks.py` exists there and bb02446 is a plain pick (checked in the Ruled trial: it applies with no conflict and no left-behind path). It is no longer path-split and its row is gone from the table below. 0e6cd82 is the fifth row: its `tests/test_voice_prompt.py` hunk edits a file only fb16e92 creates (Ruled trial, Stop 1), and fb16e92 stays on personal (class feature, B-07; B-10).
 
 | Commit | Carried onto the fix branch | Left behind on `personal` |
 |---|---|---|
@@ -181,8 +181,19 @@ A path-split commit is a `fix` row whose diff also touches a personal-only path.
 | d015d26 | `.github/cadence/coverage-policy.json` (D-02, D-09) | `.planning/PROJECT.md`, `.planning/REQUIREMENTS.md`, `.planning/ROADMAP.md`, `.planning/STATE.md`, `.planning/config.json` |
 | 45d4f02 | `.github/cadence/coverage-policy.json` | `.planning/config.json` |
 | 4488777 | `.github/workflows/macos.yml`, `.github/workflows/tests.yml` (the `macos-15` runner; D-02, D-09) | `.planning/ROADMAP.md`, `.planning/phases/1/CONTEXT.md`, `.planning/phases/1/UAT.md` |
+| 0e6cd82 | `tests/suite_data.py`, `tests/test_suite_data_dir.py` (both created), and `tests/` `test_audio_devices.py`, `test_echo.py`, `test_echo_diagnostics.py`, `test_gate.py`, `test_hearing.py`, `test_inbox.py`, `test_langmark.py`, `test_mac_autostart.py`, `test_portable_paths.py`, `test_scenes.py`, `test_speaker_switch.py`, `test_voiceprint.py`, `test_wake_loop.py` | `tests/test_voice_prompt.py` (its 2-line `import suite_data` hunk; the file is created by fb16e92, class feature) |
 
 Each row above is built by the `path-split` kind of the Trial section's Row construction ("Construction"), and whether a row is on a branch is decided by its Presence test ("Presence"). Neither is restated here; `git cherry` `+` is not evidence of absence for a `fix` row.
+
+## Line-split
+
+A line-split commit is a `fix` row one of whose files carries, inside a hunk no path-level split can divide, lines that test work left on `personal`. It is built by the `line-split` kind of the Trial section's Construction: the pick, then the file is rewritten as the row's own version less the left-behind lines. No line is written by hand.
+
+| Commit | Path | Base blob | Left behind on `personal`: lines of `<sha>:<path>` | Carried |
+|---|---|---|---|---|
+| f4acc7d | `tests/test_agents.py` | `f772b07` (c895ced's and f4acc7d^'s) | `661,674` (`    @staticmethod`, `def pic`, `test_pictures_become_data_uris_and_unusable_ones_are_left_out`, `test_at_most_three_pictures`, trailing blank line) and `763,769` (`test_a_tool_result_carries_its_pictures`, trailing blank line): 21 lines, the tests of 283432f's `tool_images` and `images` field | the other 301 added lines |
+
+For f4acc7d the command is `git show f4acc7d:tests/test_agents.py | sed -e '661,674d' -e '763,769d' > tests/test_agents.py`. 89f4bfe then applies as a plain pick over the shorter file. 283432f stays off the branch, and nothing on the branch tests it.
 
 ## Trial
 
@@ -237,28 +248,35 @@ Evidence from that tree (tip 91e6f4e, tree 93b23c2):
 
 ### Construction
 
-How a `fix` row, in table order, becomes zero or one commit on the branch (design: `docs/superpowers/specs/branch-split-construction-design.md`). Four kinds; nothing else is allowed, and no `-m` on any merge but 8cacc1d.
+How a `fix` row, in table order, becomes zero or one commit on the branch (design: `docs/superpowers/specs/branch-split-construction-design.md`). Five kinds; nothing else is allowed, and no `-m` on any merge but 8cacc1d.
 
 ```
-# kind: present   (ad1da73, 0ba0fec, 16b5829, 3935571, 7ef0a99 among fix rows; f3b2947 is also a present row but its class is feature after the B-06 ruling)
-#   no command; c895ced already holds 975c918, 16d33c7, fabc753, 8c064eb, c63fdea, 5033bce
-# kind: plain     (every fix row not named below)
+# kind: present    (ad1da73, 0ba0fec, 16b5829, 3935571, 7ef0a99; f3b2947, class feature, is held the same way)
+#   no command; c895ced already holds 975c918, 16d33c7, fabc753, c63fdea, 5033bce, and 8c064eb for f3b2947
+# kind: plain      (every fix row not named below, 89f4bfe included)
 git cherry-pick <sha>
-# kind: path-split (every row of the Path-split section: c378787, d015d26, 45d4f02, 4488777; bb02446 was one before the B-03 ruling)
+# kind: path-split (every row of the Path-split section: c378787, d015d26, 45d4f02, 4488777, 0e6cd82)
 git cherry-pick -n <sha>
 #   then each left-behind path of that row's Path-split entry goes back to its pre-pick state:
 #   restored from HEAD where HEAD has it; removed from index and tree where it does not
 git commit -C <sha>
-# kind: vehicle   (044e7f9 only)
+# kind: line-split (every row of the Line-split section: f4acc7d)
+#   before the pick: git rev-parse HEAD:<path> equals the row's base blob, else stop
+git cherry-pick -n <sha>
+git show <sha>:<path> | sed -e '<range 1>d' -e '<range 2>d' > <path>
+git add <path>
+git commit -C <sha>
+#   after: git diff HEAD <sha> -- <path> has no '-' line, and its '+' lines are exactly the row's left-behind lines
+# kind: vehicle    (044e7f9 only)
 git cherry-pick -n -m 1 8cacc1d
 git commit -C 044e7f9
 ```
 
-A conflict, an empty pick or a non-empty `git status --porcelain` after `commit`, in any kind, is a stop, never a resolution. The number of commits made is the number of `fix` rows less the `present` fix rows: 87 at snapshot 74af430 before the rulings (93 - 6), 92 after them (97 - 5; f3b2947 is a present row of class feature and counts in neither). Where a path-split pick leaves a modify/delete conflict on a left-behind path (45d4f02 and 4488777 on `.planning/` files d015d26 left behind; bb02446 on `tests/test_page_sparks.py`), the restore step removes the path; that is the construction, not a hand resolution. 8cacc1d stays class `merge`; it is the vehicle for 044e7f9's row and is never a row of its own on the branch.
+A conflict, an empty pick, a failed line-split check or a non-empty `git status --porcelain` after `commit`, in any kind, is a stop, never a resolution. Where a path-split pick leaves a modify/delete conflict on a left-behind path (45d4f02 and 4488777 on `.planning/` files d015d26 left behind; 0e6cd82 on `tests/test_voice_prompt.py`), the restore step removes the path; that is the construction, not a hand resolution. Every line a kind puts on the branch comes from its own row's diff (from 8cacc1d's for the vehicle); line-split only drops named `+` lines of its row. The number of commits made is the number of `fix` rows less the five `present` fix rows: 94 (99 - 5): 87 plain, 5 path-split, 1 line-split, 1 vehicle. f3b2947 is a present row of class feature and counts in neither. 8cacc1d stays class `merge`; it is the vehicle for 044e7f9's row and is never a row of its own on the branch.
 
 ### Presence
 
-Decides whether a `fix` row is on a branch. `git cherry` `-` is not the test: it prints `+` for the six `present` rows, for 044e7f9 (context differs) and for every path-split row.
+Decides whether a `fix` row is on a branch. `git cherry` `-` is not the test: it prints `+` for the `present` rows, for 044e7f9 (context differs) and for every path-split and line-split row.
 
 ```
 key(<sha>)               = git log -1 --format='%an%x00%aI%x00%s' <sha>
@@ -266,11 +284,33 @@ present(<sha>, <branch>) = exactly one line of `git log --format='%an%x00%aI%x00
 absent(<sha>, <branch>)  = no line equals key(<sha>), and `git cherry <branch> <snapshot>` prints `+ <sha>`
 ```
 
-Every `fix` row, of every kind, is `present` on the built branch; every `visual` and `feature` row is `absent`, except f3b2947 (class feature by the B-06 ruling), which is present as 8c064eb because c895ced already holds it. `commit -C` keeps the key of path-split and vehicle rows, and the six `present` rows match their c895ced copies.
+Every `fix` row, of every kind, is `present` on the built branch. f3b2947 (class feature by the B-06 ruling) is `present` through 8c064eb. Every other `feature` row (283432f, fb16e92, 6537fdb, 7a57ff3) and every `visual` row is `absent`. `commit -C` keeps the key of path-split, line-split and vehicle rows, and the five `present` fix rows and f3b2947 match their c895ced copies.
 
 ### Merge-back prep
 
-The Ignore reorder. Cause of the one merge-back conflict: 8935491 (dev tooling) inserts personal-only ignore lines after `installer/art/`, the same point where 5a4f07d inserts `coverage.json` and `.coverage`. One commit on `personal` (made by Plan 2, never by Plan 1) after `macos` carries the fix branch and before any merge of `macos` into `personal`. It touches `.gitignore` alone and changes line order only. The file becomes:
+Three commits on `personal` (made by Plan 2, never by Plan 1) around the one merge of `macos`, so the merge has no conflict and `personal` ends with the tree it had before it: R, the Ignore reorder; H, the Hold-back; the merge; then the revert of H.
+
+```
+# R, Ignore reorder: after macos carries the fix branch, before H (below)
+# H, Hold-back: on personal at R
+git checkout macos -- <each Hold-back path>
+git commit -m 'chore: take the Hold-back paths from macos for one merge; reverted right after it'
+#   check: git show --stat --format= H lists the Hold-back paths alone;
+#          git diff --name-only macos H -- <each Hold-back path> prints nothing
+git merge macos          # personal at H; no conflict, git diff --name-only H personal prints nothing
+git revert --no-edit H   # check: git diff --name-only R personal prints nothing
+```
+
+Hold-back paths:
+
+| Path | Personal-only lines it holds back |
+|---|---|
+| `app/server.py` | fb16e92's two `VOICE_PROMPT` lines (`74af430:app/server.py:94-95`), after e53ea7b's hover-off lines that both sides add (Ruled trial, Stop 3) |
+| `tests/test_agents.py` | f4acc7d's 21 Line-split lines (`74af430:tests/test_agents.py:663-676`, `:765-771`), inside the block both sides add (predicted, not measured) |
+
+H makes each Hold-back path equal on both sides, so the merge takes it unchanged; the revert puts back `personal`'s lines. `tests/test_wake_loop.py` is predicted to merge cleanly with 89f4bfe on the branch. Task 7's trial merge proves both predictions. A conflict on any path is a stop; no conflict resolution, `-s ours` or `-X`. "No changed file" is `git diff --name-only H <the merge>` after the merge and `git diff --name-only R personal` after the revert, never measured from a commit before R.
+
+The Ignore reorder (R). Cause: 8935491 (dev tooling) inserts personal-only ignore lines after `installer/art/`, the same point where 5a4f07d inserts `coverage.json` and `.coverage`. One commit on `personal` after `macos` carries the fix branch and before H. It touches `.gitignore` alone and changes line order only. The file becomes:
 
 ```
 <the 8935491 block: "# macOS maintainer's todo list" through ".planning/reads.1.jsonl.evict.*",
@@ -279,7 +319,7 @@ The Ignore reorder. Cause of the one merge-back conflict: 8935491 (dev tooling) 
 <lines from "__pycache__/" to end, byte-identical to the fix branch's .gitignore>
 ```
 
-Message: `chore: list personal-only ignores above the shared ones, so macos merges in cleanly`. "No changed file" for the merge-back is `git diff --name-only <the reorder commit> personal` after the merge, not measured from the commit before it. Plan 1's trial merges apply the same reorder as a commit on their detached scratch worktree only.
+Message: `chore: list personal-only ignores above the shared ones, so macos merges in cleanly`. Plan 1's trial merges make R and H on their detached scratch worktree, with `split-trial` in place of `macos`, commit the trial merge there, revert H and check `git diff --name-only R HEAD`; none of it reaches `personal`.
 
 ### Row-construction pass (before the rulings: 93 fix rows)
 
@@ -334,7 +374,7 @@ So the cause the flagged assumption predicted (a later personal-only commit chan
 
 ## Ruled trial
 
-Task 7. `split-trial` created fresh at c895ced (the earlier one had been removed), same build script as the Row-construction pass with bb02446 as a plain pick. Result: the Ruled trial is not clean. Three stops follow from the owner's rulings, each traced below; nothing was changed to pass (no test, `app/` file or policy value).
+Task 7, first attempt (kept as the record of the three stops; the clean rerun is "Ruled trial, rerun" below). `split-trial` created fresh at c895ced (the earlier one had been removed), same build script as the Row-construction pass with bb02446 as a plain pick. Result: the Ruled trial was not clean. Three stops followed from the owner's rulings B-07 and B-08, each traced below; nothing was changed to pass (no test, `app/` file or policy value). The owner then ruled B-09 and B-10, and the architect built both (construction design, approved): the Line-split kind, 0e6cd82 as a fifth path-split row, 89f4bfe as a plain pick, and Merge-back prep's Hold-back pair.
 
 Ruled set: 97 `fix` rows (the 93 of the first trial, plus a3021dd, 8c38409, 14b64bf and ed2fa27 from B-02 to B-05, plus 61975ea, 6bd5629, b554fd0 and 87344d3 under B-03, less f3b2947, fb16e92, f4acc7d and 89f4bfe from B-06 to B-08; e53ea7b was already fix). 5 are `present` (ad1da73, 0ba0fec, 16b5829, 3935571, 7ef0a99), so 92 commits are to be made. The table: 97 fix, 7 feature, 35 dev tooling, 18 merge, no visual.
 
@@ -383,9 +423,50 @@ Scratch worktree detached at 74af430, the Merge-back prep reorder committed firs
 
 No Task 8 closing line: the plan stopped at these rows. Refs after the removal: `macos` c895ced, `origin/macos` 29e22ae, no `split-trial`, no scratch worktree.
 
+### Ruled trial, rerun (Task 7, after B-09 and B-10 were ruled and built)
+
+Ruled set: 99 `fix` rows (the 97 above, plus f4acc7d and 89f4bfe moved feature to fix by the B-09 ruling), 5 `feature` (f3b2947, fb16e92, 283432f, 6537fdb, 7a57ff3), 35 `dev tooling`, 18 `merge`. 5 are `present` (ad1da73, 0ba0fec, 16b5829, 3935571, 7ef0a99), so 94 commits are to be made. `split-trial` was reset to c895ced (created fresh at c895ced in a scratch worktree) and built by the Construction kinds above (script outside the repo).
+
+**Row-construction pass.**
+
+- 99 `fix` rows = 94 commits made + 5 `present`; zero skipped, zero conflicts, zero empty picks; `git status --porcelain` empty after every commit. Kinds: 87 plain (89f4bfe among them), 5 path-split (c378787, d015d26, 45d4f02, 4488777, 0e6cd82), 1 line-split (f4acc7d), 1 vehicle (044e7f9 via 8cacc1d). `git rev-list --count c895ced..split-trial` is 94.
+- Tip `e05a52045a2aa8fe5d0f1bcc69c64b7c537efc55`, tree `efde2a3650d36550d8d50031e532d8f58a805a51`.
+- Line-split check for f4acc7d: `tests/test_agents.py` at c895ced was blob `f772b07` (the build checks it before the pick); after the commit `git diff <built commit> f4acc7d -- tests/test_agents.py` has no `-` line and 21 `+` lines, identical to lines 661-674 and 763-769 of `f4acc7d:tests/test_agents.py`; the built commit adds 301 lines.
+- Path-split picks match the Path-split section: for each of c378787, d015d26, 45d4f02, 4488777 and 0e6cd82 the paths in the original commit and not in the built commit are exactly that row's left-behind paths (0e6cd82: `tests/test_voice_prompt.py` alone). f4acc7d and 89f4bfe differ from the originals in no path.
+- Presence test: all 99 `fix` rows `present` exactly once on `split-trial`; `feature` rows 283432f, fb16e92, 6537fdb and 7a57ff3 `absent`; f3b2947 `present` (as 8c064eb); the 35 `dev tooling` and 18 `merge` rows have no key match.
+- `git diff --name-only c895ced..split-trial` lists no path under `CLAUDE.md`, `.claude/`, `queues/`, `docs/superpowers/`, `docs/design/` or `.planning/`; `app/voiceprint.py` absent; `app/gate.py`, `app/hearing.py`, `app/drops.py`, `app/notifier.py` present; `tests/test_voice_prompt.py` absent; `python3 -m py_compile app/*.py` exit 0.
+
+**Suite and per-module gate** (the tree differs from Task 4's 93b23c2 and from the evidence tree c34c589, so it reruns). Footprint said first: about one core for about four minutes, Qt windows and Chrome on Slate's screen, uv cache reused. In the trial worktree with `UV_PYTHON=3.12`, the two commands of `.github/cadence/coverage-policy.json` verbatim, in order:
+
+1. `uvx --with pytest-cov --with-requirements tests/requirements.txt pytest --cov=app --cov-branch --cov-report=json`: exit 0, 570 passed, 11 skipped in 242.21 s (581 collected).
+2. `node .github/ci/coverage-modules.mjs --report coverage.json`: exit 0, all 7 `include` modules meet 85 for lines and branches. The 14 lines:
+
+| Module | Lines | Branches |
+|---|---|---|
+| app/gate.py | 99.06 | 97.62 |
+| app/hearing.py | 98.12 | 87.50 |
+| app/agents.py | 100.00 | 97.14 |
+| app/langmark.py | 98.06 | 94.44 |
+| app/macsys.py | 100.00 | 100.00 |
+| app/notifier.py | 100.00 | 100.00 |
+| app/drops.py | 100.00 | 100.00 |
+
+`app/agents.py` is 100.00 lines and 97.14 branches with f4acc7d on the branch less its 21 thumbnail-test lines (82.38 branches without f4acc7d at all; Stop 2). No failure, nothing unexplained. After the run the suite's PID (4667) was gone. The only pytest on `ps` was PID 7228 (`pytest -m walk`, parent 7225, started after my run ended), not started by this plan, and left alone.
+
+**Merge-back** (second scratch worktree, detached at the snapshot 74af430; `split-trial` stands in for `macos`; nothing reaches `personal`):
+
+- R `ee777ec` (the Ignore reorder, `.gitignore` alone, 11 lines in and 11 out; cherry-picked from the Task 5 reorder commit 96e059f; its lines from `__pycache__/` to the end are identical to `split-trial`'s `.gitignore`).
+- H `8ec572d` (`git checkout split-trial -- app/server.py tests/test_agents.py`, committed): `git show --stat --format= H` lists `app/server.py` (2 deletions, fb16e92's two `VOICE_PROMPT` lines) and `tests/test_agents.py` (21 deletions, f4acc7d's Line-split lines) alone; `git diff --name-only split-trial H -- app/server.py tests/test_agents.py` prints nothing.
+- `git merge --no-commit --no-ff split-trial` at H: exit 0, "Automatic merge went well"; `.gitignore` and `app/static/index.html` auto-merged; conflicts: none; `git diff --cached --name-only HEAD`: empty.
+- Merge committed there as `b714dc1`: `git diff --name-only H b714dc1` empty.
+- `git revert --no-edit 8ec572d` made `a4c2e33`: `git diff --name-only R HEAD` prints nothing, so personal's tree equals R's. `git status --porcelain` empty.
+- The two predictions, measured: (1) `tests/test_agents.py` needs H. The same merge at R without H stops with `CONFLICT (content)` in `tests/test_agents.py` and in `app/server.py`, and nowhere else (aborted, `git status --porcelain` empty). (2) `tests/test_wake_loop.py` clears: it is in neither conflict set, with or without H, because 89f4bfe is on both sides and `git diff --name-only 74af430 split-trial -- tests/test_wake_loop.py` prints nothing.
+
+The Path-split and Line-split sections match the picks made. The ruled trial is clean; no new Borderline row.
+
 ## Borderline
 
-Each row is one call for the owner's ruling, in plain words. "Default" is the class the table holds until the owner rules (rows B-01 to B-07 hold my first-pass class; B-08 is the one new row from the trial). Only owner rows are here; how a row is built is technical and settled in the Trial section. "Applies cleanly" below means `git cherry-pick -n` onto the trial tip (a stand-in for its table position); the exact build is redone in Task 7 after the rulings. The owner has ruled on B-01 to B-08 (quotes in each row); B-09 is new from the Ruled trial and its ruling is empty.
+Each row is one call for the owner's ruling, in plain words. "Default" is the class the table holds until the owner rules (rows B-01 to B-07 hold my first-pass class; B-08 is the one new row from the trial). Only owner rows are here; how a row is built is technical and settled in the Trial section. "Applies cleanly" below means `git cherry-pick -n` onto the trial tip (a stand-in for its table position); the exact build is redone in Task 7 after the rulings. The owner has ruled on B-01 to B-10 (quotes in each row); B-09 and B-10 came from the Ruled trial.
 
 **B-01. e53ea7b, hover mode: Esc takes him off your pointer, and Claude knows `void hover-off`.**
 - Option A, fix: on macOS, while he is the cursor he takes no click or key, so nothing you could do reached him; Esc is the way out.
@@ -441,18 +522,18 @@ Each row is one call for the owner's ruling, in plain words. "Default" is the cl
 - Option B: keep f4acc7d (322 lines of agents tests) on `personal` with 283432f's class, so it stays off `macos`.
 - Evidence: three tests in f4acc7d fail on the fix branch without 283432f (`module 'agents' has no attribute 'tool_images'`). Without f4acc7d, `app/agents.py` has 81.9% branch coverage, under the 85 bar the `tests` job enforces (D-09, measured on `tests/test_agents.py` alone, the only test file that names `agents`); 89f4bfe edits the same test file, so it would need the same ruling.
 - Default: the table keeps f4acc7d as fix and 283432f as feature. The plan's default is B, but B fails the agents.py bar, so I recommend A.
-- Ruling: Owner: "B-06,07,08 stay on personal, the rest go to macos when the version is ready to cut after testing". Read as option B ("B-08 ... stay on personal"). f4acc7d, 283432f and 89f4bfe stay on personal; f4acc7d and 89f4bfe moved fix to feature (the owner ruled it) and 283432f stays feature. The Ruled trial section records what this does to the `app/agents.py` bar.
+- Ruling: Owner: "B-06,07,08 stay on personal, the rest go to macos when the version is ready to cut after testing". Read as option B ("B-08 ... stay on personal"). f4acc7d, 283432f and 89f4bfe stay on personal; f4acc7d and 89f4bfe moved fix to feature (the owner ruled it) and 283432f stays feature. The Ruled trial section records what this does to the `app/agents.py` bar. B-09's ruling ("Only the thumbnail") narrows it: only 283432f's thumbnail and its tests stay on personal, so f4acc7d (less its 21 thumbnail-test lines) and 89f4bfe moved feature to fix (the owner ruled it); 283432f stays feature.
 
 **B-09. The agents tests and 89f4bfe, left on `personal` by B-08 option B: the `tests` job fails its `app/agents.py` bar, and the merge-back conflicts in `tests/test_wake_loop.py`.**
 - Option A: reverse B-08 to its option A, so 283432f, f4acc7d and 89f4bfe go to `macos`. Measured earlier (Task 4): `app/agents.py` is 100.00 lines and 97.14 branches, the three agents tests pass with 283432f on, and the Task 5 merge-back with 89f4bfe on the branch was clean.
 - Option B: keep B-08 as ruled. Measured on the full ruled tree: `app/agents.py` is 82.38% branches, under the 85 the `tests` job enforces, so the job's per-module step would fail on `macos`; and merging `macos` into `personal` conflicts in `tests/test_wake_loop.py` (89f4bfe's import line beside a line both sides hold). Clearing these takes either a change to the coverage policy's `app/agents.py` threshold (a policy value, which Plan 1 is not allowed to change) or tests of `app/agents.py` that are not f4acc7d, and a change to Merge-back prep for the test_wake_loop line (technical, for the architect).
 - Evidence: Ruled trial, Stops 2 and 3.
 - Default: A, because B leaves the job red on `macos`.
-- Ruling:
+- Ruling: Owner: "Only the thumbnail". Read as: only 283432f's thumbnail and the tests of it stay on personal. f4acc7d moved feature to fix (the owner ruled it) as a line-split row that leaves its 21 thumbnail-test lines behind (Line-split section). 89f4bfe moved feature to fix (the owner ruled it) as a plain pick. 283432f stays feature. The coverage policy is unchanged; Task 7's rerun measures `app/agents.py` against 85. The `tests/test_wake_loop.py` conflict is expected to clear with 89f4bfe on both sides, and Merge-back prep's Hold-back covers `tests/test_agents.py`; Task 7's trial merge proves both.
 
 **B-10. fb16e92, left on `personal` by B-07: `tests/test_voice_prompt.py` does not exist on the branch and the merge-back conflicts in `app/server.py`.**
 - Option A: reverse B-07, so fb16e92 goes to `macos`. Then 0e6cd82 applies as a plain pick (its `tests/test_voice_prompt.py` file exists) and the two lines beside the hover-off prompt text are on both sides, so the `tests/test_voice_prompt.py` stop and the `app/server.py` conflict are expected to go (not measured; the Task 5 merge-back with fb16e92 on the branch was clean).
 - Option B: keep B-07 as ruled. The Row construction then needs 0e6cd82 as a path-split pick (drop its `tests/test_voice_prompt.py` hunk; this cleared the stop in the evidence pass), and the merge-back needs a change to Merge-back prep for `VOICE_PROMPT` (a technical call for the architect, for example another personal-only reorder commit).
 - Evidence: Ruled trial, Stops 1 and 3.
 - Default: B (the owner's ruling stands) if the architect settles the two technical changes; otherwise A.
-- Ruling:
+- Ruling: Owner: "B-06,07,08 stay on personal, the rest go to macos when the version is ready to cut after testing" (B-07 stands). Read as option B. fb16e92 stays feature. 0e6cd82 is a path-split row leaving `tests/test_voice_prompt.py` behind (Path-split section), and Merge-back prep's Hold-back covers `app/server.py`. No class changes.
