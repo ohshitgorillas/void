@@ -23,7 +23,7 @@ Committed scope. Each maps to exactly one roadmap phase.
 - [ ] **HEAR-01**: User's reply said after Void has gone quiet is heard, unless his voice or its room ring was in the air when it was said
 - [ ] **HEAR-02**: User's reply heard while Void is still speaking waits until he finishes and is then answered; only a stop phrase or his name said over him cuts him off
 - [ ] **HEAR-03**: User never sees Void stop himself because the mic heard his own stop phrase played back, during the line or in its ring after
-- [ ] **HEAR-04**: User can still stop Void by saying a stop phrase over him, even right after Void said that word himself
+- [ ] **HEAR-04**: User can still stop Void by saying a stop phrase over him, even right after Void said that word himself, once more than `ECHO_WORD` has passed
 - [ ] **HEAR-06**: User playing music with lyrics, or with other people talking nearby, does not start a Claude turn in the follow-up window, and none of the owner's replies in the replay corpus is dropped because of it
 
 ### Instant commands
