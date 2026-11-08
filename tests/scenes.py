@@ -716,6 +716,7 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
         patch(server, "CFG", cfg)
         patch(server, "BUS", events)
         patch(server, "SPOKEN", collections.deque(maxlen=200))
+        patch(server, "PLAYED", collections.deque())            # (every scene's clock starts at T0: none hears another's stop phrases)
         patch(server, "make_player", lambda rate: FakePlayer(scene, rate))
         patch(server, "open_mic", open_mic)
         patch(server, "open_clean_mic", open_clean_mic)

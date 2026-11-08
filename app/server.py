@@ -1468,6 +1468,45 @@ FOLLOW_NOTE = ("(Voice note from Void: the mic picked this up a few seconds afte
 IGNORE = "[ignore]"
 STOP_PEEK = 0.5          # s: a burst begun over him is checked this often for a stop phrase while you're still talking
 SPOKEN = collections.deque(maxlen=200)           # (monotonic time, text) of what he said lately
+PLAYED: collections.deque = collections.deque()  # gate.Word: his stop phrases as they come out of the speakers, oldest first
+PLAYED_LOCK = threading.Lock()
+
+
+def _prune_played(now: float) -> None:
+    """The one prune of PLAYED: forget every entry that ended more than ECHO_KEEP before `now`. Caller holds PLAYED_LOCK."""
+    keep = [w for w in PLAYED if now - w.end <= ECHO_KEEP]
+    PLAYED.clear()
+    PLAYED.extend(keep)
+
+
+def note_played(text: str, start: float, dur: float, words: "list[list[float]] | None") -> None:
+    """The one writer of PLAYED: each word of `text` timed from `start` plus its [start, end] pair, or spread evenly over
+    `dur` when there are no word times (or not one per word); only the stop phrases among them are kept."""
+    toks = langmark.unmark(text).split()
+    if not toks:
+        return
+    if words is None or len(words) != len(toks):
+        step = dur / len(toks)
+        words = [[i * step, (i + 1) * step] for i in range(len(toks))]
+    found = gate.stop_phrases([gate.Word(t, start + a, start + b) for t, (a, b) in zip(toks, words)])
+    with PLAYED_LOCK:
+        _prune_played(time.monotonic())
+        PLAYED.extend(found)
+
+
+def played_lately() -> "tuple[gate.Word, ...]":
+    """The one reader of PLAYED: his stop phrases that ended no more than ECHO_KEEP ago (older ones are forgotten)."""
+    with PLAYED_LOCK:
+        _prune_played(time.monotonic())
+        return tuple(PLAYED)
+
+
+def played_cut(at: float) -> None:
+    """A sentence cut off never plays: drop every entry starting at or after `at`."""
+    with PLAYED_LOCK:
+        keep = [w for w in PLAYED if w.start < at]
+        PLAYED.clear()
+        PLAYED.extend(keep)
 
 
 def note_spoken(text):
@@ -1656,6 +1695,7 @@ class Wake:
             cls.talked = [[s, min(e, at), min(u, at)] for s, e, u in cls.talked if s < at]
             cls.owed = 0                         # (what he still owed will never sound)
             cls._tell()
+        played_cut(at)                           # (and the stop phrases of his that were to play from then on)
         cls.nudge()
 
     @classmethod
@@ -2496,12 +2536,13 @@ class Speaker:
         return cls.proc
 
     @classmethod
-    def _write(cls, data, g, again=True, sound=True, owe=None):
+    def _write(cls, data, g, again=True, sound=True, owe=None, played=None):
         """Stream raw samples, keeping LEAD seconds buffered. If we were ever late (the speakers ran dry) count it and
         move the clock on, so the start times we tell the page stay true. If the player ends mid-way (you picked other
         speakers) a new one carries on, from what the old one still had queued and so never played. `owe`: a one-item
         list holding True while this sentence is still owed: its first sound chunk pays it, inside the same
-        Wake.talking call that records the chunk, and clears it."""
+        Wake.talking call that records the chunk, and clears it. `played`: (text, dur, words) of the sentence, noted in
+        PLAYED at that same chunk's time, so his stop phrases are timed from the moment Wake.talked has his sound start."""
         step = max(2, int(cls.prate * 0.02)) * 2
         for i in range(0, len(data), step):
             while True:
@@ -2537,11 +2578,14 @@ class Speaker:
                 except Exception as e:  # noqa: BLE001
                     print(f"[void] audio player: {e}", file=sys.stderr)
                     return False
-                return cls._write(data[max(0, i - back):], g, again=False, sound=sound, owe=owe)
+                return cls._write(data[max(0, i - back):], g, again=False, sound=sound, owe=owe, played=played)
             at, n = cls.t0 + cls.written / cls.prate + cls.LAT, len(data[i:i + step]) // 2   # (heard from the speakers then)
             hearing.PlayRef.played(data[i:i + step], cls.prate, at)
             if sound and g == cls.gen:                            # (his sound only; not once he's been cut off)
-                Wake.talking(at, at + n / cls.prate, int(bool(owe and owe[0])), chunk=True)
+                first = bool(owe and owe[0])
+                if first and played:                              # (this sentence's sound begins now: so do its words)
+                    note_played(played[0], at, played[1], played[2])
+                Wake.talking(at, at + n / cls.prate, int(first), chunk=True)
                 if owe:
                     owe[0] = False
             cls.written += n
@@ -2584,7 +2628,7 @@ class Speaker:
             BUS.pub(t="spk", id=sid, at=round((start - now + cls.LAT) * 1000), dur=round(dur, 3), words=words,
                     level=level, step=lstep)
             owe = [True]                                        # (paid by its first sound chunk, else below)
-            ok = cls._write(pcm, g, owe=owe)
+            ok = cls._write(pcm, g, owe=owe, played=(text, dur, words))
             if owe[0] and g == cls.gen:                         # (no sound of its own: no samples, or the player failed)
                 Wake.pay()
             Wake.flush()                                        # (a write that failed part-way still tells the page its end)

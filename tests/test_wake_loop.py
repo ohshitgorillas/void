@@ -790,7 +790,8 @@ class _OneRound(threading.Condition):
 class NativeOwed(unittest.TestCase):
     """Wake.owed with the native Speaker: Speaker.say owes the sentence, the first chunk of its sound pays it (inside
     the Wake.talking call that records the chunk), every road that ends it with no sound pays it too, and a sentence
-    dropped as stale pays nothing (Speaker.stop's hush settled it). Wake.air reads none of it."""
+    dropped as stale pays nothing (Speaker.stop's hush settled it). Wake.air reads none of it. The stop phrases of the
+    sentence are noted in server.PLAYED at the time of that same first chunk."""
 
     def setUp(self):
         S, W = server.Speaker, server.Wake
@@ -810,6 +811,7 @@ class NativeOwed(unittest.TestCase):
                                              sleep=lambda s: self.clock.__setitem__(0, self.clock[0] + s)))
         self.patch(server.hearing, "PlayRef", FakeRef())
         self.patch(server, "SPOKEN", type(server.SPOKEN)())
+        self.patch(server, "PLAYED", collections.deque())
         self.patch(W, "nudge", classmethod(lambda cls: None))
 
     def events(self, kind="voice"):
@@ -934,6 +936,209 @@ class NativeOwed(unittest.TestCase):
         server.Speaker._write(bytes(SPK_STEP_BYTES), 7, owe=[True])
         first = self.events()[0]
         self.assertEqual((first["owed"], first["left"] > 0), (0, True), f"the copy showed the sentence neither owed nor sounding: {first}")
+
+    # ---- his stop phrases, timed from the first sound chunk Wake.talked records for the sentence
+    def first_chunks(self):
+        """Wrap Wake.talking: → the list of (start, paid) it is given, in order."""
+        seen, real = [], server.Wake.__dict__["talking"].__func__
+
+        def talking(cls, start, end, paid=0, chunk=False):
+            seen.append((start, paid))
+            return real(cls, start, end, paid, chunk)
+        p = mock.patch.object(server.Wake, "talking", classmethod(talking))
+        p.start()
+        self.addCleanup(p.stop)
+        return seen
+
+    def test_a_stop_in_a_sentence_is_noted_at_the_first_chunks_time_plus_the_words_offset(self):
+        chunks = self.first_chunks()
+        text, words = "Okay, I will stop now.", [[0.0, 0.2], [0.2, 0.4], [0.4, 0.6], [0.6, 0.8], [0.8, 1.0]]
+        server.Speaker.say(text, 1)
+        server.Speaker.ready.append((server.Speaker.gen, 1, text, bytes(SPK_RATE * 2), SPK_RATE, words, 0.0, 0.0))
+        self.work(server.Speaker._player_loop)
+        paid = [at for at, p in chunks if p]
+        self.assertEqual(len(paid), 1, f"the sentence's first chunk didn't pay it exactly once: {chunks}")
+        self.assertEqual(server.Wake.talked[0][0], paid[0], "Wake.talked doesn't start at the paying chunk")
+        self.assertEqual([(w.start, w.end) for w in server.PLAYED], [(paid[0] + 0.6, paid[0] + 0.8)],
+                         "his one stop phrase isn't timed from the sentence's first sound chunk")
+
+    def test_a_sentence_with_no_stop_phrase_notes_nothing(self):
+        server.Speaker.say("Hello there.", 1)
+        self.made()
+        self.work(server.Speaker._player_loop)
+        self.assertEqual(list(server.PLAYED), [])
+
+    def test_a_sentence_that_never_sounds_notes_nothing(self):
+        server.Speaker.say("Please stop.", 1)
+        self.made(text="Please stop.", pcm=b"")
+        self.work(server.Speaker._player_loop)
+        self.assertEqual(list(server.PLAYED), [])
+
+    def test_the_silent_pause_after_a_sentence_notes_nothing_more(self):
+        server.Speaker.say("Stop.", 1)
+        server.Speaker.ready.append((server.Speaker.gen, 1, "Stop.", bytes(SPK_RATE * 2 // 5), SPK_RATE, None, 0.0, 0.0))
+        self.work(server.Speaker._player_loop)
+        self.assertEqual(len(server.PLAYED), 1, list(server.PLAYED))
+
+    def test_the_retry_on_a_reopened_player_notes_the_sentence_once_at_its_first_chunk(self):
+        chunks = self.first_chunks()
+        server.Wake.owe()
+        server.Speaker.proc = FakePlayer(self.clock, dies=0)          # (the speakers changed: its first write fails)
+
+        def reopen(cls, rate):
+            cls.proc = FakePlayer(self.clock)
+            return cls.proc
+        with mock.patch.object(server.Speaker, "_player", classmethod(reopen)):
+            ok = server.Speaker._write(bytes(SPK_RATE * 2 // 2), 7, owe=[True], played=("Stop.", 0.5, None))
+        self.assertTrue(ok)
+        paid = [at for at, p in chunks if p]
+        self.assertEqual(len(paid), 1, f"the retry didn't pay the sentence exactly once: {chunks}")
+        self.assertEqual([(w.start, w.end) for w in server.PLAYED], [(paid[0], paid[0] + 0.5)])
+
+
+# ---- when his own stop phrases play: server.PLAYED, written only by note_played, read through played_lately, cut by
+# played_cut (Wake.hush cuts it, so Speaker.stop and Wake.barge cut it too)
+
+FAR = 10000.0            # seconds: far longer ago than any echo is kept
+
+
+def spans(words):
+    return [(w.start, w.end) for w in words]
+
+
+@unittest.skipIf(server is None, f"server.py doesn't import here: {IMPORT_ERR}")
+class Played(unittest.TestCase):
+    def setUp(self):
+        server.PLAYED.clear()
+        self.addCleanup(server.PLAYED.clear)
+        self.now = time.monotonic()
+
+    def assertSpans(self, got, want):
+        self.assertEqual(len(got), len(want), f"kept {spans(got)}, wanted {want}")
+        for (a, b), (wa, wb) in zip(spans(got), want):
+            self.assertAlmostEqual(a, wa, places=6)
+            self.assertAlmostEqual(b, wb, places=6)
+
+    # note_played: each word timed from `start` plus its [start, end] pair, or spread evenly over `dur`
+    def test_word_times_place_the_stop_phrase(self):
+        s = self.now
+        server.note_played("Okay I will stop now", s, 1.5, [[0.0, 0.25], [0.25, 0.5], [0.5, 0.75], [0.75, 1.0],
+                                                            [1.0, 1.5]])
+        self.assertSpans(list(server.PLAYED), [(s + 0.75, s + 1.0)])
+
+    def test_two_word_stop_phrase_runs_from_its_first_word_to_its_last(self):
+        s = self.now
+        server.note_played("Please hold on a moment", s, 1.5, [[0.0, 0.25], [0.25, 0.5], [0.5, 0.75], [0.75, 1.0],
+                                                               [1.0, 1.5]])
+        self.assertSpans(list(server.PLAYED), [(s + 0.25, s + 0.75)])
+
+    def test_no_word_times_spreads_the_words_evenly(self):
+        s = self.now
+        server.note_played("Fine then I stop", s, 2.0, None)              # four words, half a second each
+        self.assertSpans(list(server.PLAYED), [(s + 1.5, s + 2.0)])
+
+    def test_a_count_of_word_times_that_is_not_the_words_spreads_them_evenly_too(self):
+        s = self.now
+        server.note_played("Fine then I stop", s, 2.0, [[0.0, 1.0]])
+        self.assertSpans(list(server.PLAYED), [(s + 1.5, s + 2.0)])
+
+    def test_every_stop_phrase_in_the_sentence_is_kept(self):
+        s = self.now
+        server.note_played("Stop, I said, hold on", s, 2.5, None)         # five words, half a second each
+        self.assertSpans(list(server.PLAYED), [(s, s + 0.5), (s + 1.5, s + 2.5)])
+
+    def test_a_sentence_with_no_stop_phrase_keeps_nothing(self):
+        server.note_played("Sure, I moved the meeting", self.now, 2.5, None)
+        server.note_played("Sure, I moved the meeting", self.now, 2.5, [[0.0, 0.5], [0.5, 1.0], [1.0, 1.5],
+                                                                        [1.5, 2.0], [2.0, 2.5]])
+        self.assertEqual(list(server.PLAYED), [])
+
+    def test_a_markup_only_sentence_keeps_nothing(self):
+        server.note_played("", self.now, 1.0, None)
+        self.assertEqual(list(server.PLAYED), [])
+
+    # played_lately: what ended more than ECHO_KEEP ago is dropped, the rest returned
+    def test_played_lately_drops_what_ended_long_ago(self):
+        server.note_played("stop", self.now - FAR, 1.0, None)
+        server.note_played("stop", self.now, 1.0, None)
+        got = server.played_lately()
+        self.assertIsInstance(got, tuple)
+        self.assertSpans(got, [(self.now, self.now + 1.0)])
+        self.assertSpans(list(server.PLAYED), [(self.now, self.now + 1.0)])
+
+    def test_a_stop_that_ended_just_inside_echo_keep_survives_note_played_and_played_lately(self):
+        import gate
+        end = self.now - (gate.ECHO_KEEP - 1.0)
+        server.note_played("stop", end - 0.5, 0.5, None)
+        server.note_played("stop", self.now, 1.0, None)                    # (note_played drops old entries again)
+        want = [(end - 0.5, end), (self.now, self.now + 1.0)]
+        self.assertSpans(list(server.PLAYED), want)
+        self.assertSpans(server.played_lately(), want)
+        self.assertSpans(list(server.PLAYED), want)
+
+    def test_played_lately_itself_drops_what_ended_more_than_echo_keep_ago(self):
+        import gate
+        server.note_played("stop", self.now, 1.0, None)
+        old = self.now - gate.ECHO_KEEP - 1.0
+        server.PLAYED.appendleft(gate.Word("stop", old - 0.5, old))   # (past note_played: only played_lately drops it)
+        got = server.played_lately()
+        self.assertSpans(got, [(self.now, self.now + 1.0)])
+        self.assertSpans(list(server.PLAYED), [(self.now, self.now + 1.0)])
+
+    # played_cut(at): every entry starting at or after `at` is dropped
+    def test_played_cut_drops_what_starts_at_or_after(self):
+        s = self.now
+        for start in (s, s + 9.5, s + 10.0, s + 20.0):
+            server.note_played("stop", start, 1.0, None)
+        server.played_cut(s + 10.0)
+        self.assertSpans(list(server.PLAYED), [(s, s + 1.0), (s + 9.5, s + 10.5)])
+
+
+@unittest.skipIf(server is None, f"server.py doesn't import here: {IMPORT_ERR}")
+class Hush(unittest.TestCase):
+    """Wake.hush(at) cuts what was to play from `at` on."""
+
+    def setUp(self):
+        W, S = server.Wake, server.Speaker
+        self._saved = {k: W.__dict__[k] for k in ("talked", "follow_on", "cut", "owed")}
+        self.addCleanup(self._restore)
+        W.talked, W.owed = [], 0
+        for k, v in (("todo", []), ("ready", []), ("making", False), ("proc", None), ("filled", False)):
+            p = mock.patch.object(S, k, v)
+            p.start()
+            self.addCleanup(p.stop)
+        p = mock.patch.object(server.BUS, "pub", mock.Mock())
+        p.start()
+        self.addCleanup(p.stop)
+        server.PLAYED.clear()
+        self.addCleanup(server.PLAYED.clear)
+        self.now = time.monotonic()
+        server.note_played("stop", self.now - 1.0, 0.5, None)              # already played
+        server.note_played("stop", self.now + 60.0, 0.5, None)             # still to play
+
+    def _restore(self):
+        for k, v in self._saved.items():
+            setattr(server.Wake, k, v)
+
+    def starts(self):
+        return [w.start for w in server.PLAYED]
+
+    def test_hush_cuts_what_starts_at_or_after_at(self):
+        server.Wake.hush(self.now + 60.0)
+        self.assertEqual(self.starts(), [self.now - 1.0])
+
+    def test_hush_calls_played_cut_with_at(self):
+        with mock.patch.object(server, "played_cut") as cut:
+            server.Wake.hush(self.now + 5.0)
+        cut.assert_called_once_with(self.now + 5.0)
+
+    def test_speaker_stop_cuts_what_was_still_to_play(self):
+        server.Speaker.stop()
+        self.assertEqual(self.starts(), [self.now - 1.0])
+
+    def test_barge_cuts_what_was_still_to_play(self):
+        server.Wake.barge("stop")
+        self.assertEqual(self.starts(), [self.now - 1.0])
 
 
 if __name__ == "__main__":
