@@ -464,6 +464,8 @@ Ruled set: 99 `fix` rows (the 97 above, plus f4acc7d and 89f4bfe moved feature t
 
 The Path-split and Line-split sections match the picks made. The ruled trial is clean; no new Borderline row.
 
+**Closing (Task 8).** Both scratch worktrees were removed with `git worktree remove` and `split-trial` with `git branch -D`. The ruled trial's tip was `e05a52045a2aa8fe5d0f1bcc69c64b7c537efc55` and its tree `efde2a3650d36550d8d50031e532d8f58a805a51` (`git rev-parse split-trial^{tree}`, taken before the delete), so Plan 2 compares its build with that tree without the branch. Afterwards `git worktree list` shows neither scratch path, `git branch --list split-trial` prints nothing, `macos` is still `c895cedd4fc8a72bfb972e3eb36db746011bf8ad` and `origin/macos` `29e22aead6f2667079097d2c238fdd3c284d0936`. `personal` is a descendant of the snapshot 74af430 whose extra commits touch only `.planning/` and the architect's `docs/superpowers/specs/branch-split-construction-design.md` (both personal-only paths, dev tooling).
+
 ## Borderline
 
 Each row is one call for the owner's ruling, in plain words. "Default" is the class the table holds until the owner rules (rows B-01 to B-07 hold my first-pass class; B-08 is the one new row from the trial). Only owner rows are here; how a row is built is technical and settled in the Trial section. "Applies cleanly" below means `git cherry-pick -n` onto the trial tip (a stand-in for its table position); the exact build is redone in Task 7 after the rulings. The owner has ruled on B-01 to B-10 (quotes in each row); B-09 and B-10 came from the Ruled trial.
