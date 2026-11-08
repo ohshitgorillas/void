@@ -47,9 +47,10 @@ VOID_LINES = {
                          "Do you want me to move them into Pictures, or leave them where they are?",
     # his own stop phrases, for the own-stop scenes: it opens with one heard on its own (the first stop check, 0.8 s
     # in, holds only "Stop there": under ECHO_MIN words, so is_echo never judges it; "Whatever" is a long word that
-    # ends after it), runs on for 4 s and more, and ends on one; beyond them it shares no word with you_stop.wav's text
+    # ends after it), runs on for 4 s and more, and ends on one ("Absolutely, stop": two words, long enough that the
+    # burst it makes holds the speech share the check wants); beyond them it shares no word with you_stop.wav's text
     "void_stop.wav": "Stop there. Whatever you decide, tell me where the three pictures from summer should go "
-                     "and carry on whenever you like. Please stop.",
+                     "and carry on whenever you like. Absolutely, stop.",
 }
 YOU_LINES = {
     "you_stop.wav": "Stop, stop, that's not what I asked for.",
