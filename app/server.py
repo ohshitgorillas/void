@@ -1509,6 +1509,32 @@ def note_played(text: str, start: float, dur: float, words: "list[list[float]] |
         PLAYED.extend(found)
 
 
+def _page_words(words) -> "list[list[float]] | None":
+    """The page's [start, end] pairs as note_played takes them, or None when it sent anything else."""
+    def num(x):
+        return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+    if not isinstance(words, list):
+        return None
+    if not all(isinstance(w, (list, tuple)) and len(w) == 2 and num(w[0]) and num(w[1]) for w in words):
+        return None
+    return [[float(a), float(b)] for a, b in words]
+
+
+def note_page_played(b: dict, end: float) -> None:
+    """The page's `/api/speaking` post `b` starts a sentence's sound that runs to `end` (monotonic): note its stop phrases
+    from `end - dur`, where Wake.talked has that sentence's sound start. A missing or malformed text or dur notes nothing,
+    malformed word times are spread evenly, and nothing here raises: the post still updates the record."""
+    text, dur = b.get("text"), b.get("dur")
+    if not isinstance(text, str) or isinstance(dur, bool) or not isinstance(dur, (int, float)):
+        return
+    if not (math.isfinite(dur) and dur > 0 and math.isfinite(end)):
+        return
+    try:
+        note_played(speakable(text), end - dur, float(dur), _page_words(b.get("words")))
+    except Exception as e:  # noqa: BLE001
+        print(f"[void] page played words: {e}", file=sys.stderr)
+
+
 def played_lately() -> "tuple[gate.Word, ...]":
     """The one reader of PLAYED: his stop phrases that ended no more than ECHO_KEEP ago (older ones are forgotten)."""
     with PLAYED_LOCK:
@@ -4012,9 +4038,13 @@ class Handler(BaseHTTPRequestHandler):
                     if b.get("paid"):
                         Wake.pay()
                 elif b.get("on"):
-                    Wake.talking_until(time.monotonic() + max(0.0, float(b.get("left") or 0)), int(bool(b.get("paid"))))
+                    end = time.monotonic() + max(0.0, float(b.get("left") or 0))
+                    note_page_played(b, end)         # (this sentence's words, timed from where its sound starts)
+                    Wake.talking_until(end, int(bool(b.get("paid"))))
                 else:
-                    Wake.talking_until(time.monotonic(), None)
+                    now = time.monotonic()
+                    Wake.talking_until(now, None)
+                    played_cut(now)                  # (the stop phrases of his that were still to play)
                 return self._json({"ok": True, **Wake.record()})
             if p == "/api/capture":
                 b = json.loads(self._body() or b"{}")

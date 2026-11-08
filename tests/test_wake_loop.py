@@ -705,6 +705,8 @@ class PageSpeaking(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         self.addCleanup(ears(server, lambda pcm: self.text).close)
+        server.PLAYED.clear()
+        self.addCleanup(server.PLAYED.clear)
         self.srv = LoopbackThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         self.srv.daemon_threads = True
         threading.Thread(target=self.srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
@@ -760,6 +762,61 @@ class PageSpeaking(unittest.TestCase):
         self.assertEqual((W.owed, len(W.talked)), (0, 1), "a pay alone moved the span, or didn't count")
         self.speaking({"paid": 1})
         self.assertEqual(W.owed, 0, "a pay with nothing owed went below 0")
+
+    # the played words ride the post that starts the sentence's sound: timed from the end it records, less `dur`
+    WORDS = [[0.0, 0.3], [0.3, 0.6], [0.6, 1.0]]               # "Okay, I'll stop." as tidy_and_time gives it
+
+    def played(self):
+        return [(w.text, w.start, w.end) for w in server.played_lately()]
+
+    def test_the_post_that_starts_a_sentence_notes_its_stop_phrase_from_where_its_sound_starts(self):
+        before = self.clock[0]                                               # (the server's clock is this one)
+        r = self.speaking({"on": True, "left": 1.2, "paid": 1, "text": "Okay, I'll stop.", "dur": 1.0, "words": self.WORDS})
+        after = self.clock[0]
+        self.assertEqual(r["ok"], True)
+        got = self.played()
+        self.assertEqual(len(got), 1, f"noted {got}")
+        start = got[0][1]
+        self.assertTrue(before + 0.2 + 0.6 <= start <= after + 0.2 + 0.6 + 1e-6, f"start {start}, not {before + 0.8}")
+        self.assertAlmostEqual(got[0][2] - start, 0.4, places=6)
+
+    def test_a_sentence_scheduled_behind_the_playing_one_starts_where_the_record_says_its_sound_does(self):
+        self.speaking({"on": True, "left": 3.0, "paid": 1})                  # (the one playing: sound to 1003)
+        self.speaking({"on": True, "left": 5.0, "paid": 1, "text": "I'll stop.", "dur": 2.0, "words": [[0.0, 0.5], [0.5, 2.0]]})
+        self.assertAlmostEqual(self.played()[0][1], 1005.0 - 2.0 + 0.5, delta=1e-6)   # (its sound starts at 1003, not at the post)
+
+    def test_words_that_are_null_or_malformed_spread_the_words_over_dur_and_the_post_is_still_200(self):
+        for bad in (None, "x", [[0.0, 1.0]], [[0.0, "a"]] * 3, [[0.0, float("nan")]] * 3, [[True, 1.0]] * 3, [[0.0]] * 3, 7):
+            server.PLAYED.clear()
+            r = self.speaking({"on": True, "left": 1.2, "paid": 1, "text": "Okay, I'll stop.", "dur": 1.0, "words": bad})
+            self.assertTrue(r["ok"], bad)
+            got = self.played()
+            self.assertEqual(len(got), 1, f"words {bad!r}: noted {got}")
+            self.assertAlmostEqual(got[0][1], 1000.2 + 2 / 3, delta=1e-6, msg=f"words {bad!r}")   # two of three thirds in
+            self.assertAlmostEqual(got[0][2], 1000.2 + 1.0, delta=1e-6)
+
+    def test_the_text_is_noted_as_speakable_makes_it(self):
+        self.speaking({"on": True, "left": 1.2, "paid": 1, "text": "**Okay**, I'll `stop`.", "dur": 1.0, "words": self.WORDS})
+        self.assertEqual([w[0] for w in self.played()], ["stop."])
+
+    def test_a_post_without_usable_text_or_dur_notes_nothing_and_still_records_his_sound(self):
+        for extra in ({}, {"text": "I'll stop."}, {"dur": 1.0}, {"text": 5, "dur": 1.0}, {"text": ["stop"], "dur": 1.0},
+                      {"text": "stop", "dur": 0}, {"text": "stop", "dur": -1.0}, {"text": "stop", "dur": "1"},
+                      {"text": "stop", "dur": True}, {"text": "stop", "dur": float("nan")}, {"text": "stop", "dur": float("inf")},
+                      {"text": "stop", "dur": None}):
+            server.Wake.talked = []
+            r = self.speaking({"on": True, "left": 1.2, "paid": 1, **extra})
+            self.assertTrue(r["ok"], extra)
+            self.assertEqual(self.played(), [], f"{extra} noted something")
+            self.assertAlmostEqual(server.Wake.talked[-1][1], 1001.2, delta=1e-6, msg=f"{extra} left the record alone")
+
+    def test_an_on_false_post_removes_the_stop_phrases_that_had_not_started_and_keeps_the_ones_that_had(self):
+        words = [[0.0, 0.5], [0.5, 1.0], [1.0, 1.5], [1.5, 2.0], [2.0, 2.5]]           # "Stop. Then be calm stop." has two
+        self.speaking({"on": True, "left": 3.0, "paid": 1, "text": "Stop. Then be calm stop.", "dur": 3.0, "words": words})
+        self.assertEqual([(w[0], round(w[1] - 1000.0, 6)) for w in self.played()], [("Stop.", 0.0), ("stop.", 2.0)])
+        self.clock[0] = 1000.5
+        self.speaking({"on": False})
+        self.assertEqual([(w[0], round(w[1] - 1000.0, 6)) for w in self.played()], [("Stop.", 0.0)])
 
     def test_a_post_with_left_publishes_where_his_sound_ends_and_the_replies_carry_the_record(self):
         for body in ({"owe": 1}, {"on": True, "left": 1.5, "paid": 1}, {"paid": 1}, {"on": False}):
