@@ -68,6 +68,37 @@ SOUND = HEAD + r"""
   });
 """ + TAIL
 
+# the server's record fed to the page through onEvent (a 'voice' event: left · owed · n), as the page gets it from the server
+RECORD = HEAD + r"""
+  // sounding() reads the record and nothing of the player's own state
+  await scene('record', async () => {
+    const wait = ms => new Promise(r => setTimeout(r, ms)), r = {};
+    r.page0 = [playing, q.length, spkMap.size, sounding()];
+    onEvent({t: 'voice', left: 0.6, owed: 0, n: 1}); r.ahead = sounding();
+    await wait(300); r.mid = sounding();
+    await wait(600); r.ended = sounding();
+    onEvent({t: 'voice', left: 0, owed: 1, n: 2}); r.owed = sounding();
+    onEvent({t: 'voice', left: 0, owed: 0, n: 1}); r.stale = sounding();            // an older copy: nothing changes
+    playing = true; spkMap.set(99, {cap: '', fresh: false});
+    onEvent({t: 'voice', left: 0, owed: 0, n: 3}); r.page1 = [playing, q.length, spkMap.size, sounding()];
+    return r;
+  });
+  // askAloud's untilQuiet, straight after enqueue, waits for his question to play
+  await scene('until', async () => {
+    const S = window.__s, wait = ms => new Promise(r => setTimeout(r, ms)), r = {};
+    S.tts = 'none'; let done = null;
+    enqueue('Can I run this for you?'); onEvent({t: 'voice', left: 0, owed: 1, n: 10});
+    untilQuiet().then(() => { done = performance.now(); });
+    await wait(1000); r.after1s = done;
+    for (let i = 0; i < 50 && !S.posts.some(x => x.paid === 1 && !x.on); i++) await wait(50);
+    await wait(500); r.afterPaid = done; r.paid = S.posts.some(x => x.paid === 1 && !x.on);
+    const t0 = performance.now(); onEvent({t: 'voice', left: 0, owed: 0, n: 11});
+    for (let i = 0; i < 20 && done === null; i++) await wait(50);
+    r.lag = done === null ? null : done - t0;
+    return r;
+  });
+""" + TAIL
+
 
 @unittest.skipUnless(NODE_PATH, "node with a global playwright only")
 class PageTellsItsSound(unittest.TestCase):
@@ -99,6 +130,46 @@ class PageTellsItsSound(unittest.TestCase):
 
     def test_a_sentence_with_no_audio_is_owed_then_paid(self):
         self.assertEqual(self.scene("none")["posts"], [{"owe": 1}, {"paid": 1}, {"on": False}])   # (then the queue runs dry)
+
+
+@unittest.skipUnless(NODE_PATH, "node with a global playwright only")
+class SoundingReadsTheRecord(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.r = run_page(RECORD, INIT + SINIT)
+
+    def scene(self, key):
+        self.assertNotIn(key, self.r["broken"], self.r["broken"].get(key))
+        self.assertIn(key, self.r, f"{key}: no result")
+        return self.r[key]
+
+    def test_scenes_run_without_errors(self):
+        self.assertEqual(self.r["broken"], {})
+        self.assertEqual(self.r["errors"], [])
+
+    def test_sound_ahead_holds_until_the_reported_end_with_the_player_idle(self):
+        r = self.scene("record")
+        self.assertEqual(r["page0"], [False, 0, 0, False])
+        self.assertTrue(r["ahead"])
+        self.assertTrue(r["mid"])
+        self.assertFalse(r["ended"])
+
+    def test_a_sentence_owed_keeps_it_true_with_no_sound_ahead(self):
+        self.assertTrue(self.scene("record")["owed"])
+
+    def test_an_older_copy_changes_nothing(self):
+        self.assertTrue(self.scene("record")["stale"])
+
+    def test_player_state_does_not_decide_it(self):
+        self.assertEqual(self.scene("record")["page1"], [True, 0, 1, False])
+
+    def test_until_quiet_after_enqueue_waits_for_the_record_not_the_hand_off_or_the_pay(self):
+        r = self.scene("until")
+        self.assertIsNone(r["after1s"], r)
+        self.assertTrue(r["paid"], r)                        # (the page's own pay went out: it is not what ends the wait)
+        self.assertIsNone(r["afterPaid"], r)
+        self.assertIsNotNone(r["lag"], r)
+        self.assertLess(r["lag"], 300, r)
 
 
 if __name__ == "__main__":

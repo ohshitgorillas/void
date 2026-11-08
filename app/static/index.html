@@ -1700,9 +1700,10 @@ function enqueue(text,o={}){
   if(info.voice_native){ const id=++spkSeq; spkMap.set(id,{cap:o.cap?(o.cap===true?text:o.cap):'',fresh:!!o.fresh});
     playing=true; spkGuard=performance.now();
     const ep=sayEpoch;      // sentences still queued when you cut him off must never be sent (or played) afterwards
-    sayChain=sayChain.then(()=>ep===sayEpoch?post('/api/say',{text,id,epoch:ep}):null).catch(()=>{ const it=spkMap.get(id); spkMap.delete(id); if(it&&it.cap) karaNow(it.cap,it.fresh); quietNative(); });   // one after another: keeps them in order
+    handing++;
+    sayChain=sayChain.then(()=>ep===sayEpoch?post('/api/say',{text,id,epoch:ep}).then(takeReply):null).catch(()=>{ const it=spkMap.get(id); spkMap.delete(id); if(it&&it.cap) karaNow(it.cap,it.fresh); quietNative(); }).then(()=>{ handing--; });   // one after another: keeps them in order
     return; }
-  const g=gen; speaking({owe:1}); q.push({cap:o.cap?(o.cap===true?text:o.cap):'',fresh:!!o.fresh,
+  const g=gen; handing++; speaking({owe:1}).then(()=>{ handing--; }); q.push({cap:o.cap?(o.cap===true?text:o.cap):'',fresh:!!o.fresh,
     p:post('/api/tts',{text}).then(async r=>{ if(r.status!==200) return null;
       const rate=+(r.headers.get('X-Void-Rate')||1), pause=+(r.headers.get('X-Void-Pause')||.08);
       let words=null; try{ words=JSON.parse(r.headers.get('X-Void-Words')||'null'); }catch(e){}
@@ -1805,7 +1806,18 @@ function karaDrop(){ kara.length=0; }
 // before its owe nor a stale pay after a clear. Always, whatever the hearing settings (the page's own hold reads the record).
 let spkPost=Promise.resolve();
 function speaking(body){ if(info.voice_native) return Promise.resolve();
-  return spkPost=spkPost.then(()=>post('/api/speaking',body)).then(()=>{},()=>{}); }
+  return spkPost=spkPost.then(()=>post('/api/speaking',body)).then(takeReply,()=>{}); }
+// The page's one copy of the server's record of his sound (Wake.talked/owed): where his sound ends on the page clock, how many
+// sentences he still owes (handed to a player, sound not yet begun) and the copy's number n. It comes in with the server's
+// 'voice' event and with the reply to every /api/say, /api/say/stop and /api/speaking post; a copy not newer than the one held
+// is dropped, so a late reply never undoes a newer event. `handing`: this page's own hand-off posts not yet answered, so no
+// moment reads quiet between handing a sentence over and the server owing it.
+let vrec={end:0,owed:0,n:0}, handing=0;
+function takeRec(r){ if(!r||!(r.n>vrec.n)) return; vrec={end:performance.now()+(+r.left||0)*1000,owed:+r.owed||0,n:r.n}; }
+const takeReply=async r=>{ try{ takeRec(await r.json()); }catch(e){} };
+// the one test of "he has not finished speaking", page voice or native: sound still ahead, a sentence owed, or one being handed over.
+// (playing, q and spkMap are the player's own bookkeeping — what to play, captions, the mouth — never a wait for him)
+const sounding=()=>handing>0||vrec.owed>0||vrec.end>performance.now();
 /* tiny synth blips — soft and short. sfx('wake'|'menu'|'close'|'ok'|'done'|'error'|'remind'|'purr'|'pop') */
 function sfx(name){
   if(!info.sfx) return; let a; try{ a=ac(); }catch(e){ return; }
@@ -1849,7 +1861,10 @@ async function pump(){
   if(pumpGen===g) pumpGen=-1;
   if(g===gen) quietCheck();
 }
-function quietNative(){ if(!spkMap.size&&playing&&info.voice_native&&!q.length){ playing=false; talk.face=null; } }
+let qnT=null;
+function quietNative(){ clearTimeout(qnT); qnT=null; if(!(playing&&info.voice_native)) return;
+  if(sounding()){ qnT=setTimeout(quietNative,150); return; }
+  playing=false; talk.face=null; }
 // his "mouth": the server sends each sentence's loudness (every ~40 ms) with its start time
 function spkLevel(ts){ for(const L of spkLv){ if(ts>=L.t0&&ts<L.t0+L.level.length*L.step){ return L.level[((ts-L.t0)/L.step)|0]/100; } }
   if(spkLv.length&&ts>spkLv[spkLv.length-1].t0+spkLv[spkLv.length-1].level.length*spkLv[spkLv.length-1].step+2000) spkLv=[];
@@ -1857,10 +1872,10 @@ function spkLevel(ts){ for(const L of spkLv){ if(ts>=L.t0&&ts<L.t0+L.level.lengt
 function quietCheck(){ if(!srcs.length&&!q.length&&pumpGen!==gen&&playing){ playing=false; speaking({on:false}); } }
 // shush: stop talking. Anything he hadn't said yet still lands on screen (mute mid-answer, or you cut in)
 function shush(){ gen++; sayEpoch++; const rest=q.splice(0), pend=curIt; curIt=null; karaFlush();
-  if(info.voice_native&&(spkMap.size||playing)){ post('/api/say/stop',{epoch:sayEpoch}).catch(()=>{}); for(const it of spkMap.values()) if(it.cap) karaNow(it.cap,it.fresh,true); spkMap.clear(); spkLv=[]; }
+  if(info.voice_native&&(spkMap.size||playing)){ post('/api/say/stop',{epoch:sayEpoch}).then(takeReply).catch(()=>{}); for(const it of spkMap.values()) if(it.cap) karaNow(it.cap,it.fresh,true); spkMap.clear(); spkLv=[]; }
   if(pend&&pend.cap) karaNow(pend.cap,pend.fresh,true); for(const it of rest) if(it.cap) karaNow(it.cap,it.fresh,true);
   for(const x of srcs) try{ x.stop(); }catch(e){} srcs=[]; nextAt=0; pumpGen=-1; if(playing) speaking({on:false}); playing=false; }
-const untilQuiet=async()=>{ for(let i=0;i<400 && (playing||q.length);i++) await sleep(100); };
+const untilQuiet=async()=>{ for(let i=0;i<400 && sounding();i++) await sleep(100); };
 
 /* ================= his memory of the chat (context) ================= */
 let ctxWarned=0;
@@ -1898,7 +1913,7 @@ async function events(){
   }
 }
 function onEvent(ev){
-  if(ev.t==='hello'){ refresh(); return; }           // (re)connected: catch up on his helpers
+  if(ev.t==='hello'){ vrec={end:0,owed:0,n:0}; refresh(); return; }           // (re)connected: catch up on his helpers
   if(ev.t==='sub_start'){ miniAdd(ev); return; }
   if(ev.t==='sub_tick'){ miniTick(ev); return; }
   if(ev.t==='sub_wait'){ miniWait(ev); return; }
@@ -1911,6 +1926,7 @@ function onEvent(ev){
   if(ev.t==='gate_drop'){ gateSpark(); return; }      // the follow-up gate dropped a clip: a faint spark, nothing more
   if(ev.t==='follow'){ follow=!!ev.on; hearRaw=0; if(follow) wake(); return; }
   if(ev.t==='hear'){ hearRaw=ev.v; return; }
+  if(ev.t==='voice'){ takeRec(ev); return; }          // the server's record of his sound, newest copy kept
   if(ev.t==='wake'){ if(rec||transcribing) return;
     if(ev.follow&&hiddenNow) return;          // you sent him away: talking afterwards isn't for him (only "hey Void" is)
     if(hiddenNow) native('show');
@@ -2208,7 +2224,7 @@ async function send(text,opts={}){
 const heldQ=[]; let heldT=null;
 function heldTry(){
   clearTimeout(heldT); heldT=null; if(!heldQ.length) return;
-  if(busy){ heldT=setTimeout(heldTry,300); return; }
+  if(busy||sounding()){ heldT=setTimeout(heldTry,300); return; }
   send(heldQ.splice(0).join(' '),{follow:true});
 }
 
@@ -2223,7 +2239,7 @@ function followTry(){
     followT=setTimeout(followTry,300); return; }
   if(hiddenNow){ native('show'); followT=setTimeout(followTry,700); return; }
   const typing=ask.classList.contains('on')&&input.value.trim();
-  if(busy||playing||rec||transcribing||follow||pendingAppr||pwReq||q.length||spkMap.size||typing){ followT=setTimeout(followTry,400); return; }
+  if(busy||sounding()||rec||transcribing||follow||pendingAppr||pwReq||typing){ followT=setTimeout(followTry,400); return; }
   const f=followQ.shift(), raw=plain(f.text||'').trim();
   if(raw){ followCur=f; wake(); capShow(); setYou(''); himSet(''); sfx('remind');
     if(voiced()){ let fresh=true; for(const s of sentences(raw)) if(s.trim()){ enqueue(unface(s),{cap:s,fresh}); fresh=false; } }
@@ -2235,7 +2251,7 @@ function followTry(){
 
 // run fn once he has finished talking (right away if he isn't): faces that sum something up belong after his words
 function whenQuiet(fn){ const t0=performance.now();
-  (function wait(){ if(!playing||performance.now()-t0>60000) fn(); else setTimeout(wait,120); })(); }
+  (function wait(){ if(!sounding()||performance.now()-t0>60000) fn(); else setTimeout(wait,120); })(); }
 
 /* ================= panels: history, memory, quick actions ================= */
 const panelEl=$('#panel'); let panelKind=null;
