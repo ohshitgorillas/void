@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import suite_data  # noqa: E402  (Void's data folder: the suite's own, set before server.py settles it)
 from fakes import hiss, ears  # noqa: E402
 from loopback_http import LoopbackThreadingHTTPServer  # noqa: E402
+from test_hearing import SPK_RATE, FakePlayer, FakeRef  # noqa: E402  (the Speaker player stand-ins)
 
 try:
     import server
@@ -619,9 +620,9 @@ class PageSpeaking(unittest.TestCase):
 
     def setUp(self):
         W = server.Wake
-        saved = {k: W.__dict__[k] for k in ("talked", "cut")}
+        saved = {k: W.__dict__[k] for k in ("talked", "cut", "owed")}
         self.addCleanup(lambda: [setattr(W, k, v) for k, v in saved.items()])
-        W.talked, W.cut = [], None
+        W.talked, W.cut, W.owed = [], None, 0
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.clock = [1000.0]
@@ -676,6 +677,28 @@ class PageSpeaking(unittest.TestCase):
         self.assertLessEqual(max(s[2] for s in spans), 1002.5 + server.ECHO_TAIL + 30 + 1e-6,
                              f"a span held open past his sound's ring and follow-up: {spans}")
 
+    def test_owe_and_paid_count_the_sentences_handed_to_the_page_s_player(self):
+        W = server.Wake
+        self.speaking({"owe": 1})
+        self.speaking({"owe": 1})
+        self.assertEqual((W.owed, W.talked), (2, []), "an owe made a span, or didn't count")
+        self.speaking({"on": True, "left": 1, "paid": 1})
+        self.assertEqual(W.owed, 1)
+        self.assertAlmostEqual(W.talked[-1][1] - W.talked[-1][0], 1.0, delta=1e-6)
+        self.speaking({"paid": 1})
+        self.assertEqual((W.owed, len(W.talked)), (0, 1), "a pay alone moved the span, or didn't count")
+        self.speaking({"paid": 1})
+        self.assertEqual(W.owed, 0, "a pay with nothing owed went below 0")
+
+    def test_off_ends_his_sound_now_and_clears_what_he_owed(self):
+        W = server.Wake
+        self.speaking({"owe": 1})
+        self.speaking({"owe": 1})
+        self.speaking({"on": True, "left": 5})
+        self.speaking({"on": False})
+        self.assertEqual(W.owed, 0)
+        self.assertAlmostEqual(W.talked[-1][1], self.clock[0], delta=1e-6)
+
     def test_its_good_said_after_the_page_went_quiet_is_a_follow_up(self):
         """The 27 Oct reply: 'while talking (over): It's good', said after his last sound, in the ring and after it."""
         burst = bytes(int(server.RATE * 2 * 1.9))
@@ -705,6 +728,128 @@ class PageSpeaking(unittest.TestCase):
                         any("while talking" in ln for ln in log)))
         self.assertEqual(got, [(round(after, 1), [("wake", "It's good", True)], ["follow"], False)
                                for after in (0.1, server.ECHO_TAIL + 0.2)])
+
+
+class _Done(BaseException):
+    """Ends a Speaker worker after it has handled what it was given (raised by its Condition when it would wait)."""
+
+
+class _OneRound(threading.Condition):
+    def wait(self, timeout=None):
+        raise _Done
+
+
+@unittest.skipIf(server is None, f"server.py doesn't import here: {IMPORT_ERR}")
+class NativeOwed(unittest.TestCase):
+    """Wake.owed with the native Speaker: Speaker.say owes the sentence, the first chunk of its sound pays it (inside
+    the Wake.talking call that records the chunk), every road that ends it with no sound pays it too, and a sentence
+    dropped as stale pays nothing (Speaker.stop's hush settled it). Wake.air reads none of it."""
+
+    def setUp(self):
+        S, W = server.Speaker, server.Wake
+        saved = {k: W.__dict__[k] for k in ("talked", "owed")}
+        self.addCleanup(lambda: [setattr(W, k, v) for k, v in saved.items()])
+        W.talked, W.owed = [], 0
+        self.clock = [100.0]
+        self.player = FakePlayer(self.clock)
+        self.pub = mock.Mock()
+        for k, v in (("gen", 7), ("epoch", 0), ("proc", self.player), ("prate", SPK_RATE), ("written", 1000),
+                     ("t0", 100.0), ("filled", False), ("stats", {}), ("todo", []), ("ready", []), ("making", False),
+                     ("cv", _OneRound())):
+            self.patch(S, k, v)
+        self.patch(S, "_start", classmethod(lambda cls: None))
+        self.patch(server, "time", mock.Mock(wraps=time, monotonic=lambda: self.clock[0],
+                                             sleep=lambda s: self.clock.__setitem__(0, self.clock[0] + s)))
+        self.patch(server.hearing, "PlayRef", FakeRef())
+        self.patch(server.BUS, "pub", self.pub)
+        self.patch(server, "SPOKEN", type(server.SPOKEN)())
+        self.patch(W, "nudge", classmethod(lambda cls: None))
+
+    def patch(self, obj, name, value):
+        p = mock.patch.object(obj, name, value)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def work(self, loop):
+        """Run a Speaker worker on a thread until it would wait for more."""
+        def run():
+            try:
+                loop()
+            except _Done:
+                pass
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        t.join(10)
+        self.assertFalse(t.is_alive(), "the Speaker worker didn't finish its round")
+
+    def made(self, text="Hello there.", pcm=b"\x01\x00" * 800):
+        """A sentence the maker has finished: waiting in `ready` for the player."""
+        server.Speaker.ready.append((server.Speaker.gen, 1, text, pcm, SPK_RATE, None, 0.0, 0.0))
+
+    def test_say_owes_the_sentence_and_changes_nothing_else(self):
+        server.Speaker.say("Hello there.", 1)
+        self.assertEqual(server.Wake.owed, 1)
+        self.assertEqual((server.Wake.talked, server.Wake.air(0.0, 1e6)), ([], (False, False)),
+                         "owing a sentence put sound in the record, or in the air")
+
+    def test_a_sentence_sent_before_the_cut_off_is_not_owed(self):
+        server.Speaker.epoch = 3
+        server.Speaker.say("Hello there.", 1, epoch=2)
+        self.assertEqual(server.Wake.owed, 0)
+
+    def test_its_first_sound_chunk_pays_it_in_the_same_change_as_the_span(self):
+        server.Speaker.say("Hello there.", 1)
+        self.made()
+        seen, real = [], server.Wake.__dict__["talking"].__func__
+
+        def talking(cls, *a, **k):
+            before = cls.owed
+            r = real(cls, *a, **k)
+            seen.append((before, cls.owed, len(cls.talked)))
+            return r
+        with mock.patch.object(server.Wake, "talking", classmethod(talking)):
+            self.work(server.Speaker._player_loop)
+        self.assertGreater(len(seen), 1, "the sentence was written in one chunk")
+        self.assertEqual(seen[0], (1, 0, 1), "the first chunk didn't pay the sentence and add its span in one call")
+        self.assertTrue(all(b == 0 and a == 0 for b, a, _ in seen[1:]), f"a later chunk moved the owe: {seen}")
+
+    def test_a_sentence_with_no_samples_pays(self):
+        server.Speaker.say("Hello there.", 1)
+        self.made(pcm=b"")
+        self.work(server.Speaker._player_loop)
+        self.assertEqual((server.Wake.owed, server.Wake.talked), (0, []))
+
+    def test_a_failing_player_pays(self):
+        server.Speaker.say("Hello there.", 1)
+        self.made()
+        with mock.patch.object(server.Speaker, "_player", classmethod(lambda cls, rate: 1 / 0)), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.work(server.Speaker._player_loop)
+        self.assertEqual(server.Wake.owed, 0)
+        self.pub.assert_any_call(t="spk_skip", id=1)
+
+    def test_a_failing_synth_pays(self):
+        server.Speaker.say("Hello there.", 1)
+        with mock.patch.object(server, "synth", lambda text: 1 / 0), contextlib.redirect_stderr(io.StringIO()):
+            self.work(server.Speaker._maker)
+        self.assertEqual(server.Wake.owed, 0)
+        self.pub.assert_any_call(t="spk_skip", id=1)
+
+    def test_a_sentence_dropped_as_stale_leaves_the_next_ones_owe(self):
+        server.Speaker.say("First one.", 1)
+        server.Speaker.stop()                                     # (the maker had already taken the first one)
+        self.assertEqual(server.Wake.owed, 0, "a cut-off left a sentence owed")
+        server.Speaker.say("Second one.", 2)
+        server.Speaker.todo[:] = [(7, 1, "First one.")]           # (the old generation's, which the maker had taken; the
+                                                                  # second is on its way, owed, not in this maker's hands)
+        self.work(server.Speaker._maker)
+        self.assertEqual(server.Wake.owed, 1, "a stale sentence paid the next one's owe")
+
+    def test_hush_clears_what_he_owed(self):
+        server.Wake.owe()
+        server.Wake.owe()
+        server.Wake.hush()
+        self.assertEqual(server.Wake.owed, 0)
 
 
 if __name__ == "__main__":
