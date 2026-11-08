@@ -421,7 +421,7 @@ class FollowUpGate(unittest.TestCase):
         server.Wake.talked = [[now, now + 5, now + 5]]           # (no follow-up window after it)
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            stopped = server.Wake.stop_in(pcm)
+            stopped = server.Wake.stop_in(pcm, now)
         events = []
         while not self.q.empty():
             events.append(self.q.get_nowait())
@@ -454,7 +454,7 @@ class FollowUpGate(unittest.TestCase):
         self.heard_text[pcm] = SAID["you_hey_void.wav"]
         server.Wake.talked = []
         with contextlib.redirect_stderr(io.StringIO()):
-            said = server.Wake.heard(pcm)
+            said = server.Wake.heard(pcm, time.monotonic())
         self.assertEqual(len(calls), 1, f"gate.judge called {len(calls)}x on one quick listen")
         self.assertIsInstance(calls[0], gate.Burst, f"gate.judge not handed a gate.Burst: {calls[0]!r}")
         self.assertEqual(calls[0].kind, "wake", f"the quick listen not judged as a 'wake' burst: {calls[0]!r}")

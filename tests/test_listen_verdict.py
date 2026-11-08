@@ -147,9 +147,18 @@ class ListenVerdictTest(unittest.TestCase):
                 self.assertEqual([w for w, _ in got], ["noise"], f"{heard!r} not logged as one noise verdict:\n"
                                  + "\n".join(log))
 
+    def his_sound(self, start, end):
+        """His sound coming out of the speakers from `start` to `end` (monotonic), in a Wake.talked of its own."""
+        p = mock.patch.object(server.Wake, "talked", [])
+        p.start()
+        self.addCleanup(p.stop)
+        server.Wake.talking(start, end)
+
     def test_an_echo_of_his_own_voice_is_dropped_and_logged_as_echo(self):
         said = "The build finished and all forty tests passed on the first run."
         server.SPOKEN.append((time.monotonic(), said))
+        now = time.monotonic()
+        self.his_sound(now - 2.0, now + 30.0)                # his voice in the air during the recording
         events, log = self.run_listen(said)
         self.assertEqual(self.sent(events), [], "an echo of his own voice was sent on as a request")
         got = self.verdicts(log)
@@ -163,6 +172,30 @@ class ListenVerdictTest(unittest.TestCase):
         self.assertEqual(whispered, [], "a recording with too little speech was still sent to Whisper")
         got = self.verdicts(log)
         self.assertEqual([w for w, _ in got], ["no speech"], "not logged as one 'no speech' verdict:\n" + "\n".join(log))
+
+    def test_rang_is_judged_over_the_recording_so_his_words_said_after_he_went_quiet_are_sent(self):
+        said = "The build finished and all forty tests passed on the first run."
+        T = server.ECHO_TAIL
+        cases = (  # (his sound, as seconds from the recording's start, (rang, sent on as a request))
+            (None, (False, True)),                          # no sound of his at all
+            ((-10.0, -T - 1.0), (False, True)),             # he went quiet before the recording and his ring died
+            ((-10.0, -0.2), (True, False)),                 # his ring still in the air as the recording began
+            ((-2.0, 30.0), (True, False)),                  # his sound coming out during the recording
+        )
+        got = []
+        for his, _ in cases:
+            with mock.patch.object(server.Wake, "talked", []), \
+                    mock.patch.object(server, "SPOKEN", type(server.SPOKEN)(maxlen=200)):
+                server.SPOKEN.append((time.monotonic(), said))
+                now = time.monotonic()
+                if his:
+                    server.Wake.talking(now + his[0], now + his[1])
+                calls, real = [], gate.judge
+                with mock.patch.object(gate, "judge", lambda *a, **k: calls.append(a[0]) or real(*a, **k)):
+                    events, _ = self.run_listen(said)
+            got.append(([(b.rang, b.talking) for b in calls], bool(self.sent(events))))
+        self.assertEqual(got, [([(rang, False)], sent) for _, (rang, sent) in cases],
+                         "([(rang, talking)] the recording was judged with, sent on as a request)")
 
 
 

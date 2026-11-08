@@ -74,7 +74,7 @@ def now(why, kind, text, talking=False):
         return "as logged"
     # (a burst that reached its check had speech enough; Whisper's numbers aren't logged, so a follow-up is judged on
     # its words, which is how it reached the voiceprint: its confidence had passed)
-    b = gate.Burst(text=text, heard=None, speech=1.0, seconds=1.0, kind=kind, talking=talking)
+    b = gate.Burst(text=text, heard=None, speech=1.0, seconds=1.0, kind=kind, talking=talking, rang=True)
     v = gate.judge(b, [], {"voice_gate": True})
     if len(text) >= CUT and (why == "noise" or (why == "kept" and v.why == "noise")):
         return "as logged"       # (a sentence looping needs all of it)

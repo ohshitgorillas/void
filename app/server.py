@@ -1412,6 +1412,7 @@ class Listen:
                     break
         finally:
             mic.close()
+        stopped = time.monotonic()               # (when the recording stopped, not after Whisper is done)
         if peak < 0.0005:
             emit(t="error", text="the mic is completely silent — is the right input selected/unmuted? "
                                  "(`void doctor` lists inputs; set mic_device in the config)")
@@ -1430,7 +1431,7 @@ class Listen:
             emit(t="transcribing")
             text = transcribe_pcm(bytes(pcm))
         # (push-to-talk is you asking: not judged as heard over him, so a "stop" said into it is sent on as said)
-        v = gate.judge(gate.Burst(text, None, ss, secs, "listen", False), said_lately(), CFG)
+        v = gate.judge(gate.Burst(text, None, ss, secs, "listen", False, Wake.air(t0, stopped)[1]), said_lately(), CFG)
         verdict_out(v, text, "listen")
         if not v.keep:
             emit(t="cancel", why=v.why)
@@ -1550,6 +1551,12 @@ class Wake:
         """He's talking from now until `end` (the page's own voice tells us so)."""
         cls.talking(time.monotonic(), end)
         cls.nudge()
+
+    @classmethod
+    def air(cls, started: float, ended: float) -> tuple[bool, bool]:
+        """(talking, rang) for a burst heard from `started` to `ended` (monotonic): his sound at some moment of it,
+        and his sound or its ring (ECHO_TAIL) at some moment of it. The one source of Burst.talking and Burst.rang."""
+        return cls.heard_him(started, ended), cls.heard_him(started, ended, ECHO_TAIL)
 
     @classmethod
     def heard_him(cls, a, b, tail=0.0):
@@ -1681,7 +1688,7 @@ class Wake:
                         if (not req and cls.span_at(started) and now - peek_at >= STOP_PEEK
                                 and len(seg) >= RATE * 2 * STOP_PEEK):
                             peek_at = now
-                            if cls.stop_in(bytes(seg)):
+                            if cls.stop_in(bytes(seg), started):
                                 in_speech, seg, said = False, bytearray(), None
                                 continue
                         if req:
@@ -1693,7 +1700,7 @@ class Wake:
                                                 else (TURN_QUIET, TURN_VAD, TURN_MAX))
                             done = now - last_voice > quiet or now - vad_last > vad or len(seg) > RATE * 2 * most
                             if done and not cls.speaking() and len(seg) > RATE * 2 * 0.35:
-                                said = cls.heard(bytes(seg))
+                                said = cls.heard(bytes(seg), started)
                                 if WAKE_RE.match(said or ""):     # "hey Void, ...": hear the rest of it out
                                     req, done, said = True, False, None
                         if done:
@@ -1715,9 +1722,10 @@ class Wake:
             mic.close()
 
     @classmethod
-    def heard(cls, pcm):
+    def heard(cls, pcm, started):
         """A quick listen for his name at the first pause: what Whisper heard, kept or dropped (Wake.check judges it
         again as its own kind). None: too little speech to be worth transcribing."""
+        now = time.monotonic()
         try:
             ss, secs = speech_seconds(pcm), len(pcm) / (RATE * 2)
             text = (transcribe_pcm(pcm, beam=1, hint="Hey Void.", sure=True)
@@ -1725,20 +1733,21 @@ class Wake:
         except Exception as e:  # noqa: BLE001
             print(f"[void] wake word stt: {e}", file=sys.stderr)
             return None
-        v = gate.judge(gate.Burst(text, None, ss, secs, "wake", cls.speaking()), said_lately(), CFG)
+        v = gate.judge(gate.Burst(text, None, ss, secs, "wake", *cls.air(started, now)), said_lately(), CFG)
         verdict_out(v, text, "wake")
         return None if v.why == "no speech" else text
 
     @classmethod
-    def stop_in(cls, pcm):
+    def stop_in(cls, pcm, started):
         """A burst begun over him, still going: if what's said so far holds a stop phrase, stop him now (True)."""
+        now = time.monotonic()
         try:
             ss, secs = speech_seconds(pcm), len(pcm) / (RATE * 2)
             text = transcribe_pcm(pcm, beam=1, sure=True) if gate.spoken_enough(ss, secs, "peek") else ""
         except Exception as e:  # noqa: BLE001
             print(f"[void] stop check stt: {e}", file=sys.stderr)
             return False
-        v = gate.judge(gate.Burst(text, None, ss, secs, "peek", cls.speaking()), said_lately(), CFG)
+        v = gate.judge(gate.Burst(text, None, ss, secs, "peek", *cls.air(started, now)), said_lately(), CFG)
         verdict_out(v, text, "peek")
         if v.act != "barge":
             return False
@@ -1770,6 +1779,7 @@ class Wake:
         """One burst heard out. `at`: when its first sample was caught (monotonic), so a reply begun over him can be cut
         free of his voice."""
         ended = time.monotonic() if ended is None else ended     # (when you last made a sound)
+        began = started                          # (when Wake.session passed it, before ran_on moves it)
         # started after he finished talking, inside the follow-up window → it's a request, no "hey Void" needed
         # (Claude may still be working: the page keeps it and sends it once he's done)
         follow = cls.window_at(started)
@@ -1784,7 +1794,7 @@ class Wake:
                 pcm = pcm[cut:]                  # opened the burst, and heard it is his voice, not yours)
             else:
                 cut = 0
-        talking = cls.heard_him(started, ended)  # (he was audible while it was heard: not whether he is, now)
+        talking, rang = cls.air(began, ended)    # (his sound, or its ring, was in the air while it was heard)
         kind = "over" if over else "follow" if follow else "wake"
         heard = None
         try:
@@ -1804,8 +1814,8 @@ class Wake:
         text = text or ""
         hear_out(f"heard {secs:.1f}s, {len(text.split())} words"
                  f"{', follow-up' if follow else ''}{f', after his last word ({cut / (RATE * 2):.1f}s of him cut)' if cut else ''}"
-                 f"{', wake word' if WAKE_RE.match(text) else ''}{', while talking' if talking else ''}")
-        v = gate.judge(gate.Burst(text, heard, ss, secs, kind, talking), said_lately(), CFG)
+                 f"{', wake word' if WAKE_RE.match(text) else ''}{', while talking' if talking else ', in his echo' if rang else ''}")
+        v = gate.judge(gate.Burst(text, heard, ss, secs, kind, talking, rang), said_lately(), CFG)
         verdict_out(v, text, kind)
         if v.act == "barge":
             cls.barge(text)

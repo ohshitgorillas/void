@@ -7,6 +7,7 @@ the mic catches then is taken for his own voice, however garbled, and dropped. P
 import contextlib
 import inspect
 import io
+import re
 import sys
 import time
 import unittest
@@ -79,14 +80,20 @@ class Echo(unittest.TestCase):
         self.assertFollowUp(self.burst("I moved the meeting to Thursday at three"),
                             "I moved the meeting to Thursday at three")
 
-    # what the log showed slipping through just after his echo: his own words, badly misheard
-    def test_badly_misheard_echo_after_tail_dropped(self):
+    # anything said after he has gone quiet gets through: past his ring, words lining up with his are not his echo
+    # (docs/superpowers/specs/quiet-replies-design.md:23, :27: 0.6 s past the ring, these change to kept)
+    def test_badly_misheard_echo_heard_after_the_ring_is_a_follow_up(self):
         server.note_spoken("Kill 'Em All really belongs in the 30K rolloff folder.")
         server.note_spoken("The other two albums are already sorted, but you might want to check that.")
+        got = []
         for heard in ("I can kill them all really long in a 30K bonus folder", "But you might want to check me."):
             self.pub.reset_mock()
             self.after_speech(server.ECHO_TAIL + 0.6)
-            self.assertDropped(self.burst(heard), heard)
+            got.append((heard, [(e.get("t"), str(e.get("text")).strip(" .,!?"), e.get("follow"))
+                                for e in self.burst(heard)]))
+        self.assertEqual(got, [(heard, [("wake", heard.strip(" .,!?"), True)]) for heard in
+                               ("I can kill them all really long in a 30K bonus folder", "But you might want to check me.")],
+                         "(heard, the (event, text sent on, follow-up) it was sent on as): kept whole, not dropped as echo")
 
     def test_request_sharing_his_words_gets_through(self):
         server.note_spoken("Kill 'Em All really belongs in the 30K rolloff folder.")
@@ -95,12 +102,18 @@ class Echo(unittest.TestCase):
         self.assertFollowUp(self.burst("please move Reload to the 30K folder too"),
                             "please move Reload to the 30K folder too")
 
-    def test_speaker_say_records(self):
+    def test_his_said_words_heard_after_the_ring_are_a_follow_up(self):
         with mock.patch.object(server.Speaker, "_start", classmethod(lambda cls: None)):
             server.Speaker.say(REPLY, 1)
         self.addCleanup(server.Speaker.todo.clear)
         self.after_speech(server.ECHO_TAIL + 0.6)
-        self.assertDropped(self.burst("I moved the meeting to Thursday at three"))
+        self.assertFollowUp(self.burst("I moved the meeting to Thursday at three"),
+                            "I moved the meeting to Thursday at three")
+        # (what Speaker.say noted, heard back in the ring after his last sound, is still his echo)
+        air, ev, log = self.aired((1000.0, 1003.0), 1003.2, 1005.1, 1005.5, "I moved the meeting to Thursday at three")
+        self.assertEqual((air, [e.get("t") for e in ev], any(" echo (follow): " in ln for ln in log)),
+                         ((False, True), ["gate_drop"], True),
+                         "(talking, rang) over the burst, events, logged as an echo drop")
 
     # the time gate: his spans hold his sound only, and the ring is not talking
     def test_span_at_is_the_span_of_his_sound_without_the_ring(self):
@@ -184,14 +197,16 @@ class Echo(unittest.TestCase):
         self.assertTrue(server.Wake.window_open())
         self.assertFollowUp(self.burst("please add milk to the shopping list"))
 
-    def test_follow_up_echo_dropped_after_tail(self):
+    def test_follow_up_repeating_his_reply_after_the_ring_is_kept(self):
         self.after_speech(server.ECHO_TAIL + 0.6)
         server.note_spoken(REPLY)
-        self.assertDropped(self.burst("I moved the meeting to Thursday at three"))
+        self.assertFollowUp(self.burst("I moved the meeting to Thursday at three"),
+                            "I moved the meeting to Thursday at three")
 
-    def test_wake_word_echo_dropped(self):
+    def test_wake_word_burst_repeating_his_words_with_no_sound_of_his_is_kept(self):
         server.note_spoken("Okay. Hey Void, you can ask me anything about the calendar this week.")
-        self.assertEqual(self.burst("Hey Void, you can ask me anything about the calendar"), [])
+        ev = self.burst("Hey Void, you can ask me anything about the calendar")
+        self.assertEqual([e.get("t") for e in ev], ["wake"])
 
     def test_wake_word_still_works(self):
         ev = self.burst("Hey Void, what is the weather like")
@@ -256,6 +271,159 @@ class Echo(unittest.TestCase):
                 got.append([b.kind for b in calls])
         self.assertEqual(got, [[kind] for kind, *_ in cases])
 
+    # echo is only his voice heard while he makes sound, or in the room's ring after it (gate.ECHO_TAIL)
+    def aired(self, his, began, ended, judged_at, text):
+        """His sound over `his` (from, to), then a burst heard as `text` from `began` to `ended`, judged at `judged_at`.
+        → (Wake.air over the burst, bus events, '[void]' log lines)."""
+        clock = self.clocked()
+        server.Wake.talked = []
+        self.pub.reset_mock()
+        with mock.patch.dict(server.CFG, {"follow_up": 30}):
+            clock[0] = his[0]
+            server.Wake.talking(*his)
+            clock[0] = judged_at
+            air = server.Wake.air(began, ended)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                ev = self.burst(text, began, ended)
+        return tuple(air), ev, [ln for ln in err.getvalue().splitlines() if ln.startswith("[void]")]
+
+    def test_real_echo_begun_while_he_made_sound_is_still_dropped_as_echo(self):
+        server.note_spoken(REPLY)
+        for line in ALBUMS:
+            server.note_spoken(line)
+        cases = (  # (kind, his sound, burst began/ended, judged at, heard)
+            ("over", (1000.0, 1010.0), (1002.0, 1005.0), 1005.5, "I moved the meeting to Thursday at three"),
+            ("over", (1000.0, 1010.0), (1004.0, 1007.0), 1007.4, "I can kill them all really long in a 30K bonus folder"),
+            ("follow", (1000.0, 1003.0), (1002.5, 1013.0), 1013.3,
+             "Sure I moved the meeting to Thursday at three and told Sam about it"),
+        )
+        got = []
+        for kind, his, (began, ended), judged_at, heard in cases:
+            air, ev, log = self.aired(his, began, ended, judged_at, heard)
+            got.append((heard, air, [e.get("t") for e in ev if e.get("t") != "gate_drop"],
+                        any(f" echo ({kind}): " in ln for ln in log)))
+        self.assertEqual(got, [(heard, (True, True), [], True) for *_, heard in cases],
+                         "(heard, (talking, rang) over the burst, events other than a drop, logged as an echo drop)")
+
+    def test_his_own_words_heard_in_the_ring_after_his_last_sound_are_dropped_as_echo(self):
+        T = server.ECHO_TAIL
+        server.note_spoken(REPLY)
+        for line in ALBUMS:
+            server.note_spoken(line)
+        cases = (  # (burst began/ended, judged at, heard): begun after his sound stopped, while the room still rang
+            ((1003.2, 1005.1), 1005.5, "I moved the meeting to Thursday at three"),
+            ((1003.1, 1003.0 + T - 0.1), 1003.0 + T + 0.3, "I can kill them all really long in a 30K bonus folder"),
+        )
+        got = []
+        for (began, ended), judged_at, heard in cases:
+            air, ev, log = self.aired((1000.0, 1003.0), began, ended, judged_at, heard)
+            got.append((heard, air, [e.get("t") for e in ev], any(" echo (follow): " in ln for ln in log)))
+        self.assertEqual(got, [(heard, (False, True), ["gate_drop"], True) for *_, heard in cases],
+                         "(heard, (talking, rang) over the burst, events, logged as an echo drop)")
+
+    def stamped_clock(self, at=1000.0):
+        """The clock as `clocked` sets it, with the rest of `time` real, so log lines keep their date stamps."""
+        clock = [at]
+        p = mock.patch.object(server, "time", mock.Mock(wraps=time, monotonic=lambda: clock[0]))
+        p.start()
+        self.addCleanup(p.stop)
+        return clock
+
+    # the 27 Oct follow-up: "Anything I say after you go quiet gets through."
+    YES = "Yes, do it"
+
+    def yes_do_it(self):
+        """Void has said a line holding "yes, do it" and finished speaking more than ECHO_TAIL ago, follow-ups on;
+        then a 3.0 s burst heard as "Yes, do it". → (bus events, '[void]' log lines with their stamps cut off)."""
+        T = server.ECHO_TAIL
+        server.note_spoken("Both albums can go in the 30K folder. If that sounds right, say yes, do it.")
+        clock = self.stamped_clock()
+        self.pub.reset_mock()
+        began = 1003.0 + T + 0.5
+        err = io.StringIO()
+        with mock.patch.dict(server.CFG, {"follow_up": 30}), \
+                fakes.ears(server, lambda pcm: self.YES), contextlib.redirect_stderr(err):
+            clock[0] = 1000.0
+            server.Wake.talking(1000.0, 1003.0)
+            clock[0] = began + 3.0 + 0.4
+            server.Wake.check(bytes(int(server.RATE * 2 * 3.0)), began, ended=began + 3.0)
+        stamp = re.compile(r"^\[void\] \d{4}-\d\d-\d\d \d\d:\d\d:\d\d ")
+        log = [stamp.sub("", ln) for ln in err.getvalue().splitlines() if stamp.match(ln)]
+        return [c.kwargs for c in self.pub.call_args_list], log
+
+    def test_yes_do_it_said_after_he_went_quiet_is_sent_on_as_a_follow_up(self):
+        ev, _ = self.yes_do_it()
+        self.assertFollowUp(ev, self.YES)
+
+    def test_yes_do_it_after_he_went_quiet_is_heard_as_a_follow_up_and_kept_not_dropped_as_echo(self):
+        _, log = self.yes_do_it()
+        self.assertEqual(([ln for ln in log if ln.startswith("heard ")],
+                          [ln for ln in log if ln.endswith(f": {self.YES}")]),
+                         (["heard 3.0s, 3 words, follow-up"], [f"kept (follow): {self.YES}"]),
+                         "(the heard line, the verdict line) of the 27 Oct follow-up")
+
+    # Wake.air: the one timing of a burst, (his sound at some moment of it, his sound or its ring at some moment of it)
+    def test_air_says_whether_his_sound_and_its_ring_were_in_the_air_over_a_burst(self):
+        T = server.ECHO_TAIL
+        cases = (  # (burst began/ended, (talking, rang)) against his sound from 1000 s to 1003 s
+            ((1002.0, 1005.0), (True, True)),                   # begun while he made sound
+            ((995.0, 1001.0), (True, True)),                    # begun before him, heard into his sound
+            ((1003.2, 1005.1), (False, True)),                  # begun in the ring after his sound
+            ((1003.0 + T + 0.5, 1006.0 + T), (False, False)),   # begun after the ring
+            ((990.0, 999.0), (False, False)),                   # over before he made a sound
+        )
+        clock = self.clocked()
+        with mock.patch.dict(server.CFG, {"follow_up": 30}):
+            clock[0] = 1000.0
+            server.Wake.talking(1000.0, 1003.0)
+            clock[0] = 1010.0 + T
+            got = [tuple(server.Wake.air(began, ended)) for (began, ended), _ in cases]
+        self.assertEqual(got, [want for _, want in cases], "(talking, rang) per burst")
+
+    def test_check_takes_talking_and_rang_from_air_over_the_burst_as_it_began(self):
+        clock = self.clocked()
+        calls = self.judged()
+        got = []
+        for aired in ((False, True), (False, False), (True, True)):
+            timed = []
+            with mock.patch.dict(server.CFG, {"follow_up": 30}), \
+                    mock.patch.object(server.Wake, "air",
+                                      classmethod(lambda cls, s, e, r=aired: timed.append((s, e)) or r)):
+                server.Wake.talked = []
+                clock[0] = 1000.0
+                server.Wake.talking(1000.0, 1003.0)
+                clock[0] = 1013.3
+                calls.clear()
+                self.burst("please add milk to the shopping list", 1002.5, 1013.0)   # begun in his last words, ran on
+            got.append((sorted(set(timed)), [(b.talking, b.rang) for b in calls]))   # (every call over the burst)
+        self.assertEqual(got, [([(1002.5, 1013.0)], [aired]) for aired in ((False, True), (False, False), (True, True))],
+                         "(Wake.air's calls over the burst, the (talking, rang) the burst was judged with)")
+
+    # the heard line says when a burst rang without overlapping his sound
+    def test_heard_line_says_in_his_echo_only_when_the_burst_rang_without_his_sound(self):
+        T = server.ECHO_TAIL
+        cases = (  # (his sound, burst began/ended, judged at, (", in his echo", ", while talking") on the heard line)
+            ((1000.0, 1003.0), (1003.2, 1005.1), 1005.5, (True, False)),                  # in the ring
+            ((1000.0, 1010.0), (1002.0, 1005.0), 1005.5, (False, True)),                  # over his sound
+            ((1000.0, 1003.0), (1003.0 + T + 0.5, 1005.4 + T), 1005.8 + T, (False, False)),  # after the ring
+        )
+        clock = self.stamped_clock()
+        stamp = re.compile(r"^\[void\] \d{4}-\d\d-\d\d \d\d:\d\d:\d\d heard ")
+        got = []
+        for his, (began, ended), judged_at, _ in cases:
+            server.Wake.talked = []
+            err = io.StringIO()
+            with mock.patch.dict(server.CFG, {"follow_up": 30}), contextlib.redirect_stderr(err):
+                clock[0] = his[0]
+                server.Wake.talking(*his)
+                clock[0] = judged_at
+                self.burst("please add milk to the shopping list", began, ended)
+            heard = [ln for ln in err.getvalue().splitlines() if stamp.match(ln)]
+            got.append([(", in his echo" in ln, ", while talking" in ln) for ln in heard])
+        self.assertEqual(got, [[flags] for *_, flags in cases],
+                         "(', in his echo', ', while talking') on each burst's heard line")
+
     # barge-in
     def test_barge_in_while_talking(self):
         server.Wake.talking_until(time.monotonic() + 5)
@@ -288,7 +456,7 @@ class Echo(unittest.TestCase):
                 self.pub.reset_mock()
                 server.Wake.talking_until(time.monotonic() + 5)
                 self.text = said
-                self.assertTrue(server.Wake.stop_in(PCM), f"{said!r} over him didn't stop him mid-burst")
+                self.assertTrue(server.Wake.stop_in(PCM, time.monotonic()), f"{said!r} over him didn't stop him mid-burst")
                 self.assertEqual([c.kwargs.get("t") for c in self.pub.call_args_list], ["barge"])
                 self.assertFalse(server.Wake.speaking())          # hushed
 
@@ -299,7 +467,7 @@ class Echo(unittest.TestCase):
         server.Wake.talking_until(time.monotonic() + 5)
         started = time.monotonic()
         self.text = heard
-        self.assertFalse(server.Wake.stop_in(PCM), "stopped mid-burst by a stop word inside his own speech")
+        self.assertFalse(server.Wake.stop_in(PCM, started), "stopped mid-burst by a stop word inside his own speech")
         self.assertEqual(self.burst(heard, started), [])
         self.assertTrue(server.Wake.speaking())   # still talking
 
@@ -421,7 +589,7 @@ class Burst(unittest.TestCase):
                 mock.patch.object(server.Speaker, "idle", classmethod(lambda cls: True)), \
                 mock.patch.object(W, "should_run", classmethod(lambda cls: True)), \
                 mock.patch.object(W, "window_open", classmethod(lambda cls: window)), \
-                mock.patch.object(W, "heard", staticmethod(lambda pcm: "")), \
+                mock.patch.object(W, "heard", staticmethod(lambda pcm, started: "")), \
                 mock.patch.object(W, "check", classmethod(lambda cls, pcm, started, text=None, **kw:
                     ended.append((round(len(pcm) / (server.RATE * 2), 1), round(clock[0] - 1000.0, 1), text)))), \
                 mock.patch.multiple(W, talked=[[1000.0, talk_till, talk_till + server.ECHO_TAIL + 60]] if talk_till

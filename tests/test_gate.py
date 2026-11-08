@@ -53,7 +53,7 @@ def follow_up(clip, heard, text=None):
     judged)."""
     seconds = len(clip) / 32000
     return gate.Burst(text=heard.text if text is None else text, heard=heard, speech=seconds, seconds=seconds,
-                      kind="follow", talking=False)
+                      kind="follow", talking=False, rang=False)
 
 
 @unittest.skipIf(server is None, f"server.py doesn't import here: {IMPORT_ERR}")
@@ -225,6 +225,7 @@ class Judge(unittest.TestCase):
     def burst(self, **over):
         b = dict(text=REQUEST, heard=None, speech=2.0, seconds=3.0, kind="follow", talking=False)
         b.update(over)
+        b.setdefault("rang", b["talking"])     # (his sound in the burst puts his voice in the air)
         if b["kind"] == "follow" and "heard" not in over:
             b["heard"] = whisper(b["text"])
         return gate.Burst(**b)
@@ -259,18 +260,39 @@ class Judge(unittest.TestCase):
                 self.dropped(self.judge(self.burst(kind=kind, speech=speech, seconds=seconds)), "no speech")
 
     def test_speech_share_comes_before_echo(self):
-        v = self.judge(self.burst(speech=gate.MIN_SPEECH * 0.9), spoken=[REQUEST])
+        v = self.judge(self.burst(speech=gate.MIN_SPEECH * 0.9, rang=True), spoken=[REQUEST])   # (echo, were it run)
         self.dropped(v, "no speech")
 
-    # ---- 2. echo
+    # ---- 2. echo (only when his voice was in the air)
     def test_his_own_voice_heard_back_is_dropped_as_echo(self):
         said = "I have added milk to your shopping list"
-        self.dropped(self.judge(self.burst(text=said), spoken=[said]), "echo")
+        self.dropped(self.judge(self.burst(text=said, rang=True), spoken=[said]), "echo")
 
     def test_echo_comes_before_noise(self):
         said = "It is a pleasure to be here"
-        v = self.judge(self.burst(text=f"{said}. {said}"), spoken=[said, said])
+        v = self.judge(self.burst(text=f"{said}. {said}", rang=True), spoken=[said, said])
         self.dropped(v, "echo")
+
+    def test_his_words_heard_after_he_went_quiet_are_never_echo(self):
+        # docs/superpowers/specs/quiet-replies-design.md, app/gate.py: step 2 runs is_echo only when b.rang
+        said = "I have added milk to your shopping list"
+        self.dropped(self.judge(self.burst(text=said, rang=True), spoken=[said]), "echo")
+        self.kept_follow_up(self.judge(self.burst(text=said, rang=False), spoken=[said]), said)
+        for kind in KINDS:
+            with self.subTest(kind):
+                v = self.judge(self.burst(text=said, kind=kind, rang=False), spoken=[said])
+                self.assertNotEqual(v.why, "echo", f"a {kind} burst heard after he went quiet dropped as echo")
+
+    def test_step_two_on_both_sides_for_follow_wake_over_and_listen(self):
+        # (the wake and over kinds need his name to be kept at all; his line is read back with it, so only rang differs)
+        for kind, text, act in (("follow", "I have added milk to your shopping list", "follow"),
+                                ("listen", "I have added milk to your shopping list", "request"),
+                                ("wake", "Hey Void, I have added milk to your shopping list", "request"),
+                                ("over", "Hey Void, I have added milk to your shopping list", "request")):
+            with self.subTest(kind):
+                self.dropped(self.judge(self.burst(text=text, kind=kind, rang=True), spoken=[text]), "echo")
+                v = self.judge(self.burst(text=text, kind=kind, rang=False), spoken=[text])
+                self.assertEqual((v.keep, v.why, v.act), (True, "kept", act), f"a {kind} burst with no ring was not kept")
 
     # ---- 4. noise
     def test_empty_text_is_noise(self):

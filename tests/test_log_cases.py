@@ -124,7 +124,7 @@ def heard(text, logprob=-0.3, no_speech=0.05):
 
 def burst(text, kind="follow", talking=False):
     return gate.Burst(text=text, heard=heard(text) if kind == "follow" else None, speech=1.5, seconds=2.5, kind=kind,
-                      talking=talking)
+                      talking=talking, rang=True)
 
 
 def row(r):
