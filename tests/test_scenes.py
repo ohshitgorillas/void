@@ -45,6 +45,8 @@ SR = 16000
 MANIFEST = json.loads((scenes.FIXTURES / "manifest.json").read_text(encoding="utf-8"))
 CLIPS, SCENES = MANIFEST["clips"], MANIFEST["scenes"]
 
+STOP_CLIP = "void_stop.wav"   # Void's line that opens with a stop phrase and ends on one (tests/make_scenes.py)
+
 ECHO_REMOVED_DB = 25.0      # at least this much of Void's echo is taken out
 KEPT_DB = 3.0               # your speech after he stops comes through within about this much
 SETTLE = 1.0                # seconds the canceller has to learn the room before his echo is measured
@@ -327,6 +329,96 @@ class FastScenes(FreshRun):
         self.assertTrue(len(t.raw) > 0 and differ == 0,
                         f"the mic didn't come through unchanged: {len(t.raw)} samples picked up, {len(t.clean)} "
                         f"read, {differ} of them different")
+
+
+@contextlib.contextmanager
+def judged_bursts():
+    """scenes._whisper with every burst its stand-ins hear kept, as {"pcm", "at", "heard", "words"}, in order (a spy: what
+    the stand-ins answer is unchanged)."""
+    real, bursts = scenes._whisper, []
+
+    def spy(*a, **kw):
+        hear, speech, words = real(*a, **kw)
+        heard = {}
+
+        def hear_(pcm, **k):
+            heard[pcm] = hear(pcm, **k)
+            return heard[pcm]
+
+        def words_(pcm, at):
+            got = words(pcm, at)
+            bursts.append({"pcm": pcm, "at": at, "heard": heard.get(pcm), "words": got})
+            return got
+        return hear_, speech, words_
+    with mock.patch.object(scenes, "_whisper", spy):
+        yield bursts
+
+
+@unittest.skipIf(server is None, f"server.py doesn't import here: {IMPORT_ERR}")
+class WordTimes(FreshRun):
+    """The harness times the words it hears: Void's from the manifest's word times and where his clip sits, on both paths."""
+    def _alone(self, clip, page):
+        """Void's `clip` alone in the room (native: no canceller, so his echo reaches the hearing path) → Take, bursts."""
+        with contextlib.ExitStack() as st:
+            if not page:
+                st.enter_context(mock.patch.object(server.hearing, "rtc", None))
+            bursts = st.enter_context(judged_bursts())
+            st.enter_context(contextlib.redirect_stderr(io.StringIO()))
+            t = scenes.play(scenes.Room(), void=clip, page=page)
+        return t, bursts
+
+    def test_void_stops_are_the_clips_stop_phrases_less_its_lead(self):
+        gate, clip = scenes._gate(), CLIPS[STOP_CLIP]
+        timed = [gate.Word(w, s, e) for w, (s, e) in zip(clip["text"].split(), clip["words"])]
+        want = [(p.start - clip["lead"], p.end - clip["lead"]) for p in gate.stop_phrases(timed)]
+        self.assertEqual(scenes.void_stops(STOP_CLIP), want)
+        self.assertEqual(len(want), 2, f"his line should hold two stop phrases, an opening and a closing one: {want}")
+        self.assertEqual(scenes.void_stops("void_question.wav"), [], "a clip with no word times has no stop phrases timed")
+
+    def _records_void_from(self, page):
+        t, _ = self._alone(STOP_CLIP, page)
+        self.assertIsNotNone(t.void_from, "the scene didn't record where his clip's first sample comes out of the speakers")
+        self.assertAlmostEqual(t.void_from, t.void_start, delta=0.1)       # (the clip's own start: no later than its first sound)
+        self.assertLessEqual(t.void_from - scenes.LEAD_IN, 0.5, "his clip started coming out long after he was handed it")
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_a_scene_of_his_stop_line_records_where_his_clip_starts_on_the_native_path(self):
+        self._records_void_from(page=False)
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_a_scene_of_his_stop_line_records_where_his_clip_starts_on_the_page_path(self):
+        self._records_void_from(page=True)
+
+    def _times_his_words(self, page):
+        t, bursts = self._alone(STOP_CLIP, page)
+        timed = [b for b in bursts if b["words"]]
+        self.assertTrue(timed, f"no burst of his had timed words: {[(b['heard'], b['words']) for b in bursts]}")
+        b = timed[0]
+        texts, whole = [w.text for w in b["words"]], CLIPS[STOP_CLIP]["text"].split()
+        self.assertEqual(texts, whole[:len(texts)], "the first burst's words aren't the opening words of his line, in order")
+        self.assertEqual(texts[0], "Stop", "the first burst didn't open with his stop phrase")
+        self.assertLess(len(texts), len(whole), "the words heard are the whole line, not what the burst holds")
+        self.assertEqual(b["heard"], " ".join(texts), "hear and words disagree on what the burst holds")
+        end = b["at"] + len(b["pcm"]) / (SR * 2)
+        for w in b["words"]:
+            self.assertTrue(b["at"] <= w.start < w.end <= end + 1e-6, f"{w} lies outside the burst [{b['at']}, {end}]")
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_the_stand_in_times_the_words_of_his_opening_stop_phrase_on_the_native_path(self):
+        self._times_his_words(page=False)
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_the_stand_in_times_the_words_of_his_opening_stop_phrase_on_the_page_path(self):
+        self._times_his_words(page=True)
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_a_clip_with_no_word_times_is_heard_whole_and_untimed(self):
+        for page in (False, True):
+            with self.subTest(page=page):
+                scenes.new_run()
+                t, bursts = self._alone("void_question.wav", page)
+                self.assertTrue(bursts, "no burst of his line reached the stand-in")
+                self.assertTrue(all(b["words"] is None for b in bursts), f"words timed for a clip with none: {bursts}")
 
 
 # Slow tier (VOID_SCENES=1): real speech detection and Whisper base.en hear each scene; what Void did is read off the
