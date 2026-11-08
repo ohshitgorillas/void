@@ -45,10 +45,10 @@ PAUSE = 0.55          # silence put between the parts of a long turn (piper's ow
 VOID_LINES = {
     "void_question.wav": "Okay, I found three photos from last summer in your Downloads folder. "
                          "Do you want me to move them into Pictures, or leave them where they are?",
-    # his own stop phrases, for the own-stop scenes: it opens with one heard on its own (the burst holds under ECHO_MIN
-    # words, so is_echo never judges it), runs on for 4 s and more, and ends on one; beyond them it shares no word with
-    # you_stop.wav's text
-    "void_stop.wav": "Stop there. Your Downloads folder has three pictures from summer, so tell me where they should go "
+    # his own stop phrases, for the own-stop scenes: it opens with one heard on its own (the first stop check, 0.8 s
+    # in, holds only "Stop there": under ECHO_MIN words, so is_echo never judges it; "Whatever" is a long word that
+    # ends after it), runs on for 4 s and more, and ends on one; beyond them it shares no word with you_stop.wav's text
+    "void_stop.wav": "Stop there. Whatever you decide, tell me where the three pictures from summer should go "
                      "and carry on whenever you like. Please stop.",
 }
 YOU_LINES = {
@@ -437,7 +437,7 @@ def write_missing():
         for name in missing:
             (OUT / name).write_bytes(to_wav(audio[name]))
         for name in texts:
-            old = manifest["clips"].get(name)
+            old = None if name in missing else manifest["clips"].get(name)    # (a clip rewritten here is timed anew)
             have = old if old is not None else entry(name, texts[name], round(len(audio[name]) / RATE, 4))
             if name in TIMED and "words" not in have:
                 wav = (OUT / name).read_bytes()
