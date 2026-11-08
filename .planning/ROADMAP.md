@@ -16,7 +16,7 @@ after it.
 - [x] **Phase 1: Coverage gate** - CI runs the suite on macOS and holds the fork's own modules to 85% lines and branches
 - [x] **Phase 2: Branch split** - every `personal` commit classed; fixes on a branch off `macos`; fixes flow `macos` -> `personal` from now on
 - [x] **Phase 3: Real-log replay** - the owner's logged bursts replayed through hearing; every reported drop a regression test
-- [ ] **Phase 4: Replies after quiet** - one record of when Void is making sound; a reply once he is quiet is heard, and none talks over him
+- [x] **Phase 4: Replies after quiet** - one record of when Void is making sound; a reply once he is quiet is heard, and none talks over him
 - [ ] **Phase 5: Own stop is echo** - Void's own "stop" heard back never stops him; the owner's still does
 - [ ] **Phase 6: Music in the follow-up window** - music and other voices start no Claude turn, and the owner is never dropped for it
 - [ ] **Phase 7: Release v1.6.3.3** - the fixes on `macos`, tagged, with a DMG Mac users can download

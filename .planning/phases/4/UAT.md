@@ -11,11 +11,15 @@ updated: 2026-11-08
 ### 1. Clean start: the server boots from clean state
 expected: (ci: tests) The tests job starts Void's server fresh on a clean runner (launcher and quit tests start a real server with no prior state) and the suite exits 0
 origin: smoke
-status: pending_ci
+status: pass
 job: tests
-commit: 413760a78ba0994a1c3e6940ac6b33368573d4c7
+commit: c9d64cb6f776635490b3e8163d212c46c1e77066
+first_pass: fail
 source: model
-evidence: The clean-runner start is the tests job on GitHub Actions (macos-15, fresh checkout). Locally on this commit the same suite command exited 0: 700 passed, 11 skipped (slow tier, VOID_SCENES unset), launcher and quit tests included, but local state is warm, so it cannot stand in for the clean start.
+evidence: tests concluded success at c9d64cb6f776635490b3e8163d212c46c1e77066 (run 42473887752): '700 passed, 11 skipped in 519.02s' on a clean macos-15 runner
+severity: major
+cause: tests concluded failure at 84d09e8 (run 42472682814): 3 failed, 697 passed - tests/test_echo.py test_real_echo_begun_while_he_made_sound_is_still_dropped_as_echo, test_his_own_words_heard_in_the_ring_after_his_last_sound_are_dropped_as_echo, test_his_said_words_heard_after_the_ring_are_a_follow_up. Root cause is a test clock defect, not app code: the tests note his lines (server.note_spoken -> SPOKEN stamped with the REAL time.monotonic) before aired()'s clocked() pins the mocked clock at 1000-1013 s, and said_lately() ages SPOKEN against that mocked clock. On a host up for days (local, 29 days) the age is negative so the lines stay; on a freshly booted CI runner they are older than ECHO_KEEP, are forgotten, and the echo text match never fires. Reproduced locally: the three pass plainly and all three fail with time.monotonic offset to ~300 s of uptime (scratch pytest plugin).
+fix: c9d64cb, retest
 
 ### 2. Phase 4 replay rows pass unmarked
 expected: Full suite: every tests/test_log_cases.py row whose reason named Phase 4, including "It's good" and "Yes, do it", passes with no expected-failure mark, kept and answered
@@ -68,10 +72,9 @@ evidence: Main session on 413760a: `uvx --with pytest-cov --with-requirements te
 ## Summary
 
 total: 7
-passed: 6
+passed: 7
 failed: 0
 pending: 0
-pending_ci: 1
 skipped: 0
 blocked: 0
-reworked: 0
+reworked: 1
