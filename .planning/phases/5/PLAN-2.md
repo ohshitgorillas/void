@@ -9,6 +9,7 @@ files:
   - app/static/index.html
   - tests/test_wake_loop.py
   - tests/test_page_played.py
+  - tests/test_page_sound.py
   - tests/scenes.py
   - tests/test_scenes.py
 ---
