@@ -3,12 +3,19 @@ Void's own voice heard back must not. Every heard text below is copied from that
 the first 80 characters); his lines are copied from history.jsonl, what he had just said when the owner answered.
 `void drops` (app/drops.py) reads such a log back: every heard burst, kept or dropped, and what gate.judge does with it now.
 
-    python3 -m unittest tests.test_log_cases -v
+    uvx pytest tests/test_log_cases.py -rxX -v
+
+`YOURS` is the regression table: one row per thing the owner said, and one test per row. A row today's hearing gets
+wrong is a strict expected failure naming the phase meant to fix it (never a skip): it turns the suite red as soon as a
+fix makes it pass, and that phase removes the mark.
 """
 import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import NamedTuple
+
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "app"))
@@ -17,7 +24,7 @@ import drops  # noqa: E402
 
 CFG = {"voice_gate": True}
 
-# what he said just before (history.jsonl), and the owner's follow-ups the voiceprint dropped (with the score it gave)
+# what he said just before (history.jsonl)
 HIS_ARCHITECT = ("The architect finished the design, and it really is one rebuilt board rather than fifteen bolted-on "
                  "features. It stopped with two choices that are genuinely yours, so here's the first. The new usage "
                  "tracking needs a status line in every Claude Code session. Should it show one short line in your "
@@ -30,19 +37,36 @@ HIS_STEP_ONE = ("Step one is measuring, so we fix the real leaks and not guesses
 HIS_PROMPT = ("No, I'm not fixing it myself. I only read today's voice log so the prompt would have real evidence in it, "
               "not the same generic instructions again. The new prompt is on your clipboard.")
 
-YOURS = [  # (what was heard, the voice score that dropped it, what he had just said)
-    ("Yes, God damn", 0.43, HIS_STOPPED),
-    ("What? What", 0.34, HIS_ARCHITECT),
-    ("Why doesn't it have history? There is plenty of fucking history", 0.02, ""),
-    ("Keep it moving", None, ""),
-    ("Yes, I give my approval", None, ""),
-    ("Why the fuck would that need my okay", None, ""),
-    ("I've already fucking been perfectly clear", 0.11, ""),
-    ("Why is that my call? Why would I recommend what", 0.06, ""),
-    ("No, the road map is utterly fucked. The road map cannot stay like it is, but thi", 0.06, ""),
-    ("Ah yes, I want you to use a helper to do that", None, ""),
-    ("Why the fuck isn't it on the board to begin with", None, ""),
-    ("Yes", None, ""),                                   # (dropped as a stray word: a one-word answer to his question)
+
+class Row(NamedTuple):
+    """One thing the owner said, as logged, and the verdict it should get."""
+    text: str                     # what was heard (the log keeps the first 80 characters)
+    kind: str = "follow"          # "listen" | "wake" | "follow" | "over" | "peek"
+    talking: bool = False         # he was talking when it was heard
+    recent: tuple = ()            # what he had just said (history.jsonl), oldest first
+    keep: bool = True             # the verdict it should get: kept or dropped…
+    why: str = "kept"             # …and which of gate.WHY
+    act: str = "follow"           # …and what is done with it ("drop" for a drop)
+    phase: str = ""               # empty: today's gate gets it right; else "Phase N: …", the phase meant to fix it
+
+    @property
+    def rest(self):
+        return self.text if self.keep else ""
+
+
+YOURS = [  # the owner's follow-ups the voiceprint (or the one-word rule) dropped on 26 Oct: all kept as he said them
+    Row("Yes, God damn", recent=(HIS_STOPPED,)),
+    Row("What? What", recent=(HIS_ARCHITECT,)),
+    Row("Why doesn't it have history? There is plenty of fucking history"),
+    Row("Keep it moving"),
+    Row("Yes, I give my approval"),
+    Row("Why the fuck would that need my okay"),
+    Row("I've already fucking been perfectly clear"),
+    Row("Why is that my call? Why would I recommend what"),
+    Row("No, the road map is utterly fucked. The road map cannot stay like it is, but thi"),
+    Row("Ah yes, I want you to use a helper to do that"),
+    Row("Why the fuck isn't it on the board to begin with"),
+    Row("Yes"),                                     # (dropped as a stray word: a one-word answer to his question)
 ]
 
 
@@ -56,14 +80,26 @@ def burst(text, kind="follow", talking=False):
                       talking=talking)
 
 
-class YourFollowUps(unittest.TestCase):
-    """Each follow-up of yours the voiceprint (or the one-word rule) dropped is sent on, as you said it."""
+def row(r):
+    """A table row as a test case: one with a phase is a strict expected failure naming it, so a fix that makes it pass
+    turns the suite red until that phase removes the mark. Only a wrong verdict counts (`raises`): a crash fails."""
+    marks = [pytest.mark.xfail(strict=True, raises=AssertionError, reason=r.phase)] if r.phase else []
+    return pytest.param(r, id=r.text, marks=marks)
 
-    def test_every_follow_up_of_yours_from_the_log_is_kept(self):
-        for text, score, his in YOURS:
-            with self.subTest(text, score=score):
-                v = gate.judge(burst(text), [his] if his else [], CFG)
-                self.assertEqual((v.keep, v.act, v.rest), (True, "follow", text), f"dropped as {v.why!r}")
+
+@pytest.mark.parametrize("r", [row(r) for r in YOURS])
+def test_the_row_gets_the_verdict_the_owner_expects(r):
+    v = gate.judge(burst(r.text, r.kind, r.talking), list(r.recent), CFG)
+    assert (v.keep, v.why, v.act, v.rest) == (r.keep, r.why, r.act, r.rest), f"got {v}"
+
+
+def test_every_row_text_fits_what_the_log_keeps():
+    assert [r.text for r in YOURS if len(r.text) > drops.CUT] == []
+
+
+class YourFollowUps(unittest.TestCase):
+    """Each follow-up of yours the voiceprint (or the one-word rule) dropped is sent on, as you said it (the rows of
+    `YOURS`, above)."""
 
     def test_no_check_judges_whose_voice_it_is(self):
         self.assertNotIn("not your voice", gate.WHY)
