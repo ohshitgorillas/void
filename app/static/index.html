@@ -1703,7 +1703,7 @@ function enqueue(text,o={}){
     handing++;
     sayChain=sayChain.then(()=>ep===sayEpoch?post('/api/say',{text,id,epoch:ep}).then(takeReply):null).catch(()=>{ const it=spkMap.get(id); spkMap.delete(id); if(it&&it.cap) karaNow(it.cap,it.fresh); quietNative(); }).then(()=>{ handing--; });   // one after another: keeps them in order
     return; }
-  const g=gen; handing++; speaking({owe:1}).then(()=>{ handing--; }); q.push({cap:o.cap?(o.cap===true?text:o.cap):'',fresh:!!o.fresh,
+  const g=gen; handing++; speaking({owe:1}).then(()=>{ handing--; }); q.push({text,cap:o.cap?(o.cap===true?text:o.cap):'',fresh:!!o.fresh,
     p:post('/api/tts',{text}).then(async r=>{ if(r.status!==200) return null;
       const rate=+(r.headers.get('X-Void-Rate')||1), pause=+(r.headers.get('X-Void-Pause')||.08);
       let words=null; try{ words=JSON.parse(r.headers.get('X-Void-Words')||'null'); }catch(e){}
@@ -1854,7 +1854,9 @@ async function pump(){
     gn.gain.setValueAtTime(0,when); gn.gain.linearRampToValueAtTime(1,when+.006);
     gn.gain.setValueAtTime(1,Math.max(when+.006,when+dur-.01)); gn.gain.linearRampToValueAtTime(0,when+dur);
     src.start(when); srcs.push(src); nextAt=when+dur+(item.pause||.08);
-    speaking({on:true,left:when+dur-a.currentTime+(a.outputLatency||a.baseLatency||0),paid:1});
+    // (the words he plays, in played seconds, ride the post that starts this sentence's sound: the server times his stop phrases from it)
+    const pw=Array.isArray(item.words)&&item.words.every(w=>Array.isArray(w)&&w.length===2)?item.words.map(w=>[w[0]/r,w[1]/r]):null;
+    speaking({on:true,left:when+dur-a.currentTime+(a.outputLatency||a.baseLatency||0),paid:1,text:it.text,dur,words:pw});
     src.onended=()=>{ srcs=srcs.filter(x=>x!==src); if(g===gen) quietCheck(); };
     if(it.cap){ const lat=(a.outputLatency||a.baseLatency||0); capSpeak(it.cap,dur,it.fresh,performance.now()+(when-a.currentTime+lat)*1000,item.words,r); }
   }
