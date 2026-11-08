@@ -70,13 +70,14 @@ rulings first, then build, verify and merge).
 - [ ] AC3: every commit classed fix has exactly one author, author-date and subject match in `git log <fix branch>`,
   and every commit classed visual or feature has none and is marked `+` by `git cherry <fix branch> personal`
   [amended by docs/superpowers/specs/branch-split-construction-design.md: `git cherry` `-` fails for path-split,
-  already-on-macos and context-drifted fix rows]
+  line-split, already-on-macos and context-drifted fix rows; f3b2947, class feature, is present through 8c064eb]
 - [ ] AC4: On the fix branch, `python3 -m py_compile app/*.py` exits 0, and the two accepted commands from
   `.github/cadence/coverage-policy.json` exit 0 with the checker reporting all 7 `include` modules meeting 85 for
   lines and branches
 - [ ] AC5: `git merge-base --is-ancestor <fix branch> macos` exits 0, and `origin/macos` still points at 29e22ae
 - [ ] AC6: `git merge macos` on `personal` completes with no conflict, and `git diff <personal before merge> personal`
-  shows no changed file [`<personal before merge>` is Plan 2's `.gitignore` reorder commit `R`, per
+  shows no changed file [`<personal before merge>` is Plan 2's Hold-back commit `H`, made after the `.gitignore`
+  reorder `R`; after `git revert H`, `git diff --name-only R personal` is also empty, per
   docs/superpowers/specs/branch-split-construction-design.md]
 
 ## Flagged assumptions
