@@ -24,10 +24,152 @@
       "text": "Okay, I found three photos from last summer in your Downloads folder. Do you want me to move them into Pictures, or leave them where they are?",
       "seconds": 7.6571
     },
+    "void_stop.wav": {
+      "speaker": "void",
+      "text": "Stop there. Your Downloads folder has three pictures from summer, so tell me where they should go and carry on whenever you like. Please stop.",
+      "seconds": 7.9809,
+      "words": [
+        [
+          0.04,
+          0.175
+        ],
+        [
+          0.175,
+          0.31
+        ],
+        [
+          0.42,
+          0.651
+        ],
+        [
+          0.651,
+          1.121
+        ],
+        [
+          1.121,
+          1.523
+        ],
+        [
+          1.523,
+          1.754
+        ],
+        [
+          1.754,
+          1.985
+        ],
+        [
+          1.985,
+          2.627
+        ],
+        [
+          2.627,
+          2.858
+        ],
+        [
+          2.858,
+          3.26
+        ],
+        [
+          3.34,
+          3.545
+        ],
+        [
+          3.545,
+          3.75
+        ],
+        [
+          3.75,
+          3.955
+        ],
+        [
+          3.955,
+          4.16
+        ],
+        [
+          4.16,
+          4.365
+        ],
+        [
+          4.365,
+          4.569
+        ],
+        [
+          4.569,
+          4.774
+        ],
+        [
+          4.774,
+          4.979
+        ],
+        [
+          4.979,
+          5.336
+        ],
+        [
+          5.336,
+          5.541
+        ],
+        [
+          5.541,
+          6.11
+        ],
+        [
+          6.11,
+          6.315
+        ],
+        [
+          6.315,
+          6.52
+        ],
+        [
+          7.21,
+          7.505
+        ],
+        [
+          7.505,
+          7.8
+        ]
+      ],
+      "lead": 0.01
+    },
     "you_stop.wav": {
       "speaker": "you",
       "text": "Stop, stop, that's not what I asked for.",
-      "seconds": 2.8909
+      "seconds": 2.8909,
+      "words": [
+        [
+          0.0,
+          0.2
+        ],
+        [
+          0.37,
+          0.63
+        ],
+        [
+          1.02,
+          1.265
+        ],
+        [
+          1.265,
+          1.51
+        ],
+        [
+          1.51,
+          1.754
+        ],
+        [
+          1.754,
+          1.999
+        ],
+        [
+          1.999,
+          2.425
+        ],
+        [
+          2.425,
+          2.67
+        ]
+      ]
     },
     "you_hold_on.wav": {
       "speaker": "you",
@@ -93,6 +235,14 @@
     "overlap_last_second": {
       "void": "void_question.wav",
       "you": "you_overlap.wav"
+    },
+    "void_stop_alone": {
+      "void": "void_stop.wav",
+      "you": null
+    },
+    "stop_after_his_stop": {
+      "void": "void_stop.wav",
+      "you": "you_stop.wav"
     },
     "long_pauses": {
       "void": null,

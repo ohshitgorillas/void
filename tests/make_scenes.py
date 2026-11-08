@@ -4,7 +4,8 @@ Void's lines are made by app/server.py's own synth(): Kokoro with the "cute" pre
 WAV is played back at the rate synth returns, then resampled to 16 kHz. "You" is a piper voice, en_GB-alan-medium.
 Run with Void's venv, which has kokoro_onnx and piper and whose voices are under ~/.local/share/void/voices/:
 
-    ~/.local/share/void/venv/bin/python tests/make_scenes.py           # write the fixtures
+    ~/.local/share/void/venv/bin/python tests/make_scenes.py           # write the fixtures (every clip, anew)
+    ~/.local/share/void/venv/bin/python tests/make_scenes.py --missing # write only what the tree lacks: WAVs there stay as they are
     ~/.local/share/void/venv/bin/python tests/make_scenes.py --check   # regenerate elsewhere, compare to committed
 
 The user's Void config and data are never touched: app/server.py is imported with XDG_CONFIG_HOME and XDG_DATA_HOME
@@ -19,6 +20,7 @@ it, its spectral envelope stretched over the note (vowels long, consonants kept)
 note's pitch with vibrato, so it keeps the words' formants but carries the tune. Its length is fixed by the score.
 """
 import argparse
+import contextlib
 import io
 import json
 import os
@@ -43,6 +45,11 @@ PAUSE = 0.55          # silence put between the parts of a long turn (piper's ow
 VOID_LINES = {
     "void_question.wav": "Okay, I found three photos from last summer in your Downloads folder. "
                          "Do you want me to move them into Pictures, or leave them where they are?",
+    # his own stop phrases, for the own-stop scenes: it opens with one heard on its own (the burst holds under ECHO_MIN
+    # words, so is_echo never judges it), runs on for 4 s and more, and ends on one; beyond them it shares no word with
+    # you_stop.wav's text
+    "void_stop.wav": "Stop there. Your Downloads folder has three pictures from summer, so tell me where they should go "
+                     "and carry on whenever you like. Please stop.",
 }
 YOU_LINES = {
     "you_stop.wav": "Stop, stop, that's not what I asked for.",
@@ -71,6 +78,8 @@ SONG = [  # (bar it starts in, [(word, MIDI note, beats)]); a word of None is a 
          ("with", 62, .5), ("me", 60, 2)]),
 ]
 VOID_CLIP = "void_question.wav"
+VOID_STOP_CLIP = "void_stop.wav"
+TIMED = ("void_stop.wav", "you_stop.wav")   # the clips whose manifest entries carry "words" (Void's also "lead")
 SCENES = {
     "void_alone": {"void": VOID_CLIP, "you": None},
     "interrupt_stop": {"void": VOID_CLIP, "you": "you_stop.wav"},
@@ -79,6 +88,8 @@ SCENES = {
     "interrupt_hey_void": {"void": VOID_CLIP, "you": "you_hey_void.wav"},
     "answer_after": {"void": VOID_CLIP, "you": "you_answer.wav"},
     "overlap_last_second": {"void": VOID_CLIP, "you": "you_overlap.wav"},
+    "void_stop_alone": {"void": VOID_STOP_CLIP, "you": None},
+    "stop_after_his_stop": {"void": VOID_STOP_CLIP, "you": "you_stop.wav"},
     "long_pauses": {"void": None, "you": LONG_TURN[0]},
     "room_music": {"void": None, "room": ROOM_CLIP},
 }
@@ -308,37 +319,133 @@ def song_words():
     return " ".join(w for _, line in SONG for w, _, _ in line if w)
 
 
-def generate(dest):
-    """Write every clip and manifest.json into `dest`. → {file: frames}."""
+def wav_words(server, wav, text):
+    """`wav` (16 kHz WAV bytes) saying `text`: → (each word of text.split() as [start, end] in s from the first sample of
+    `wav`, the lead in s that server.tidy_full trims off its front). tidy_full is the tree's one word-timing estimate; its
+    times count from the trimmed clip, so they are shifted by the lead. The lead is where the trimmed samples sit inside
+    `wav`, found by locating them, never by re-deriving tidy_full's threshold. Raises when tidy_full has no word times,
+    times another number of words than `text` has, or its trimmed clip is no slice of `wav`."""
+    trimmed, times, _level = server.tidy_full(wav, text)
+    if times is None:
+        raise ValueError(f"tidy_full could not time the words of {text!r}")
+    if len(times) != len(text.split()):
+        raise ValueError(f"tidy_full timed {len(times)} words of {text!r}, which has {len(text.split())}")
+    with wave.open(io.BytesIO(wav)) as w:
+        whole = w.readframes(w.getnframes())
+    with wave.open(io.BytesIO(trimmed)) as w:
+        part = w.readframes(w.getnframes())
+    at = whole.find(part) if part else -1
+    while at > 0 and at % 2:                            # (a frame offset: on a 16-bit sample boundary)
+        at = whole.find(part, at + 1)
+    if at < 0:
+        raise ValueError(f"tidy_full's trimmed clip of {text!r} is not a slice of the clip it was given")
+    lead = at // 2 / RATE
+    return [[lead + s, lead + e] for s, e in times], lead
+
+
+def clip_words(server, x, text):
+    """`x`, 16 kHz samples of `text`, timed as wav_words does its WAV. → (words, lead)"""
+    return wav_words(server, to_wav(x), text)
+
+
+def entry(name, text, seconds, timed=None):
+    """One clip's manifest entry; `timed`: its (words, lead) when it has word times."""
+    clip = {"speaker": "void" if name in VOID_LINES else "room" if name == ROOM_CLIP else "you", "text": text,
+            "seconds": seconds}
+    if timed is not None:
+        clip["words"] = [[round(s, 3), round(e, 3)] for s, e in timed[0]]
+        if name in VOID_LINES:
+            clip["lead"] = round(timed[1], 3)
+    return clip
+
+
+def clip_texts():
+    return {**VOID_LINES, **YOU_LINES, LONG_TURN[0]: " ".join(LONG_TURN[1]), ROOM_CLIP: song_words()}
+
+
+def render(server, say, names=None):
+    """The clips named in `names` (None: all of them), rendered. → {file: samples}; `say` (piper) is only called for
+    yours."""
     import numpy as np
-    dest.mkdir(parents=True, exist_ok=True)
+    want = (lambda n: True) if names is None else (lambda n: n in names)
+    audio = {name: void_clip(server, text) for name, text in VOID_LINES.items() if want(name)}
+    audio.update({name: say()(text) for name, text in YOU_LINES.items() if want(name)})
+    if want(LONG_TURN[0]):
+        gap, say_ = np.zeros(int(PAUSE * RATE)), say()
+        parts = [say_(t) for t in LONG_TURN[1]]
+        audio[LONG_TURN[0]] = np.concatenate([p for part in parts for p in (part, gap)][:-1])
+    if want(ROOM_CLIP):
+        audio[ROOM_CLIP] = room_music(server)
+    return audio
+
+
+def manifest_of(clips, preset, scenes):
+    return {"generator": str(Path(__file__).resolve().relative_to(ROOT)),
+            "rate": RATE,
+            "voices": {"void": {"engine": "kokoro", "preset": VOID_PRESET, "voice": preset["kokoro"],
+                                "kpitch": preset["kpitch"]},
+                       "you": {"engine": "piper", "voice": YOU_VOICE},
+                       "room": {"engine": "kokoro", "voice": SINGER, "sung": True}},
+            "clips": clips, "scenes": scenes}
+
+
+def piper_once():
+    """A `say` for render() that loads piper on its first use only."""
+    voice = []
+
+    def get():
+        if not voice:
+            voice.append(you_voice())
+        return voice[0]
+    return get
+
+
+@contextlib.contextmanager
+def void_server():
+    """app/server.py imported against a throwaway config and data folder (import_server), ONNX capped."""
     cap_onnx_threads()
     with tempfile.TemporaryDirectory(prefix="void-scenes-") as tmp:
-        server = import_server(Path(tmp).resolve())
-        audio = {name: void_clip(server, text) for name, text in VOID_LINES.items()}
-        say = you_voice()
-        audio.update({name: say(text) for name, text in YOU_LINES.items()})
-        gap = np.zeros(int(PAUSE * RATE))
-        parts = [say(t) for t in LONG_TURN[1]]
-        audio[LONG_TURN[0]] = np.concatenate([p for part in parts for p in (part, gap)][:-1])
-        audio[ROOM_CLIP] = room_music(server)
-        preset = server.VOICES[VOID_PRESET]
-    texts = {**VOID_LINES, **YOU_LINES, LONG_TURN[0]: " ".join(LONG_TURN[1]), ROOM_CLIP: song_words()}
-    speakers = {**{n: "void" for n in VOID_LINES}, ROOM_CLIP: "room"}
-    clips = {}
+        yield import_server(Path(tmp).resolve())
+
+
+def generate(dest, server):
+    """Write every clip and manifest.json into `dest`. → {file: frames}."""
+    dest.mkdir(parents=True, exist_ok=True)
+    audio = render(server, piper_once())
+    preset = server.VOICES[VOID_PRESET]
+    texts, clips = clip_texts(), {}
     for name, x in audio.items():
-        (dest / name).write_bytes(to_wav(x))
-        clips[name] = {"speaker": speakers.get(name, "you"), "text": texts[name],
-                       "seconds": round(len(x) / RATE, 4)}
-    manifest = {"generator": str(Path(__file__).resolve().relative_to(ROOT)),
-                "rate": RATE,
-                "voices": {"void": {"engine": "kokoro", "preset": VOID_PRESET, "voice": preset["kokoro"],
-                                    "kpitch": preset["kpitch"]},
-                           "you": {"engine": "piper", "voice": YOU_VOICE},
-                           "room": {"engine": "kokoro", "voice": SINGER, "sung": True}},
-                "clips": clips, "scenes": SCENES}
-    (dest / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        wav = to_wav(x)
+        (dest / name).write_bytes(wav)
+        timed = wav_words(server, wav, texts[name]) if name in TIMED else None
+        clips[name] = entry(name, texts[name], round(len(x) / RATE, 4), timed)
+    (dest / "manifest.json").write_text(json.dumps(manifest_of(clips, preset, SCENES), indent=2) + "\n", encoding="utf-8")
     return {name: len(x) for name, x in audio.items()}
+
+
+def write_missing():
+    """Write only what the tree lacks: each clip with no WAV in OUT, and the "words" and "lead" of each TIMED clip whose
+    manifest entry has none (timed from the WAV in the tree, a clip piper cannot reproduce included); the scenes come
+    from SCENES. A WAV already in the tree is never rewritten, and every other manifest entry is kept as it stands.
+    → the names of the clips written."""
+    manifest = json.loads((OUT / "manifest.json").read_text(encoding="utf-8"))
+    missing = [n for n in clip_texts() if not (OUT / n).exists()]
+    with void_server() as server:
+        audio = render(server, piper_once(), set(missing))
+        preset = server.VOICES[VOID_PRESET]
+        texts, clips = clip_texts(), {}
+        for name in missing:
+            (OUT / name).write_bytes(to_wav(audio[name]))
+        for name in texts:
+            old = manifest["clips"].get(name)
+            have = old if old is not None else entry(name, texts[name], round(len(audio[name]) / RATE, 4))
+            if name in TIMED and "words" not in have:
+                wav = (OUT / name).read_bytes()
+                have = entry(name, texts[name], have["seconds"], wav_words(server, wav, texts[name]))
+            clips[name] = have
+    manifest = dict(manifest, clips=clips, scenes=SCENES)
+    (OUT / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return missing
 
 
 def frames(path):
@@ -347,28 +454,47 @@ def frames(path):
 
 
 def check():
-    """Regenerate into a scratch folder and compare each clip's length with the committed one. → exit status."""
-    with tempfile.TemporaryDirectory(prefix="void-scenes-check-") as tmp:
-        fresh, bad = generate(Path(tmp)), 0
+    """Regenerate into a scratch folder and compare each clip's length with the committed one, and each TIMED clip's
+    "words" and "lead" with what tidy_full makes of the committed WAV itself: a re-render of a piper clip is not
+    byte-identical and moves its word times by up to 60 ms, so a fresh render cannot vouch for them, where the file
+    they were taken from can (tidy_full is deterministic). → exit status."""
+    old = json.loads((OUT / "manifest.json").read_text(encoding="utf-8"))["clips"]
+    texts, bad = clip_texts(), 0
+    with void_server() as server, tempfile.TemporaryDirectory(prefix="void-scenes-check-") as tmp:
+        fresh = generate(Path(tmp), server)
         for name, n in sorted(fresh.items()):
             have = OUT / name
-            old = frames(have) if have.exists() else None
+            was = frames(have) if have.exists() else None
             same_bytes = have.exists() and have.read_bytes() == (Path(tmp) / name).read_bytes()
-            ok = old == n
+            want = {}
+            if name in TIMED and have.exists():
+                want = {k: v for k, v in entry(name, texts[name], 0, wav_words(server, have.read_bytes(), texts[name])).items()
+                        if k in ("words", "lead")}
+            timed = {k: v for k, v in old.get(name, {}).items() if k in ("words", "lead")} == want
+            ok = was == n and timed
             bad += not ok
-            print(f"{'ok  ' if ok else 'DIFF'} {name:24} committed {old if old is not None else '-':>7} "
-                  f"fresh {n:>7} frames ({n / RATE:.4f} s){'  bytes identical' if same_bytes else ''}")
-    print("durations match" if not bad else f"{bad} clip(s) differ in duration")
+            print(f"{'ok  ' if ok else 'DIFF'} {name:24} committed {was if was is not None else '-':>7} "
+                  f"fresh {n:>7} frames ({n / RATE:.4f} s){'  bytes identical' if same_bytes else ''}"
+                  f"{'' if timed else '  word times differ'}")
+    print("durations and word times match" if not bad else f"{bad} clip(s) differ in duration or word times")
     return 1 if bad else 0
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--check", action="store_true", help="regenerate elsewhere and compare durations to the tree")
+    ap.add_argument("--check", action="store_true",
+                    help="regenerate elsewhere and compare durations and word times to the tree")
+    ap.add_argument("--missing", action="store_true",
+                    help="write only the clips and word times the tree lacks, leaving every WAV already there as it is")
     args = ap.parse_args()
     if args.check:
         sys.exit(check())
-    for name, n in sorted(generate(OUT).items()):
+    if args.missing:
+        print("wrote " + (", ".join(write_missing()) or "no clip") + " (word times and scenes brought up to date)")
+        return
+    with void_server() as server:
+        written = generate(OUT, server)
+    for name, n in sorted(written.items()):
         print(f"{name:24} {n / RATE:7.3f} s {(OUT / name).stat().st_size:>8} bytes")
 
 
