@@ -321,6 +321,59 @@ class FastScenes(FreshRun):
     def test_hey_void_said_over_his_line_ends_his_playback_before_the_line_ends(self):
         self._stops_the_line("interrupt_hey_void")
 
+    # ---- his own stop phrase heard back never stops him: the rule (gate.own_stop) drops it as echo, on both voice paths
+    def _his_stop_line(self, page, own_stop=None):
+        """Void's stop line alone in the room: the native path with the canceller off (else the warm canceller removes his
+        echo and the scene proves nothing; the page path gives the canceller no reference, as in the app). `own_stop`: what
+        to patch gate.own_stop with. → the Take, his "[void]" log and the bursts the stand-in Whisper heard."""
+        err, gate = io.StringIO(), scenes._gate()
+        with contextlib.ExitStack() as st:
+            if not page:
+                st.enter_context(mock.patch.object(server.hearing, "rtc", None))
+            if own_stop is not None:
+                st.enter_context(mock.patch.object(gate, "own_stop", own_stop))
+            bursts = st.enter_context(judged_bursts())
+            st.enter_context(contextlib.redirect_stderr(err))
+            t = scenes.play(scenes.Room(), void=STOP_CLIP, page=page)
+        return t, [ln for ln in err.getvalue().splitlines() if ln.startswith("[void]")], bursts
+
+    def _his_own_stop_phrase_never_stops_him(self, page):
+        gate = scenes._gate()
+        t, log, bursts = self._his_stop_line(page)
+        why = instead(t, log)
+        # the peek on a burst holding his opening stop phrase, said alone (under ECHO_MIN words): judged echo
+        peeks = [ln for ln in log if "echo (peek): " in ln]
+        self.assertTrue(peeks, f"no stop peek on his opening stop phrase was dropped as echo:{why}")
+        opening = peeks[0].split("echo (peek): ", 1)[1]
+        self.assertLess(len(opening.split()), gate.ECHO_MIN, f"the first stop peek held {opening!r}: is_echo would judge it, "
+                        f"not the rule:{why}")
+        self.assertRegex(opening, r"(?i)\bstop\b", f"the first stop peek didn't hold his opening stop phrase:{why}")
+        # the burst heard out holds his closing stop phrase, ending within ECHO_TAIL after his sound: judged echo
+        closing = gate.stop_phrases(bursts[-1]["words"] or ())
+        self.assertTrue(closing and closing[-1].text.lower().startswith("stop"),
+                        f"the last burst didn't hold his closing stop phrase: {bursts[-1]['words']}")
+        self.assertLessEqual(closing[-1].end, scenes.T0 + t.void_end + gate.ECHO_TAIL,
+                             f"his closing stop phrase ended {closing[-1].end - scenes.T0 - t.void_end:.2f} s after his sound")
+        self.assertTrue([ln for ln in log if "echo (over): " in ln or "echo (follow): " in ln],
+                        f"the burst holding his closing stop phrase wasn't judged by Wake.check and dropped as echo:{why}")
+        # nothing barged or woke, and his sound played to his line's last chunk
+        self.assertEqual(did(t), [], f"Void acted on his own stop phrases heard back:{why}")
+        self.assertGreaterEqual(t.void_end - t.void_from, scenes.void_stops(STOP_CLIP)[-1][1],
+                                f"his line didn't play to its last chunk: his sound ended {t.void_end - t.void_from:.2f} s in{why}")
+        # and it is the rule that holds him: with it gone, the same scene barges
+        scenes.new_run()
+        t2, log2, _ = self._his_stop_line(page, own_stop=lambda heard, played: False)
+        self.assertTrue(any(e["t"] == "barge" for e in did(t2)),
+                        f"with own_stop returning False his own stop phrase still didn't stop him:{instead(t2, log2)}")
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_his_own_stop_phrase_heard_back_never_stops_him_on_the_native_path(self):
+        self._his_own_stop_phrase_never_stops_him(page=False)
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_his_own_stop_phrase_heard_back_never_stops_him_on_the_page_path(self):
+        self._his_own_stop_phrase_never_stops_him(page=True)
+
     def test_passes_the_mic_through_unchanged_without_the_canceller(self):
         sc = SCENES["interrupt_stop"]
         with mock.patch.object(server.hearing, "rtc", None):            # livekit missing: no canceller
