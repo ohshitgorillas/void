@@ -274,10 +274,15 @@ class Echo(unittest.TestCase):
     # echo is only his voice heard while he makes sound, or in the room's ring after it (gate.ECHO_TAIL)
     def aired(self, his, began, ended, judged_at, text):
         """His sound over `his` (from, to), then a burst heard as `text` from `began` to `ended`, judged at `judged_at`.
+        The lines he was noted saying are re-stamped to `his[0]`: they were noted on the real clock, which on a freshly
+        booted host reads far below this scene's clock, so `said_lately` would forget them as older than ECHO_KEEP.
         → (Wake.air over the burst, bus events, '[void]' log lines)."""
         clock = self.clocked()
         server.Wake.talked = []
         self.pub.reset_mock()
+        said = [line for _t, line in server.SPOKEN]
+        server.SPOKEN.clear()
+        server.SPOKEN.extend((his[0], line) for line in said)
         with mock.patch.dict(server.CFG, {"follow_up": 30}):
             clock[0] = his[0]
             server.Wake.talking(*his)
