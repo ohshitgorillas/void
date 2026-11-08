@@ -13,10 +13,10 @@ expected: (ci: tests) The tests job starts Void's server fresh on a clean runner
 origin: smoke
 status: pending_ci
 job: tests
-commit: ffac9918fe1bc72deda271ea7959f1985ee246a8
+commit: bb843a8a7649820c06314ad04a952ec83112e28d
 first_pass: fail
 source: model
-evidence: Local half green: 'uvx --with pytest-cov --with-requirements tests/requirements.txt pytest --cov=app --cov-branch --cov-report=json' -> '813 passed, 15 skipped in 283.38s' (skips all slow tier), which includes the real-server boot tests in tests/test_quit.py and tests/test_launchers.py. The clean-runner boot is the CI tests job's to show, and it has not run on this commit: nothing is pushed.
+evidence: Moved from ffac991 to HEAD bb843a8; ffac991..HEAD touches only .planning/phases/5/ (UAT.md, FINDINGS.json, verifier-findings.json), so the local half stands: 'uvx --with pytest-cov --with-requirements tests/requirements.txt pytest --cov=app --cov-branch --cov-report=json' -> '813 passed, 15 skipped in 283.38s'. The clean-runner boot is the CI tests job's to show; nothing is pushed.
 reported: unverified, not observed failing: no automated check was exercised on HEAD in this verification. The boot tests start a real server, which is outside the verifier's allowance, the suite run was reserved for the main session, and the CI tests job has never run on this code (nothing pushed; SUMMARY says 'not CI-verified').
 severity: minor
 
