@@ -38,6 +38,13 @@ HIS_PROMPT = ("No, I'm not fixing it myself. I only read today's voice log so th
               "not the same generic instructions again. The new prompt is on your clipboard.")
 
 
+# the phases meant to fix what the gate gets wrong today
+AFTER_QUIET = "Phase 4: a reply of his after Void went quiet is dropped as echo (HEAR-01)"
+AFTER_SPOKE = "Phase 4: a reply right after Void spoke is dropped for no wake word (HEAR-01)"
+WHILE_TALKING = "Phase 4: a reply made while Void was still talking is dropped, where it should wait (HEAR-02)"
+NO_WAKE = dict(keep=False, why="no wake word", act="drop")    # right by design: outside the follow-up window
+
+
 class Row(NamedTuple):
     """One thing the owner said, as logged, and the verdict it should get."""
     text: str                     # what was heard (the log keeps the first 80 characters)
@@ -67,6 +74,46 @@ YOURS = [  # the owner's follow-ups the voiceprint (or the one-word rule) droppe
     Row("Ah yes, I want you to use a helper to do that"),
     Row("Why the fuck isn't it on the board to begin with"),
     Row("Yes"),                                     # (dropped as a stray word: a one-word answer to his question)
+    # the rest of what he said that the gate threw away or got right, 26 Oct to 5 Nov (server.log), judged on what the
+    # log holds. The Void lines are written for the test, short, to give the echo check something to overlap
+    Row("Yes, do it. Goddamn. Yes, do it"),         # (kept in the log too)
+    Row("See what's on my clipboard", "wake", **NO_WAKE),
+    Row("In the right direction", "wake", **NO_WAKE),
+    Row("Tidy up", "wake", **NO_WAKE),
+    Row("God damn it", "wake", **NO_WAKE),
+    Row("Changes sound like bullshit that doesn't solve the fucking problem", "wake", **NO_WAKE),
+    Row("I'm gonna shut up", "wake", True, **NO_WAKE),
+    Row("I'm afraid to stop, fix up the fix. I'm not afraid to stop, fix up the fix. Cont", "wake", True, **NO_WAKE),
+    # a reply of his after Void went quiet, dropped as echo
+    Row("I don't...", "wake", recent=("Should I leave it? I don't think it matters either way.",), act="request",
+        phase=AFTER_QUIET),
+    Row("That's retarded!", recent=("The test is failing again. That's what I found.",), phase=AFTER_QUIET),
+    Row("Yes, commit it", recent=("Want me to commit it? Say yes and I'll commit it.",), phase=AFTER_QUIET),
+    Row("Yes, do it", recent=("Shall I merge it? Say yes, do it, or no.",), phase=AFTER_QUIET),
+    Row("Yes, merge it", recent=("Ready to merge? Say yes, merge it, and I will.",), phase=AFTER_QUIET),
+    Row("Yes, please put that on my clipboard", recent=("Want me to put that on your clipboard? Say yes, please.",),
+        phase=AFTER_QUIET),
+    # a reply right after Void spoke, with no wake word: dropped for it
+    Row("Fuck it retard", "wake", act="request", phase=AFTER_SPOKE),
+    Row("Yes, do it", "wake", act="request", phase=AFTER_SPOKE),
+    Row("Go ahead. Yeah, that's fine", "wake", act="request", phase=AFTER_SPOKE),
+    Row("Yes, what the fuck? God damn it. I'm getting sick of this shit", "wake", act="request", phase=AFTER_SPOKE),
+    Row("Cool, so you're just going to keep fucking up and I have to deal with it. Not ev", "wake", act="request",
+        phase=AFTER_SPOKE),
+    Row("Yes, give me that prompt. Are you even listening to your little cunt? Yes, do it", "wake", act="request",
+        phase=AFTER_SPOKE),
+    Row("Cool, good talk. Super useful", "wake", True, act="request", phase=AFTER_SPOKE),
+    Row("Jesus Christ you are fucking worthy", "wake", True, act="request", phase=AFTER_SPOKE),
+    # a reply made while Void was still talking: dropped as "while talking", where it should wait and be answered
+    Row("Yeah, that's fine. Go ahead", "over", True, phase=WHILE_TALKING),
+    Row("It's good", "over", True, phase=WHILE_TALKING),
+    Row("Yes, that's fine", "over", True, phase=WHILE_TALKING),
+    Row("Yes and yes", "over", phase=WHILE_TALKING),
+    Row("Just send the message to the lead itself", "over", phase=WHILE_TALKING),
+    Row("Yes, go ahead", "over", phase=WHILE_TALKING),
+    Row("So you're gonna keep fucking up", "over", phase=WHILE_TALKING),
+    Row("Cool, good talk", "over", phase=WHILE_TALKING),
+    Row("How about any fucking where else", "over", phase=WHILE_TALKING),
 ]
 
 
@@ -84,7 +131,7 @@ def row(r):
     """A table row as a test case: one with a phase is a strict expected failure naming it, so a fix that makes it pass
     turns the suite red until that phase removes the mark. Only a wrong verdict counts (`raises`): a crash fails."""
     marks = [pytest.mark.xfail(strict=True, raises=AssertionError, reason=r.phase)] if r.phase else []
-    return pytest.param(r, id=r.text, marks=marks)
+    return pytest.param(r, id=f"{r.text} ({r.kind})", marks=marks)
 
 
 @pytest.mark.parametrize("r", [row(r) for r in YOURS])
