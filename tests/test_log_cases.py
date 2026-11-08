@@ -105,7 +105,7 @@ YOURS = [  # the owner's follow-ups the voiceprint (or the one-word rule) droppe
     Row("Cool, good talk. Super useful", "wake", True, act="request", phase=AFTER_SPOKE),
     Row("Jesus Christ you are fucking worthy", "wake", True, act="request", phase=AFTER_SPOKE),
     # a reply made while Void was still talking: dropped as "while talking", where it should wait and be answered
-    Row("Yeah, that's fine. Go ahead", "over", True, phase=WHILE_TALKING),
+    Row("Yeah, that's fine. Go ahead", "over", phase=WHILE_TALKING),
     Row("It's good", "over", True, phase=WHILE_TALKING),
     Row("Yes, that's fine", "over", True, phase=WHILE_TALKING),
     Row("Yes and yes", "over", phase=WHILE_TALKING),
