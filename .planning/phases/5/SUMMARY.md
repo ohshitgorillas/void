@@ -42,6 +42,21 @@ A stop phrase Void plays is recorded with its word times, on the native `Speaker
 
 Docs: 5ac57f1 (plan 2's lease widened to `tests/test_page_sound.py`, a declined plan-2 finding, cursor).
 
+## Measured offsets
+
+Each offset is the heard time minus the played time, in seconds, given as start / end, for Void's own stop phrases in the own-stop scenes (AC1). The values come from the final run with `ECHO_WORD` = 0.60 (plan 3, Tasks 5 and 6, `reports/plan-3.md`).
+
+| Tier | Path | Phrase | Offsets (start / end) |
+|---|---|---|---|
+| Fast (fixture word times) | native | opening "Stop", closing "Stop" | +0.020 / +0.020 (peek, wake, over) |
+| Fast (fixture word times) | page | opening "Stop", closing "Stop" | +0.020 / +0.020 (peek, wake, over) |
+| Slow (real Whisper base.en) | native | opening "Stop" | -0.090 / +0.100 to +0.120 |
+| Slow (real Whisper base.en) | native | closing "Stop" | -0.560 / -0.290, -0.540 / -0.350, -0.520 / -0.350 (peek); -0.540 / -0.350 (wake, over) |
+| Slow (real Whisper base.en) | page | opening "Stop" | -0.060 / +0.090 to +0.130 |
+| Slow (real Whisper base.en) | page | closing "Stop" | -0.530 / -0.300, -0.530 / -0.340, -0.510 / -0.340 (peek); -0.510 / -0.340 (wake, over) |
+
+The fast tier's +0.020 is the room's delay. The largest |offset| of his own is 0.56 s (slow, native, closing phrase start). Rounded up to the next 0.05 s, that gives `ECHO_WORD` = 0.60 (`app/gate.py:30`). The owner's stop phrases in the AC2 scenes are not his own, so they are not counted. They land 0.72 s or more past the played phrase: fast +0.780 / +0.850 on both paths, slow native +0.930 / +1.080, slow page +0.720 / +0.830.
+
 ## Deviations
 
 - [deviation] Plan 2, Task 2's first run stopped `blocked` on a lease gap. The page post's new keys broke the order assertion in `tests/test_page_sound.py`, which `PLAN-2.md`'s `files:` did not name. That path was added to the lease, and the re-run committed 59ec78d. The blocked run's report is kept as `reports/plan-2.1.md`.
