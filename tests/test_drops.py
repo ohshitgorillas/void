@@ -51,10 +51,10 @@ class Replay(unittest.TestCase):
         self.assertEqual(self.rows(), [
             (3, "", "not your voice", "follow", "Keep it moving", "kept"),       # he said it: today it gets through
             (4, "", "while talking", "over", "and then the next step", "while talking"),
-            (6, "", "echo", "over", "so the build is done", "as logged"),        # echo needs his words: not in the log
+            (6, "", "echo", "over", "so the build is done", "as logged"),        # it rang, so it needs his words: not logged
             (7, "2026-11-01 10:00:00", "no wake word", "wake", "what time is it", "no wake word"),
-            # (line 5's heard line still says "while talking", so his name over him reads as a stop)
-            (8, "2026-11-02 10:00:00", "kept", "wake", "hey Void what time is it", "kept: stops him"),
+            # (line 5's heard line pairs with line 6 alone: line 8 has none of its own, so it is judged as a plain wake)
+            (8, "2026-11-02 10:00:00", "kept", "wake", "hey Void what time is it", "kept"),
             (9, "2026-11-02 10:05:00", "while talking", "over", "stop", "kept: stops him"),
             (10, "", "no wake word", "wake", "turn it up", "no wake word"),
             (11, "", "stray word", "follow", "Keep it moving", "kept"),
@@ -63,6 +63,18 @@ class Replay(unittest.TestCase):
             (15, "2026-11-03 08:00:00", "no speech", "follow", "music", "as logged"),
             (16, "2026-12-01 10:00:00", "kept", "wake", LOOP, "as logged"),     # a loop needs all of it, as a drop's does
         ])
+
+    def test_a_heard_line_pairs_with_the_one_verdict_line_after_it(self):
+        log = ["[void] heard 1.0s, 3 words, while talking",
+               "[void] dropped as noise: ",                       # pairs with the heard line: over him
+               "[void] dropped as noise: "]                       # its own heard line is missing: a plain wake
+        self.assertEqual([(d.kind, d.now) for d in drops.replay(log)], [("over", "noise"), ("wake", "noise")])
+
+    def test_an_echo_drop_with_no_heard_line_of_its_own_replays_as_logged(self):
+        log = ["[void] heard 2.0s, 3 words, follow-up", "[void] echo (follow): Yes, do it",      # clear of him: judged
+               "[void] echo (follow): Yes, do it",                                               # no heard line: as logged
+               "[void] heard 2.0s, 3 words, follow-up, in his echo", "[void] echo (follow): Yes, do it"]  # it rang
+        self.assertEqual([d.now for d in drops.replay(log)], ["kept", "as logged", "as logged"])
 
     def test_lines_that_are_not_server_log_lines_are_skipped_but_counted(self):
         got = drops.replay(["Traceback", "", "[void] dropped echo of own speech: hello there"])
@@ -136,7 +148,7 @@ class Main(unittest.TestCase):
         for argv in (("--day", "2026-11-02", str(self.log)), (str(self.log), "--day", "2026-11-02")):
             lines = self.out(*argv)
             self.assertEqual(len(lines), 6)
-            self.assertIn("kept (wake)  ->  KEPT: STOPS HIM  hey Void what time is it", lines[0])
+            self.assertIn("kept (wake)  ->  KEPT  hey Void what time is it", lines[0])
             self.assertIn("KEPT: STOPS HIM  stop", lines[1])
             self.assertEqual(lines[-1], "     2  heard in all; 1 dropped, 1 of them kept now")
 

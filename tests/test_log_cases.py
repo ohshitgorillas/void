@@ -228,5 +228,64 @@ class Replay(unittest.TestCase):
         self.assertIn("KEPT", lines[0])
 
 
+class Rang(unittest.TestCase):
+    """drops.rang: a logged burst was heard with his sound or its ring in the air when its kind is "over" or "peek", or
+    its heard line's flags hold "while talking", "after his last word" or "in his echo"."""
+
+    def test_a_burst_heard_over_him_or_peeked_rang(self):
+        for kind in ("over", "peek"):
+            self.assertTrue(drops.rang("", kind), f"a {kind} burst not taken as heard with his voice in the air")
+
+    def test_flags_that_place_his_voice_in_the_air(self):
+        for flags in ("while talking", "follow-up, after his last word (3.2s of him cut)", "follow-up, in his echo"):
+            for kind in ("listen", "wake", "follow"):
+                self.assertTrue(drops.rang(flags, kind), f"{flags!r} on a {kind} burst not taken as rang")
+
+    def test_a_burst_clear_of_him_did_not_ring(self):
+        for flags in ("", "follow-up"):
+            for kind in ("listen", "wake", "follow"):
+                self.assertFalse(drops.rang(flags, kind), f"{flags!r} on a {kind} burst taken as rang")
+
+
+ECHO_LOG = """\
+[void] 2026-12-02 10:05:30 heard 2.1s, 4 words, follow-up, in his echo
+[void] 2026-12-02 10:05:30 echo (follow): I'll start the build
+[void] 2026-12-02 10:06:10 heard 2.4s, 5 words, follow-up, after his last word (0.8s of him cut)
+[void] 2026-12-02 10:06:10 echo (follow): the board is ready now
+[void] 2026-12-02 10:07:00 heard 2.0s, 4 words, while talking
+[void] 2026-12-02 10:07:00 echo (over): the board is ready now
+[void] 2026-12-02 10:08:20 heard 2.6s, 4 words, follow-up
+[void] 2026-12-02 10:08:20 echo (follow): Put it on the board
+[void] 2026-12-02 10:09:45 heard 2.2s, 4 words
+[void] 2026-12-02 10:09:45 echo (wake): Put it on the board
+"""
+
+# (the two lines of the owner's 27 Oct 16:11:24 reply, the stamp moved: a short phrase is all a test file keeps)
+YES_DO_IT = """\
+[void] 2026-12-02 16:11:24 heard 3.0s, 3 words, follow-up
+[void] 2026-12-02 16:11:24 echo (follow): Yes, do it
+"""
+
+
+class EchoReplay(unittest.TestCase):
+    """`void drops` replays an echo drop the log shows was heard with his voice in the air as logged (the log does not
+    keep his words), and judges every other echo drop again as heard after he went quiet."""
+
+    def drops(self, log):
+        return [(d.line, d.at, d.why, d.kind, d.text, d.now) for d in drops.replay(log.splitlines())]
+
+    def test_an_echo_drop_is_judged_again_only_when_the_burst_was_clear_of_him(self):
+        self.assertEqual(self.drops(ECHO_LOG), [
+            (2, "2026-12-02 10:05:30", "echo", "follow", "I'll start the build", "as logged"),
+            (4, "2026-12-02 10:06:10", "echo", "follow", "the board is ready now", "as logged"),
+            (6, "2026-12-02 10:07:00", "echo", "over", "the board is ready now", "as logged"),
+            (8, "2026-12-02 10:08:20", "echo", "follow", "Put it on the board", "kept"),
+            (10, "2026-12-02 10:09:45", "echo", "wake", "Put it on the board", "no wake word"),
+        ])
+
+    def test_yes_do_it_is_kept_now(self):
+        self.assertEqual(self.drops(YES_DO_IT), [(2, "2026-12-02 16:11:24", "echo", "follow", "Yes, do it", "kept")])
+
+
 if __name__ == "__main__":
     unittest.main()
