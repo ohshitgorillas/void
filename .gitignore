@@ -1,12 +1,3 @@
-__pycache__/
-*.pyc
-*.tar.gz
-*.bak
-*.part
-build/
-dist/
-installer/art/
-
 # macOS maintainer's todo list
 todo.txt
 
@@ -21,8 +12,17 @@ todo.txt
 .planning/reads.1.jsonl.claim.*
 .planning/reads.jsonl.rotate.*
 .planning/reads.1.jsonl.evict.*
-coverage.json
-.coverage
 
 # Claude Code agent worktrees - each is its own git checkout
 .claude/worktrees/
+
+__pycache__/
+*.pyc
+*.tar.gz
+*.bak
+*.part
+build/
+dist/
+installer/art/
+coverage.json
+.coverage
