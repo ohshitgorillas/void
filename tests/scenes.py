@@ -553,9 +553,12 @@ class Events:
     def __init__(self, sim):
         self.sim = sim
         self.got = []
+        self.on_barge = None                                      # (called with each "barge": the page's player stops on it)
 
     def pub(self, **ev):
         self.got.append(dict(ev, scene_at=self.sim.now - T0))
+        if ev.get("t") == "barge" and self.on_barge:
+            self.on_barge()
 
     def sub(self):
         import queue
@@ -613,13 +616,13 @@ def _whisper(scene, clean, void_text, you_text, you_words=None, void_words=None,
     late). Each frame votes by its loudness. His words if he wins, nothing if the music does. If you win, your words,
     less your first OPENING_WORDS when your opening came through more than OPENING_LOST_DB under how you said it
     (opening_db): real Whisper mishears a turned-down opening under his voice as words of its own, or as nothing.
-    When he wins and his clip has word times (`void_words`, one [start, end] per word of `void_text`, from the clip's
-    first sample; `void_lead`, what the player drops off its front), he is heard only as far as the burst holds him: his
-    words that lie wholly inside it, as real Whisper hears only what the burst holds; a clip with none is heard whole.
-    words(pcm, at) times what hear makes out, for transcribe_pcm_heard's `at` (the burst's first sample, on server's
-    clock): the words of yours it keeps (`you_words`: your clip's word times for the words you say), or the words of his
-    it hears, each wholly inside the burst, as a gate.Word at where it sits on the scene's clock. None when the music or
-    no one wins, when the winner's clip has no word times, and for him after the speakers changed."""
+    When the winner's clip has word times (yours: `you_words`, one [start, end] per word you say; his: `void_words`, one
+    per word of `void_text`, from the clip's first sample, less `void_lead`, what the player drops off its front), the
+    winner is heard only as far as the burst holds him: the words that lie wholly inside it, as real Whisper hears only
+    what the burst holds; a clip with none is heard whole. words(pcm, at) times exactly those words, for
+    transcribe_pcm_heard's `at` (the burst's first sample, on server's clock), each a gate.Word at where it sits on the
+    scene's clock. None when the music or no one wins, when the winner's clip has no word times, and for him after the
+    speakers changed."""
     def yours(got):
         if scene.you_from is None:
             return you_text
@@ -658,10 +661,21 @@ def _whisper(scene, clean, void_text, you_text, you_words=None, void_words=None,
         talking = (rms(scene.you[a:b]) > VOICED) | (rms(scene.echo[a:b]) > VOICED) | (rms(scene.music[a:b]) > VOICED)
         return float((talking & (rms(np.frombuffer(got[2 * a:2 * b], np.int16)) > HEARD)).sum()) * 0.03
 
+    def mine(text, a, b):
+        """Your kept words (`text`: what yours() lets through) wholly inside [a, b), each (word, start, end) in scene
+        seconds as they reach the mic; None when your words are not timed here (no word times, or you have not begun)."""
+        if not you_words or scene.you_from is None:
+            return None
+        said = list(zip(you_text.split(), you_words))
+        t = scene.you_from / SR
+        return [(w, t + s, t + e) for w, (s, e) in (said[len(said) - len(text.split()):] if text else [])
+                if a / SR <= t + s and t + e <= b / SR]
+
     def vote(pcm):
-        """→ (who won the burst: "you", "void", "music" or None, the words heard, a, b: the burst on the scene's clock)."""
+        """→ (who won the burst: "you", "void", "music" or None, the words heard, a, b: the burst on the scene's clock,
+        the heard words timed as (word, start, end) in scene seconds, or None when they are not timed)."""
         if len(pcm) < SR * 2 * 0.3:
-            return None, "", 0, 0
+            return None, "", 0, 0, None
         got, a, b = where(pcm)
         c = _spectra(np.frombuffer(got[2 * a:2 * b], np.int16).astype(np.float64))
         votes = {}
@@ -675,26 +689,20 @@ def _whisper(scene, clean, void_text, you_text, you_words=None, void_words=None,
         loud = (c ** 4).sum(1)                                    # (each frame's power, near enough)
         won = [float(loud[(sims.argmax(0) == i) & (sims.max(0) > 0)].sum()) for i in range(len(votes))]
         if max(won) <= 0:
-            return None, "", a, b
+            return None, "", a, b, None
         who = list(votes)[int(np.argmax(won))]
         text = votes[who][1]
-        if who == "void" and his(a, b) is not None:
-            text = " ".join(w for w, _, _ in his(a, b))
-        return who, text, a, b
+        timed = mine(text, a, b) if who == "you" else his(a, b) if who == "void" else None
+        if timed is not None:                                     # (heard only as far as the burst holds them)
+            text = " ".join(w for w, _, _ in timed)
+        return who, text, a, b, timed
 
     def hear(pcm, **_kw):
         return vote(pcm)[1]
 
     def words(pcm, at):
-        who, text, a, b = vote(pcm)
-        if who == "you" and you_words and scene.you_from is not None:
-            said = list(zip(you_text.split(), you_words))
-            kept = said[len(said) - len(text.split()):] if text else []     # (the lost opening dropped, as yours drops it)
-            timed = [(w, scene.you_from / SR + s, scene.you_from / SR + e) for w, (s, e) in kept]
-            timed = [x for x in timed if a / SR <= x[1] and x[2] <= b / SR]
-        elif who == "void" and his(a, b) is not None:
-            timed = his(a, b)
-        else:
+        _who, _text, a, _b, timed = vote(pcm)
+        if timed is None:
             return None
         return tuple(_gate().Word(w, at + (s - a / SR), at + (e - a / SR)) for w, s, e in timed)
 
@@ -707,13 +715,15 @@ THEN = "And here is the rest of what I found."     # the second sentence of a li
 PAGE_LEAD = 0.05          # page voice: the page schedules a sentence this long after it is handed over (its `when`)
 
 
-def _page_player(sim, scene, server, text):
+def _page_player(sim, scene, server, text, events):
     """The page's player, for a scene (room harness beside FakePlayer, not a hearing double): what pump/enqueue in
     index.html do to the server for one sentence, through the server's own code for `/api/tts` (tts_reply) and
     `/api/speaking` (speaking_post). Handed the line it posts the owe and has the server make the audio; PAGE_LEAD
     later it posts the sentence's start (`left`: to its end plus the speakers' latency, with its text, played length
     and word times) and the trimmed audio comes out of the speakers `scene.lat` after that; when it has played it posts
-    that he is quiet. The page's voice gives the echo canceller no reference, so nothing goes to PlayRef."""
+    that he is quiet. On a "barge" event the page's shush(): its audio stops (what was already handed to the speakers
+    plays on for `scene.lat`, as a killed FakePlayer's does) and it posts that he is quiet. The page's voice gives the
+    echo canceller no reference, so nothing goes to PlayRef."""
     server.speaking_post({"owe": 1})
     reply = server.tts_reply(text)
     if reply is None:                                             # (nothing to say: it is no longer owed)
@@ -727,14 +737,29 @@ def _page_player(sim, scene, server, text):
     dur = len(x) / r
     sim.sleep(PAGE_LEAD)
     left = dur + scene.lat
+    me, barged = sim.current(), []
+
+    def shush():
+        barged.append(True)
+        sim.wake(me)
+    events.on_barge = shush
     server.speaking_post({"on": True, "left": left, "paid": 1, "text": text, "dur": dur,
                           "words": [[a / rate, b / rate] for a, b in words] if words else None})
     ts = sim.now + scene.lat - T0                                 # (the sound reaches the room then)
     if scene.void_from is None:
         scene.void_from = round(ts * SR)                          # (the trimmed audio's first sample)
     k0, k1 = math.ceil((ts - RS_HALF / r) * SR), math.ceil((ts + (len(x) + RS_HALF) / r) * SR)
-    scene.put(k0, resample(x, r, (np.arange(k0, k1) / SR - ts) * r))
-    sim.sleep(left)
+    y = resample(x, r, (np.arange(k0, k1) / SR - ts) * r)
+    scene.put(k0, y)
+    end = sim.now + left
+    while not barged and sim.now < end:
+        sim.park(me, end)
+    if barged:
+        cut = max(k0, scene.index(sim.now + scene.lat))
+        gone = y[cut - k0:]
+        if len(gone):
+            scene.put(cut, np.zeros(len(gone)), gone)
+    events.on_barge = None
     server.speaking_post({"on": False})
 
 
@@ -877,7 +902,7 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
         try:
             wake.actor = sim.spawn("wake", W.session, T0 if mic_at is None else math.inf)
             if void and page:
-                sim.spawn("void", lambda: _page_player(sim, scene, server, texts.get(void, "")), T0 + LEAD_IN)
+                sim.spawn("void", lambda: _page_player(sim, scene, server, texts.get(void, ""), events), T0 + LEAD_IN)
             elif void:
                 maker = sim.spawn("maker", S._maker, T0)
                 player = sim.spawn("player", S._player_loop, T0)

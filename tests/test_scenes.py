@@ -57,6 +57,8 @@ DELAYS = (0.010, 0.020, 0.030, 0.040)   # speakers this far off Speaker.LAT: the
 FIRST = 1.0                 # the first this-many seconds of every warm mic session must already have his echo out
 MID_VOICE = 2.0             # a session that opens while he is already talking opens this far into his voice
 PAGE_YOU_DB = 0.0           # on the page path nothing cancels his echo (-6 dB at the mic): you stop him this loud, 6 dB over it
+STOP_MARGIN = 0.05          # his stop phrase comes just past ECHO_WORD: its first word begins this long over it (at most 0.1 s)
+PAGE_STOP_DB = 6.0          # (page path) you stop him this loud: at PAGE_YOU_DB his early cut-in is lost under his echo (-5.8 dB)
 HOLD = 16.0                 # his second sentence takes this long to make: longer than your reply and the quiet after it
 REPLY = "Yes, that sounds good to me."   # (words of its own: not his, so the echo test has nothing to drop)
 CUT_IN = (1.0, 2.0, 3.0, 4.0)   # you tell him to stop this far into his voice (he talks for 7.7 s)
@@ -374,6 +376,40 @@ class FastScenes(FreshRun):
     def test_his_own_stop_phrase_heard_back_never_stops_him_on_the_page_path(self):
         self._his_own_stop_phrase_never_stops_him(page=True)
 
+    # ---- the owner's own stop, said just past ECHO_WORD after the end of his played stop phrase, still stops him
+    def _stop_just_past_his_stop(self, page):
+        gate = scenes._gate()
+        said, word = "Stop, stop.", scenes._words()["you_stop.wav"]
+        length, opens = word[2][0], scenes.void_stops(STOP_CLIP)[0]     # (to where "that's" begins; his opening phrase)
+        err = io.StringIO()
+        scenes.warm_up(scenes.Room())                              # (he has already spoken in this run)
+        with contextlib.redirect_stderr(err), judged_bursts() as bursts:
+            t = scenes.play(scenes.Room(you_db=PAGE_STOP_DB) if page else scenes.Room(), void=STOP_CLIP,
+                            you="you_stop.wav", you_at=opens[1] + gate.ECHO_WORD + STOP_MARGIN - word[0][0],
+                            you_only=(said, length), page=page)
+        log = [ln for ln in err.getvalue().splitlines() if ln.startswith("[void]")]
+        why = instead(t, log)
+        gap = t.you_start + word[0][0] - (t.void_from + opens[1])    # (your first word, past the end of his opening phrase)
+        self.assertTrue(gate.ECHO_WORD < gap <= gate.ECHO_WORD + 0.1,
+                        f"your first word began {gap:.3f} s after his opening stop phrase ended, not just past "
+                        f"ECHO_WORD ({gate.ECHO_WORD} s){why}")
+        barge = [e for e in t.events if e["t"] == "barge"]
+        self.assertTrue(barge, f"\"{said}\" said {gap:.2f} s after his own stop phrase didn't stop him{why}")
+        self.assertLess(t.void_end - t.void_start, scenes.void_stops(STOP_CLIP)[-1][1],
+                        f"his playback didn't end before his line did: his sound ran {t.void_end - t.void_start:.1f} s{why}")
+        self.assertLessEqual(t.void_end - t.you_start, PROMPT + 0.5, f"he went on {t.void_end - t.you_start:.1f} s after you began{why}")
+        heard = [b for b in bursts if b["now"] <= scenes.T0 + barge[0]["scene_at"] + 1e-6]
+        self.assertTrue(heard and heard[-1]["words"] and gate.stop_phrases(heard[-1]["words"]),
+                        f"the burst that barged wasn't judged with timed words holding a stop phrase: {heard[-1:]}{why}")
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_stop_said_just_past_echo_word_after_his_own_stop_phrase_stops_him_on_the_native_path(self):
+        self._stop_just_past_his_stop(page=False)
+
+    @unittest.skipIf(LIVEKIT_ERR is not None, f"livekit doesn't import here: {LIVEKIT_ERR}")
+    def test_stop_said_just_past_echo_word_after_his_own_stop_phrase_stops_him_on_the_page_path(self):
+        self._stop_just_past_his_stop(page=True)
+
     def test_passes_the_mic_through_unchanged_without_the_canceller(self):
         sc = SCENES["interrupt_stop"]
         with mock.patch.object(server.hearing, "rtc", None):            # livekit missing: no canceller
@@ -386,8 +422,8 @@ class FastScenes(FreshRun):
 
 @contextlib.contextmanager
 def judged_bursts():
-    """scenes._whisper with every burst its stand-ins hear kept, as {"pcm", "at", "heard", "words"}, in order (a spy: what
-    the stand-ins answer is unchanged)."""
+    """scenes._whisper with every burst its stand-ins hear kept, as {"pcm", "at", "heard", "words", "now"} (`now`: the
+    server's clock when it was heard), in order (a spy: what the stand-ins answer is unchanged)."""
     real, bursts = scenes._whisper, []
 
     def spy(*a, **kw):
@@ -400,7 +436,7 @@ def judged_bursts():
 
         def words_(pcm, at):
             got = words(pcm, at)
-            bursts.append({"pcm": pcm, "at": at, "heard": heard.get(pcm), "words": got})
+            bursts.append({"pcm": pcm, "at": at, "heard": heard.get(pcm), "words": got, "now": server.time.monotonic()})
             return got
         return hear_, speech, words_
     with mock.patch.object(scenes, "_whisper", spy):
