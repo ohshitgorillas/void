@@ -1931,8 +1931,7 @@ function onEvent(ev){
     if(ev.follow&&hiddenNow) return;          // you sent him away: talking afterwards isn't for him (only "hey Void" is)
     if(hiddenNow) native('show');
     if(info.hover){ comeBack().then(()=>onEvent(ev)); return; }
-    if(ev.follow){ wake(); if(busy){ shush(); heldQ.push(ev.text); heldTry(); return; }   // talked right after he answered: no "hey Void" needed
-      send(ev.text,{follow:true}); return; }   // (still working on the last one: kept, and sent once it's done)
+    if(ev.follow){ wake(); heldQ.push(ev.text); heldTry(); return; }   // talked right after he answered: no "hey Void" needed (kept, and sent once he is done working and speaking; he is never cut off for it)
     poke('surprised',500); wake(); sfx('wake');
     if(ev.text && ev.text.split(/\s+/).length>=2) send(ev.text); else if(!busy) startRec('auto'); else tick("one sec — I'm still on the last thing");
   }
@@ -2173,7 +2172,8 @@ async function send(text,opts={}){
   if(liveOn()) setLive(true);                // still talking to him: the 10 minutes start over
   if(!atts.some(a=>a.kind.startsWith('clip')) && CLIP_RE.test(text)) await shoot('clipboard');
   if(NICE.test(text)) poke(/cute|love/i.test(text)?'shy':'love',1800);
-  shush(); capShow(); setYou(text||'(look at this)'); himSet('');
+  if(!opts.follow) shush();         // (a follow-up goes out only once he has finished speaking, and never cuts him off)
+  capShow(); setYou(text||'(look at this)'); himSet('');
   const attach=atts; atts=[]; renderAtts();
   busy=true; toolMood=null; workWhat='thinking'; workT0=performance.now(); document.body.classList.add('busy');
   const kv=voiced(); let fresh=true;        // kv: the caption follows his voice instead of racing ahead of it
@@ -2219,8 +2219,9 @@ async function send(text,opts={}){
   refresh();
 }
 
-/* you answered while he was still working (talked over him, or between his sentences): kept, hushes him, and goes out
-   the moment this reply is done, as one follow-up if you said several things */
+/* you answered while he was still working or speaking (talked over him, or between his sentences): kept (he is not cut off:
+   only a stop phrase or "Void" does that), and goes out the moment he is done working and speaking, as one follow-up if you
+   said several things */
 const heldQ=[]; let heldT=null;
 function heldTry(){
   clearTimeout(heldT); heldT=null; if(!heldQ.length) return;

@@ -12,11 +12,11 @@ import unittest
 
 from test_page_idle import INIT, NODE_PATH, run_page
 
-# fetch, wrapped: every /api/speaking post's body is kept in order, and /api/tts gives a short silent clip while
+# fetch, wrapped: every /api/speaking post's body is kept in order (and every /api/say/stop's, apart), and /api/tts gives a short silent clip while
 # __s.tts is 'audio' (else it fails, as from file://: a sentence with no audio). Nothing else is touched.
 SINIT = r"""(() => {
   const f = window.fetch && window.fetch.bind(window);
-  const S = window.__s = {posts: [], tts: 'audio'};
+  const S = window.__s = {posts: [], stops: [], tts: 'audio'};
   const wav = () => { const n = 3200, b = new ArrayBuffer(44 + n * 2), v = new DataView(b);   // 0.4 s, 8 kHz, mono, silence
     const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
     w(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); w(8, 'WAVE'); w(12, 'fmt '); v.setUint32(16, 16, true);
@@ -24,6 +24,7 @@ SINIT = r"""(() => {
     v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, 'data'); v.setUint32(40, n * 2, true); return b; };
   window.fetch = (u, o) => { const url = String(u);
     if (url.includes('/api/speaking')) S.posts.push(JSON.parse(o.body));
+    if (url.includes('/api/say/stop')) S.stops.push(JSON.parse(o.body));
     if (url.includes('/api/tts') && S.tts === 'audio')
       return Promise.resolve(new Response(wav(), {status: 200, headers: {'X-Void-Rate': '1', 'X-Void-Pause': '0.08'}}));
     return f ? f(u, o) : Promise.reject(new Error('no fetch')); };
