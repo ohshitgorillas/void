@@ -121,7 +121,7 @@ class PageTellsItsSound(unittest.TestCase):
 
     def test_posts_follow_the_order_the_page_made_them_with_the_hearing_settings_off(self):
         posts = self.scene("two")["posts"]
-        self.assertEqual([sorted(p) for p in posts],
+        self.assertEqual([sorted(k for k in p if k not in ("text", "dur", "words")) for p in posts],      # (the played words: test_page_played)
                          [["owe"], ["owe"], ["left", "on", "paid"], ["left", "on", "paid"], ["on"]], posts)
         for p in posts[2:4]:
             self.assertIs(p["on"], True)

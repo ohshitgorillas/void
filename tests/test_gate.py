@@ -341,5 +341,242 @@ class Judge(unittest.TestCase):
         self.kept_follow_up(self.judge(self.burst()), REQUEST)
 
 
+# ---- Void's own stop phrase (the played stop phrases, timed, and the heard words, timed)
+ECHO_WORD = gate.ECHO_WORD if gate is not None else 0.0   # s either side of a played stop phrase; read, never restated
+EPS = 0.01                                                # a hundredth of a second, to sit just inside or past it
+T = 100.0  # a monotonic moment while Void talks
+
+
+def timed(text, start=T, step=0.3):
+    """`text`'s words as gate.Words, each `step` s long, back to back from `start`."""
+    return tuple(gate.Word(text=w, start=start + i * step, end=start + (i + 1) * step)
+                 for i, w in enumerate(text.split()))
+
+
+def played_stop(start=T, end=T + 0.4, text="stop"):
+    """A stop phrase Void played, as gate.Word."""
+    return gate.Word(text=text, start=start, end=end)
+
+
+# every alternative of the STOP_RE and _STOP_WORDS alternations as they stood before STOP_PHRASES (as "fragment, a
+# phrase it matches"), so the rebuild from one list can be held to the same answers
+OLD_STOP_RE_ALTERNATIVES = (("stop", "stop"), ("wait", "wait"), ("shush", "shush"), ("shh+", "shhhh"), ("quiet", "quiet"),
+                            ("be quiet", "be quiet"), ("shut up", "shut up"), ("hold on", "hold on"),
+                            ("hang on", "hang on"), ("enough", "enough"), ("stop talking", "stop talking"),
+                            ("that's enough", "that's enough"), ("thanks?(?: you)?", "thank you"),
+                            ("thanks?(?: you)?", "thanks"), ("got it", "got it"))
+# the phrases of STOP_RE that stop_said (the old _STOP_WORDS) never took: only the first words of "stop talking" count
+NOT_SAID_IN_A_CLAUSE = ("wait", "quiet", "enough", "thank you", "thanks", "got it")
+NOT_STOPS = ("please add milk to the shopping list", "", "stopping", "hold the door", "it's ready to have a stop on")
+
+
+@unittest.skipIf(gate is None, f"app/gate.py doesn't import here: {GATE_ERR}")
+class StopPhrasesList(unittest.TestCase):
+    """STOP_RE and STOP_IN_RE are built from the one STOP_PHRASES list and match the phrases they matched before."""
+
+    def test_stop_re_matches_every_old_alternative_and_its_wrappers(self):
+        for fragment, said in OLD_STOP_RE_ALTERNATIVES:
+            for text in (said, f"okay {said}", f"hey void {said}", f"{said} please", f"void {said} now"):
+                with self.subTest(text=text):
+                    self.assertTrue(gate.STOP_RE.fullmatch(text), f"{fragment!r}: {text!r}")
+
+    def test_stop_re_matches_no_other_phrase(self):
+        for text in NOT_STOPS:
+            with self.subTest(text=text):
+                self.assertFalse(gate.STOP_RE.fullmatch(text))
+
+    def test_stop_said_takes_the_clause_phrases_only(self):
+        for _, text in OLD_STOP_RE_ALTERNATIVES:
+            with self.subTest(text=text):
+                self.assertEqual(gate.stop_said(text), text not in NOT_SAID_IN_A_CLAUSE)
+        for text in NOT_STOPS:
+            with self.subTest(text=text):
+                self.assertFalse(gate.stop_said(text))
+
+
+@unittest.skipIf(gate is None, f"app/gate.py doesn't import here: {GATE_ERR}")
+class StopPhrases(unittest.TestCase):
+    """gate.stop_phrases: each run of consecutive words making up a STOP_PHRASES phrase (case and punctuation aside),
+    as one Word from its first word's start to its last word's end."""
+
+    def spans(self, words):
+        found = gate.stop_phrases(words)
+        self.assertIsInstance(found, list)
+        for w in found:
+            self.assertIsInstance(w, gate.Word)
+        return [(round(w.start, 6), round(w.end, 6)) for w in found]
+
+    def span(self, *words):
+        return (round(words[0].start, 6), round(words[-1].end, 6))
+
+    def test_a_one_word_stop_phrase_is_one_word_with_its_times(self):
+        words = timed("okay so stop now")
+        self.assertEqual(self.spans(words), [self.span(words[2])])
+
+    def test_a_two_word_phrase_is_one_word_from_its_first_start_to_its_last_end(self):
+        words = timed("okay hold on a second")
+        self.assertEqual(self.spans(words), [self.span(words[1], words[2])])
+
+    def test_the_guides_stop_words_are_each_found(self):
+        # docs/GUIDE.md "Interrupting him": "stop" (or "wait", "shh", "be quiet")
+        words = timed("wait okay be quiet")
+        self.assertEqual(self.spans(words), [self.span(words[0]), self.span(words[2], words[3])])
+
+    def test_case_and_punctuation_are_set_aside(self):
+        for text in ("HOLD, on!", "That's enough.", "Shhh!", "Stop?"):
+            words = timed(text)
+            self.assertEqual(self.spans(words), [self.span(*words)], text)
+
+    def test_each_run_is_its_own_word_in_order(self):
+        words = timed("stop it hold on that's enough")
+        self.assertEqual(self.spans(words),
+                         [self.span(words[0]), self.span(words[2], words[3]), self.span(words[4], words[5])])
+
+    def test_words_with_no_stop_phrase_find_nothing(self):
+        for text in ("please hold the door", "add milk to the shopping list", ""):
+            self.assertEqual(self.spans(timed(text)), [], repr(text))
+
+
+@unittest.skipIf(gate is None, f"app/gate.py doesn't import here: {GATE_ERR}")
+class StopNear(unittest.TestCase):
+    """gate.stop_near(played, a, b): a played stop phrase overlaps [a - ECHO_WORD, b + ECHO_WORD]."""
+
+    def test_a_span_on_a_played_stop_is_near(self):
+        self.assertTrue(gate.stop_near([played_stop()], T + 0.1, T + 0.3))
+
+    def test_a_span_just_after_a_played_stop_within_echo_word_is_near(self):
+        p = played_stop()
+        self.assertTrue(gate.stop_near([p], p.end + ECHO_WORD - EPS, p.end + ECHO_WORD + 0.2))
+
+    def test_a_span_just_before_a_played_stop_within_echo_word_is_near(self):
+        p = played_stop()
+        self.assertTrue(gate.stop_near([p], p.start - ECHO_WORD - 0.2, p.start - ECHO_WORD + EPS))
+
+    def test_a_span_past_echo_word_after_a_played_stop_is_not_near(self):
+        p = played_stop()
+        self.assertFalse(gate.stop_near([p], p.end + ECHO_WORD + EPS, p.end + ECHO_WORD + 0.4))
+
+    def test_a_span_past_echo_word_before_a_played_stop_is_not_near(self):
+        p = played_stop()
+        self.assertFalse(gate.stop_near([p], p.start - ECHO_WORD - 0.4, p.start - ECHO_WORD - EPS))
+
+    def test_nothing_played_is_never_near(self):
+        self.assertFalse(gate.stop_near([], T, T + 0.4))
+
+    def test_one_played_stop_near_is_enough(self):
+        played = [played_stop(), played_stop(T + 5.0, T + 5.4)]
+        self.assertTrue(gate.stop_near(played, T + 5.4 + ECHO_WORD - EPS, T + 6.5))
+        self.assertFalse(gate.stop_near(played, T + 0.4 + ECHO_WORD + EPS, T + 5.0 - ECHO_WORD - EPS))
+
+
+@unittest.skipIf(gate is None, f"app/gate.py doesn't import here: {GATE_ERR}")
+class OwnStop(unittest.TestCase):
+    """gate.own_stop(heard, played): heard holds a stop phrase, and every one overlaps a played one widened by
+    ECHO_WORD."""
+
+    def test_a_stop_heard_back_on_a_played_one_is_voids_own(self):
+        self.assertTrue(gate.own_stop(timed("okay stop", start=T + 0.2), [played_stop()]))
+
+    def test_a_stop_heard_in_the_ring_within_echo_word_is_voids_own(self):
+        p = played_stop()
+        self.assertTrue(gate.own_stop(timed("stop", start=p.end + ECHO_WORD - EPS), [p]))
+
+    def test_words_with_no_stop_phrase_are_not_an_own_stop(self):
+        self.assertFalse(gate.own_stop(timed("okay then", start=T), [played_stop()]))
+
+    def test_nothing_heard_is_not_an_own_stop(self):
+        self.assertFalse(gate.own_stop((), [played_stop()]))
+
+    def test_a_stop_with_nothing_played_is_not_an_own_stop(self):
+        self.assertFalse(gate.own_stop(timed("stop", start=T), []))
+
+    def test_one_stop_past_echo_word_of_every_played_one_is_the_owners(self):
+        heard = timed("stop", start=T + 0.1) + timed("stop", start=T + 0.4 + ECHO_WORD + 1.0)
+        self.assertFalse(gate.own_stop(heard, [played_stop()]))
+
+    def test_every_stop_near_a_played_one_is_voids_own(self):
+        heard = timed("stop", start=T + 0.1) + timed("hold on", start=T + 3.1)
+        played = [played_stop(), played_stop(T + 3.0, T + 3.6, "hold on")]
+        self.assertTrue(gate.own_stop(heard, played))
+
+    def test_a_played_stop_phrase_heard_as_another_is_voids_own(self):
+        # any stop phrase matches any other: Void's "hold on" heard as "stop" is still his
+        for said, heard in (("hold on", "stop"), ("stop", "that's enough"), ("that's enough", "shh")):
+            played = [played_stop(T, T + 0.6, said)]
+            self.assertTrue(gate.own_stop(timed(heard, start=T + 0.2), played), f"{said!r} heard as {heard!r}")
+
+
+def stop_burst(kind, words, text="Stop.", rang=True):
+    """A burst of `text` of `kind`, its words timed as `words` (None: not timed); over and peek are heard while he
+    talks."""
+    heard = whisper(text) if kind == "follow" else None
+    return gate.Burst(text=text, heard=heard, speech=2.0, seconds=3.0, kind=kind, talking=kind in ("over", "peek"),
+                      rang=rang, words=words)
+
+
+@unittest.skipIf(gate is None, f"app/gate.py doesn't import here: {GATE_ERR}")
+class JudgeOwnStop(unittest.TestCase):
+    """judge step 2, echo: a stop phrase heard on the time one of his played drops as "echo", for every kind but
+    "listen"; one that is past ECHO_WORD of his barges."""
+
+    def judge(self, b, played=()):
+        v = gate.judge(b, [], {"voice_gate": True}, played)
+        self.assertIsInstance(v, gate.Verdict)
+        self.assertIn(v.why, gate.WHY)
+        return v
+
+    def dropped_as_echo(self, v):
+        self.assertEqual((v.keep, v.why, v.act, v.rest), (False, "echo", "drop", ""))
+
+    def barged(self, v):
+        self.assertEqual((v.keep, v.why, v.act, v.rest), (True, "kept", "barge", ""))
+
+    def test_an_own_stop_drops_as_echo_for_every_kind_but_listen(self):
+        p = played_stop()
+        words = timed("Stop.", start=T + 0.1)
+        for kind in ("wake", "follow", "over", "peek"):
+            with self.subTest(kind):
+                self.dropped_as_echo(self.judge(stop_burst(kind, words), [p]))
+        v = self.judge(stop_burst("listen", words), [p])
+        self.assertEqual((v.keep, v.why, v.act, v.rest), (True, "kept", "request", "Stop."))
+
+    def test_an_own_stop_is_dropped_as_echo_with_rang_false_too(self):
+        # D-01 states the rule on word times alone: a heard stop that sits on his played one needs no ringing flag
+        p = played_stop()
+        for kind in ("over", "peek"):
+            self.dropped_as_echo(self.judge(stop_burst(kind, timed("Stop.", start=T + 0.1), rang=False), [p]))
+
+    def test_an_untimed_burst_or_nothing_played_is_judged_as_before(self):
+        p = played_stop()
+        words = timed("Stop.", start=T + 0.1)
+        for kind in ("over", "peek"):
+            self.barged(self.judge(stop_burst(kind, None), [p]))
+            self.barged(self.judge(stop_burst(kind, words)))
+
+    def test_a_played_stop_heard_as_hold_on_is_his_own(self):
+        p = played_stop()
+        self.dropped_as_echo(self.judge(stop_burst("peek", timed("Hold on.", start=T + 0.1), "Hold on."), [p]))
+
+    def test_the_owners_stop_just_past_echo_word_after_his_barges(self):
+        p = played_stop()
+        words = timed("Stop, stop.", start=p.end + ECHO_WORD + EPS)
+        self.barged(self.judge(stop_burst("peek", words, "Stop, stop."), [p]))
+
+    def test_his_stop_and_the_owners_in_one_burst_barges(self):
+        p = played_stop()
+        words = timed("stop", start=T + 0.1) + timed("stop", start=p.end + ECHO_WORD + 1.0)
+        self.barged(self.judge(stop_burst("peek", words, "Stop. Stop."), [p]))
+
+    def test_a_stop_within_echo_word_of_his_either_side_is_his(self):
+        p = played_stop()
+        for kind in ("over", "peek"):
+            for start in (p.end + ECHO_WORD - EPS, p.start - ECHO_WORD - 0.3 + EPS):
+                with self.subTest(kind=kind, start=start):
+                    self.dropped_as_echo(self.judge(stop_burst(kind, timed("Stop.", start=start)), [p]))
+            for start in (p.end + ECHO_WORD + EPS, p.start - ECHO_WORD - 0.3 - EPS):
+                with self.subTest(kind=kind, start=start):
+                    self.barged(self.judge(stop_burst(kind, timed("Stop.", start=start)), [p]))
+
+
 if __name__ == "__main__":
     unittest.main()

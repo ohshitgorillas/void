@@ -1079,11 +1079,18 @@ class Heard:
     logprob: float        # mean avg_logprob over kept segments (-inf when none)
     no_speech: float      # max no_speech_prob over kept segments (1.0 when none)
     seconds: float        # speech_seconds of the clip
+    words: "tuple[gate.Word, ...] | None" = None   # the heard words, in monotonic seconds; None: not timed
+
+    @classmethod
+    def nothing(cls, seconds: float) -> "Heard":
+        """Nothing heard (no transcription ran): no text, no confidence, `seconds` of speech in the clip."""
+        return cls(text="", logprob=float("-inf"), no_speech=1.0, seconds=seconds)
 
 
-def run_whisper_heard(audio, beam=None, hint=None, sure=False) -> Heard:
+def run_whisper_heard(audio, beam=None, hint=None, sure=False, words=False) -> Heard:
     """Transcribe, with Whisper's confidence; if the GPU path blows up at run time (missing CUDA libs etc.), drop to CPU
-    for good. `sure`: keep only what Whisper is fairly sure it heard (the always-on mic hears the room all day)."""
+    for good. `sure`: keep only what Whisper is fairly sure it heard (the always-on mic hears the room all day).
+    `words`: also time each word (Heard.words, seconds into the clip; None when not asked for)."""
     global _whisper
 
     def go():
@@ -1091,7 +1098,7 @@ def run_whisper_heard(audio, beam=None, hint=None, sure=False) -> Heard:
             audio, language=CFG["language"] or None, beam_size=int(beam or CFG.get("whisper_beam") or 5),
             vad_filter=True, vad_parameters={"min_silence_duration_ms": 600, "speech_pad_ms": 300},
             condition_on_previous_text=False, initial_prompt=(hint if hint is not None else CFG.get("stt_hint")) or None,
-            no_speech_threshold=0.5)
+            no_speech_threshold=0.5, word_timestamps=words)
         segs = list(segs)                                          # segments are lazy: errors surface here
         if sure:     # (a guess at noise: low log-prob, the same few words looping, or "probably nobody talking")
             segs = gate.sure(segs)
@@ -1099,7 +1106,9 @@ def run_whisper_heard(audio, beam=None, hint=None, sure=False) -> Heard:
         return Heard(text=out,
                      logprob=sum(s.avg_logprob for s in segs) / len(segs) if segs else float("-inf"),
                      no_speech=max((s.no_speech_prob for s in segs), default=1.0),
-                     seconds=_speech_seconds(audio))
+                     seconds=_speech_seconds(audio),
+                     words=tuple(gate.Word(w.word.strip(), w.start, w.end) for s in segs for w in (s.words or ())
+                                 ) if words else None)
     try:
         return go()
     except Exception as e:  # noqa: BLE001
@@ -1127,11 +1136,17 @@ def pcm_audio(pcm: bytes):
     return audio
 
 
-def transcribe_pcm_heard(pcm: bytes, **kw) -> Heard:
-    """Raw s16le 16 kHz mono → what was heard, with Whisper's confidence."""
+def transcribe_pcm_heard(pcm: bytes, at: float | None = None, **kw) -> Heard:
+    """Raw s16le 16 kHz mono → what was heard, with Whisper's confidence. `at`: when the clip's first sample was caught
+    (monotonic): given, and a stop phrase of his played near the clip, the words are timed too (Heard.words, monotonic
+    seconds); otherwise Whisper runs without word times, which cost more, and Heard.words is None."""
     if len(pcm) < 16000 * 2 * 0.3:          # < 0.3 s: nothing worth sending
-        return Heard(text="", logprob=float("-inf"), no_speech=1.0, seconds=0.0)
-    return run_whisper_heard(pcm_audio(pcm), **kw)
+        return Heard.nothing(0.0)
+    timed = at is not None and gate.stop_near(played_lately(), at, at + len(pcm) / (RATE * 2))
+    h = run_whisper_heard(pcm_audio(pcm), words=timed, **kw)
+    if h.words is not None:                  # (Whisper's times are into the clip: here they become monotonic)
+        h.words = tuple(gate.Word(w.text, at + w.start, at + w.end) for w in h.words)
+    return h
 
 
 def transcribe_pcm(pcm: bytes, **kw) -> str:
@@ -1470,6 +1485,91 @@ FOLLOW_NOTE = ("(Voice note from Void: the mic picked this up a few seconds afte
 IGNORE = "[ignore]"
 STOP_PEEK = 0.5          # s: a burst begun over him is checked this often for a stop phrase while you're still talking
 SPOKEN = collections.deque(maxlen=200)           # (monotonic time, text) of what he said lately
+PLAYED: collections.deque = collections.deque()  # gate.Word: his stop phrases as they come out of the speakers, oldest first
+PLAYED_LOCK = threading.Lock()
+
+
+def _prune_played(now: float) -> None:
+    """The one prune of PLAYED: forget every entry that ended more than ECHO_KEEP before `now`. Caller holds PLAYED_LOCK."""
+    keep = [w for w in PLAYED if now - w.end <= ECHO_KEEP]
+    PLAYED.clear()
+    PLAYED.extend(keep)
+
+
+def note_played(text: str, start: float, dur: float, words: "list[list[float]] | None") -> None:
+    """The one writer of PLAYED: each word of `text` timed from `start` plus its [start, end] pair, or spread evenly over
+    `dur` when there are no word times (or not one per word); only the stop phrases among them are kept."""
+    toks = langmark.unmark(text).split()
+    if not toks:
+        return
+    if words is None or len(words) != len(toks):
+        step = dur / len(toks)
+        words = [[i * step, (i + 1) * step] for i in range(len(toks))]
+    found = gate.stop_phrases([gate.Word(t, start + a, start + b) for t, (a, b) in zip(toks, words)])
+    with PLAYED_LOCK:
+        _prune_played(time.monotonic())
+        PLAYED.extend(found)
+
+
+def _page_words(words) -> "list[list[float]] | None":
+    """The page's [start, end] pairs as note_played takes them, or None when it sent anything else."""
+    def num(x):
+        return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+    if not isinstance(words, list):
+        return None
+    if not all(isinstance(w, (list, tuple)) and len(w) == 2 and num(w[0]) and num(w[1]) for w in words):
+        return None
+    return [[float(a), float(b)] for a, b in words]
+
+
+def note_page_played(b: dict, end: float) -> None:
+    """The page's `/api/speaking` post `b` starts a sentence's sound that runs to `end` (monotonic): note its stop phrases
+    from `end - dur`, where Wake.talked has that sentence's sound start. A missing or malformed text or dur notes nothing,
+    malformed word times are spread evenly, and nothing here raises: the post still updates the record."""
+    text, dur = b.get("text"), b.get("dur")
+    if not isinstance(text, str) or isinstance(dur, bool) or not isinstance(dur, (int, float)):
+        return
+    if not (math.isfinite(dur) and dur > 0 and math.isfinite(end)):
+        return
+    try:
+        note_played(speakable(text), end - dur, float(dur), _page_words(b.get("words")))
+    except Exception as e:  # noqa: BLE001
+        print(f"[void] page played words: {e}", file=sys.stderr)
+
+
+def speaking_post(b: dict) -> None:
+    """The page's `/api/speaking` post `b`, taken into the record (the route calls this, and so does a scene's page player).
+    {"owe": 1}: a sentence was handed to the page's player · {"paid": 1}: one left it with no sound ·
+    {"on": true, "left": s[, "paid": 1][, "text", "dur", "words"]}: his sound runs `s` more seconds (and that sentence's
+    has begun), the sentence's own words noted by note_page_played · {"on": false}: it ends now, and nothing more is owed."""
+    if b.get("owe"):
+        Wake.owe()
+    if "on" not in b:
+        if b.get("paid"):
+            Wake.pay()
+    elif b.get("on"):
+        end = time.monotonic() + max(0.0, float(b.get("left") or 0))
+        note_page_played(b, end)                 # (this sentence's words, timed from where its sound starts)
+        Wake.talking_until(end, int(bool(b.get("paid"))))
+    else:
+        now = time.monotonic()
+        Wake.talking_until(now, None)
+        played_cut(now)                          # (the stop phrases of his that were still to play)
+
+
+def played_lately() -> "tuple[gate.Word, ...]":
+    """The one reader of PLAYED: his stop phrases that ended no more than ECHO_KEEP ago (older ones are forgotten)."""
+    with PLAYED_LOCK:
+        _prune_played(time.monotonic())
+        return tuple(PLAYED)
+
+
+def played_cut(at: float) -> None:
+    """A sentence cut off never plays: drop every entry starting at or after `at`."""
+    with PLAYED_LOCK:
+        keep = [w for w in PLAYED if w.start < at]
+        PLAYED.clear()
+        PLAYED.extend(keep)
 
 
 def note_spoken(text):
@@ -1658,6 +1758,7 @@ class Wake:
             cls.talked = [[s, min(e, at), min(u, at)] for s, e, u in cls.talked if s < at]
             cls.owed = 0                         # (what he still owed will never sound)
             cls._tell()
+        played_cut(at)                           # (and the stop phrases of his that were to play from then on)
         cls.nudge()
 
     @classmethod
@@ -1751,7 +1852,7 @@ class Wake:
                         if (not req and cls.span_at(started) and now - peek_at >= STOP_PEEK
                                 and len(seg) >= RATE * 2 * STOP_PEEK):
                             peek_at = now
-                            if cls.stop_in(bytes(seg), started):
+                            if cls.stop_in(bytes(seg), started, seg_at):
                                 in_speech, seg, said = False, bytearray(), None
                                 continue
                         if req:
@@ -1763,8 +1864,8 @@ class Wake:
                                                 else (TURN_QUIET, TURN_VAD, TURN_MAX))
                             done = now - last_voice > quiet or now - vad_last > vad or len(seg) > RATE * 2 * most
                             if done and not cls.speaking() and len(seg) > RATE * 2 * 0.35:
-                                said = cls.heard(bytes(seg), started)
-                                if WAKE_RE.match(said or ""):     # "hey Void, ...": hear the rest of it out
+                                said = cls.heard(bytes(seg), started, seg_at)
+                                if WAKE_RE.match(said.text if said else ""):     # "hey Void, ...": hear the rest of it out
                                     req, done, said = True, False, None
                         if done:
                             in_speech = False
@@ -1785,36 +1886,41 @@ class Wake:
             mic.close()
 
     @classmethod
-    def heard(cls, pcm, started):
-        """A quick listen for his name at the first pause: what Whisper heard, kept or dropped (Wake.check judges it
-        again as its own kind). None: too little speech to be worth transcribing."""
+    def heard(cls, pcm, started, at=None):
+        """A quick listen for his name at the first pause: the Heard, kept or dropped (Wake.check judges it again as its
+        own kind). None: too little speech to be worth transcribing. `started`: when the burst was detected (for
+        Wake.air) · `at`: when its first sample was caught (for its word times)."""
         now = time.monotonic()
         try:
             ss, secs = speech_seconds(pcm), len(pcm) / (RATE * 2)
-            text = (transcribe_pcm(pcm, beam=1, hint="Hey Void.", sure=True)
-                    if gate.spoken_enough(ss, secs, "wake") else "")
+            h = (transcribe_pcm_heard(pcm, at=at, beam=1, hint="Hey Void.", sure=True)
+                 if gate.spoken_enough(ss, secs, "wake") else Heard.nothing(ss))
         except Exception as e:  # noqa: BLE001
             print(f"[void] wake word stt: {e}", file=sys.stderr)
             return None
-        v = gate.judge(gate.Burst(text, None, ss, secs, "wake", *cls.air(started, now)), said_lately(), CFG)
-        verdict_out(v, text, "wake")
-        return None if v.why == "no speech" else text
+        v = gate.judge(gate.Burst(h.text, None, ss, secs, "wake", *cls.air(started, now), words=h.words),
+                       said_lately(), CFG, played_lately())
+        verdict_out(v, h.text, "wake")
+        return None if v.why == "no speech" else h
 
     @classmethod
-    def stop_in(cls, pcm, started):
-        """A burst begun over him, still going: if what's said so far holds a stop phrase, stop him now (True)."""
+    def stop_in(cls, pcm, started, at=None):
+        """A burst begun over him, still going: if what's said so far holds a stop phrase, stop him now (True).
+        `started` and `at` as for Wake.heard."""
         now = time.monotonic()
         try:
             ss, secs = speech_seconds(pcm), len(pcm) / (RATE * 2)
-            text = transcribe_pcm(pcm, beam=1, sure=True) if gate.spoken_enough(ss, secs, "peek") else ""
+            h = (transcribe_pcm_heard(pcm, at=at, beam=1, sure=True)
+                 if gate.spoken_enough(ss, secs, "peek") else Heard.nothing(ss))
         except Exception as e:  # noqa: BLE001
             print(f"[void] stop check stt: {e}", file=sys.stderr)
             return False
-        v = gate.judge(gate.Burst(text, None, ss, secs, "peek", *cls.air(started, now)), said_lately(), CFG)
-        verdict_out(v, text, "peek")
+        v = gate.judge(gate.Burst(h.text, None, ss, secs, "peek", *cls.air(started, now), words=h.words),
+                       said_lately(), CFG, played_lately())
+        verdict_out(v, h.text, "peek")
         if v.act != "barge":
             return False
-        cls.barge(text)
+        cls.barge(h.text)
         return True
 
     @classmethod
@@ -1838,9 +1944,9 @@ class Wake:
         return None
 
     @classmethod
-    def check(cls, pcm, started, text=None, ended=None, at=None):
+    def check(cls, pcm, started, heard=None, ended=None, at=None):
         """One burst heard out. `at`: when its first sample was caught (monotonic), so a reply begun over him can be cut
-        free of his voice."""
+        free of his voice. `heard`: the Heard from Wake.heard, if it listened already."""
         ended = time.monotonic() if ended is None else ended     # (when you last made a sound)
         began = started                          # (when Wake.session passed it, before ran_on moves it)
         # started after he finished talking, inside the follow-up window → it's a request, no "hey Void" needed
@@ -1859,26 +1965,27 @@ class Wake:
                 cut = 0
         talking, rang = cls.air(began, ended)    # (his sound, or its ring, was in the air while it was heard)
         kind = "over" if over else "follow" if follow else "wake"
-        heard = None
+        when = (began if at is None else at) + cut / (RATE * 2)    # (when pcm's first sample was caught)
+        if kind == "follow":
+            heard = None                         # (heard whole as a wake listen: not this burst's follow-up kind)
         try:
             ss, secs = speech_seconds(pcm), len(pcm) / (RATE * 2)
             if not gate.spoken_enough(ss, secs, kind):   # (music or noise, not talking: Whisper would dream up words)
-                text = ""
-            else:
-                if kind == "follow":             # (a judged follow-up needs Whisper's confidence, not just words)
-                    heard = transcribe_pcm_heard(pcm, sure=True)
-                    text = heard.text
-                elif text is None:
-                    text = (transcribe_pcm(pcm, sure=True) if over
-                            else transcribe_pcm(pcm, beam=1, hint="Hey Void.", sure=True))
+                heard = Heard.nothing(ss)
+            elif heard is None:
+                if kind == "follow" or over:     # (a judged follow-up needs Whisper's confidence, not just words)
+                    heard = transcribe_pcm_heard(pcm, at=when, sure=True)
+                else:
+                    heard = transcribe_pcm_heard(pcm, at=when, beam=1, hint="Hey Void.", sure=True)
         except Exception as e:  # noqa: BLE001
             print(f"[void] wake word stt: {e}", file=sys.stderr)
             return
-        text = text or ""
+        text = heard.text or ""
         hear_out(f"heard {secs:.1f}s, {len(text.split())} words"
                  f"{', follow-up' if follow else ''}{f', after his last word ({cut / (RATE * 2):.1f}s of him cut)' if cut else ''}"
                  f"{', wake word' if WAKE_RE.match(text) else ''}{', while talking' if talking else ', in his echo' if rang else ''}")
-        v = gate.judge(gate.Burst(text, heard, ss, secs, kind, talking, rang), said_lately(), CFG)
+        v = gate.judge(gate.Burst(text, heard if kind == "follow" else None, ss, secs, kind, talking, rang, heard.words),
+                       said_lately(), CFG, played_lately())
         verdict_out(v, text, kind)
         if v.act == "barge":
             cls.barge(text)
@@ -2248,6 +2355,20 @@ def tidy_and_time(wav, text):
     return w2, times
 
 
+def tts_reply(text):
+    """The `/api/tts` work (the route calls this, and so does a scene's page player): `text` made speakable, noted as
+    spoken, synthesised and timed. → (wav bytes, playback rate, pause after it, word times or None), or None when there
+    is nothing to say or no voice engine."""
+    text = speakable(text)
+    if not text or not tts_engine():
+        return None
+    note_spoken(text)
+    audio, rate = synth(text)
+    audio, words = tidy_and_time(audio, langmark.unmark(text))
+    pause = 0.3 if re.search(r"[.!?]['\")}]*$", text) else 0.14 if re.search(r"[,;:—–]$", text) else 0.06
+    return audio, rate, pause, words
+
+
 def tidy_full(wav, text):
     """Trim the silence piper puts before/after each sentence (that's dead air between sentences) and work out when
     each word is spoken: find where the voice actually starts and stops and the pauses at commas/full stops, then
@@ -2498,12 +2619,13 @@ class Speaker:
         return cls.proc
 
     @classmethod
-    def _write(cls, data, g, again=True, sound=True, owe=None):
+    def _write(cls, data, g, again=True, sound=True, owe=None, played=None):
         """Stream raw samples, keeping LEAD seconds buffered. If we were ever late (the speakers ran dry) count it and
         move the clock on, so the start times we tell the page stay true. If the player ends mid-way (you picked other
         speakers) a new one carries on, from what the old one still had queued and so never played. `owe`: a one-item
         list holding True while this sentence is still owed: its first sound chunk pays it, inside the same
-        Wake.talking call that records the chunk, and clears it."""
+        Wake.talking call that records the chunk, and clears it. `played`: (text, dur, words) of the sentence, noted in
+        PLAYED at that same chunk's time, so his stop phrases are timed from the moment Wake.talked has his sound start."""
         step = max(2, int(cls.prate * 0.02)) * 2
         for i in range(0, len(data), step):
             while True:
@@ -2539,11 +2661,14 @@ class Speaker:
                 except Exception as e:  # noqa: BLE001
                     print(f"[void] audio player: {e}", file=sys.stderr)
                     return False
-                return cls._write(data[max(0, i - back):], g, again=False, sound=sound, owe=owe)
+                return cls._write(data[max(0, i - back):], g, again=False, sound=sound, owe=owe, played=played)
             at, n = cls.t0 + cls.written / cls.prate + cls.LAT, len(data[i:i + step]) // 2   # (heard from the speakers then)
             hearing.PlayRef.played(data[i:i + step], cls.prate, at)
             if sound and g == cls.gen:                            # (his sound only; not once he's been cut off)
-                Wake.talking(at, at + n / cls.prate, int(bool(owe and owe[0])), chunk=True)
+                first = bool(owe and owe[0])
+                if first and played:                              # (this sentence's sound begins now: so do its words)
+                    note_played(played[0], at, played[1], played[2])
+                Wake.talking(at, at + n / cls.prate, int(first), chunk=True)
                 if owe:
                     owe[0] = False
             cls.written += n
@@ -2586,7 +2711,7 @@ class Speaker:
             BUS.pub(t="spk", id=sid, at=round((start - now + cls.LAT) * 1000), dur=round(dur, 3), words=words,
                     level=level, step=lstep)
             owe = [True]                                        # (paid by its first sound chunk, else below)
-            ok = cls._write(pcm, g, owe=owe)
+            ok = cls._write(pcm, g, owe=owe, played=(text, dur, words))
             if owe[0] and g == cls.gen:                         # (no sound of its own: no samples, or the player failed)
                 Wake.pay()
             Wake.flush()                                        # (a write that failed part-way still tells the page its end)
@@ -3741,15 +3866,12 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/ask":
                 return self.ask()
             if p == "/api/tts":
-                text = speakable(json.loads(self._body() or b"{}").get("text", ""))
-                if not text or not tts_engine():
+                reply = tts_reply(json.loads(self._body() or b"{}").get("text", ""))
+                if reply is None:
                     self.send_response(204)
                     self.end_headers()
                     return None
-                note_spoken(text)
-                audio, rate = synth(text)
-                audio, words = tidy_and_time(audio, langmark.unmark(text))
-                pause = 0.3 if re.search(r"[.!?]['\")}]*$", text) else 0.14 if re.search(r"[,;:—–]$", text) else 0.06
+                audio, rate, pause, words = reply
                 self.send_response(200)
                 self.send_header("Content-Type", "audio/wav")
                 self.send_header("X-Void-Rate", f"{rate:.3f}")
@@ -3939,19 +4061,7 @@ class Handler(BaseHTTPRequestHandler):
                 ans = b.get("ans") if b.get("ans") in ("yes", "no", "always") else "no"
                 return self._json({"ok": APPROVALS.answer(str(b.get("id")), ans)})
             if p == "/api/speaking":                 # the page tells us while he talks (so "hey Void" can't wake himself)
-                b = json.loads(self._body() or b"{}")
-                # {"owe": 1}: a sentence was handed to the page's player · {"paid": 1}: one left it with no sound ·
-                # {"on": true, "left": s[, "paid": 1]}: his sound runs `s` more seconds (and that sentence's has begun) ·
-                # {"on": false}: it ends now, and nothing more is owed
-                if b.get("owe"):
-                    Wake.owe()
-                if "on" not in b:
-                    if b.get("paid"):
-                        Wake.pay()
-                elif b.get("on"):
-                    Wake.talking_until(time.monotonic() + max(0.0, float(b.get("left") or 0)), int(bool(b.get("paid"))))
-                else:
-                    Wake.talking_until(time.monotonic(), None)
+                speaking_post(json.loads(self._body() or b"{}"))
                 return self._json({"ok": True, **Wake.record()})
             if p == "/api/capture":
                 b = json.loads(self._body() or b"{}")

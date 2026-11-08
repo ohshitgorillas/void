@@ -146,6 +146,74 @@ def test_the_row_gets_the_verdict_the_owner_expects(r):
     assert (v.keep, v.why, v.act, v.rest) == (r.keep, r.why, r.act, r.rest), f"got {v}"
 
 
+# ---- Void's own stop phrase: rows of their own (D-08). A row cannot lean on `Row.rang`'s default or on the replay's
+# carried-over flags: it sets `kind`, `talking` and `rang` itself. Times are written against `gate.ECHO_WORD`, read from
+# the gate, never as a width of their own
+HIS_STOP = gate.Word("stop", 100.0, 100.4)          # the stop phrase Void played (monotonic s)
+INSIDE = gate.ECHO_WORD - 0.05                      # a start this long after his stop ended: inside ECHO_WORD
+PAST = gate.ECHO_WORD + 0.05                        # …and one past it
+STEP = 0.3                                          # s each heard word lasts
+
+
+def said(text, after):
+    """`text` heard word by word, STEP s each, the first starting `after` s after his stop ended (negative: before it)."""
+    return tuple((w, after + i * STEP, after + (i + 1) * STEP) for i, w in enumerate(text.split()))
+
+
+class OwnRow(NamedTuple):
+    """One stop phrase heard while Void had played one: what was heard, when, and the verdict it should get. Nothing is
+    defaulted: `kind`, `talking` and `rang` are the row's own."""
+    name: str
+    text: str                                       # what was heard
+    heard: tuple                                    # its words, as (word, start, end) in s after his stop phrase ended
+    kind: str                                       # "listen" | "wake" | "follow" | "over" | "peek"
+    talking: bool                                   # his sound was coming out at some moment of the burst
+    rang: bool                                      # his sound, or its ring, was in the air at some moment of it
+    keep: bool                                      # the verdict it should get: kept or dropped…
+    why: str                                        # …which of gate.WHY…
+    act: str                                        # …and what is done with it
+
+    @property
+    def rest(self):
+        return self.text if self.act == "request" else ""
+
+
+ECHO = dict(keep=False, why="echo", act="drop")     # his own stop heard back
+BARGE = dict(keep=True, why="kept", act="barge")    # the owner's stop
+
+OWN_STOPS = [
+    OwnRow("his Stop. heard as a peek while he talks", "Stop.", said("Stop.", -0.3), "peek", True, True, **ECHO),
+    OwnRow("his Stop. heard in the ring after, as over", "Stop.", said("Stop.", INSIDE), "over", False, True, **ECHO),
+    OwnRow("his Stop. heard in the ring after, as follow", "Stop.", said("Stop.", INSIDE), "follow", False, True, **ECHO),
+    OwnRow("his stop heard as hold on", "Hold on.", said("Hold on.", -0.3), "peek", True, True, **ECHO),
+    OwnRow("the owner's Stop, stop. just past ECHO_WORD after his", "Stop, stop.", said("Stop, stop.", PAST), "peek",
+           True, True, **BARGE),
+    OwnRow("the owner's stop within ECHO_WORD of his is his", "Stop.", said("Stop.", INSIDE), "peek", True, True,
+           **ECHO),
+    OwnRow("his stop and the owner's past ECHO_WORD in one burst", "Stop. Stop.",
+           said("Stop.", -0.3) + said("Stop.", PAST + 1.0), "peek", True, True, **BARGE),
+    OwnRow("push-to-talk Stop is a request", "Stop", said("Stop", -0.3), "listen", False, False, keep=True,
+           why="kept", act="request"),
+]
+
+
+def own_burst(r):
+    words = tuple(gate.Word(w, HIS_STOP.end + a, HIS_STOP.end + b) for w, a, b in r.heard)
+    return gate.Burst(text=r.text, heard=heard(r.text) if r.kind == "follow" else None, speech=1.5, seconds=2.5,
+                      kind=r.kind, talking=r.talking, rang=r.rang, words=words)
+
+
+@pytest.mark.parametrize("r", [pytest.param(r, id=r.name) for r in OWN_STOPS])
+def test_the_own_stop_row_gets_the_verdict_it_should(r):
+    v = gate.judge(own_burst(r), [], CFG, (HIS_STOP,))
+    assert (v.keep, v.why, v.act, v.rest) == (r.keep, r.why, r.act, r.rest), f"got {v}"
+
+
+def test_an_own_stop_row_leans_on_no_default_flag():
+    with pytest.raises(TypeError):
+        OwnRow("x", "Stop.", (), "peek", True, keep=False, why="echo", act="drop")   # (rang left out)
+
+
 def test_every_row_text_fits_what_the_log_keeps():
     assert [r.text for r in YOURS if len(r.text) > drops.CUT] == []
 

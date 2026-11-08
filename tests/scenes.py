@@ -19,6 +19,7 @@ import collections
 import io
 import json
 import math
+import re
 import sys
 import threading
 import time as _time
@@ -64,7 +65,7 @@ SETTINGS = {              # every setting Wake.session, Wake.check and Speaker r
     "echo_cancel": True, "voice_out": "auto",
     "language": "en", "whisper_beam": 5, "whisper_model": "base.en", "whisper_device": "cpu",   # (hear=True)
     "voice_gate": True,                                         # (follow-ups judged on Whisper's confidence)
-}                         # (plus stt_hint: server's default, set in play)
+}                         # (plus stt_hint and speak_max_chars: server's defaults, set in play)
 
 
 def clip(name: str) -> np.ndarray:
@@ -100,8 +101,46 @@ def _wav(x, rate=SR):
     return b.getvalue()
 
 
-def _texts():
-    return {k: v.get("text", "") for k, v in json.loads((FIXTURES / "manifest.json").read_text("utf-8"))["clips"].items()}
+def _clips() -> dict[str, dict]:
+    """manifest.json's "clips": the one reader of them."""
+    return json.loads((FIXTURES / "manifest.json").read_text("utf-8"))["clips"]
+
+
+def _texts() -> dict[str, str]:
+    """Each clip's "text"."""
+    return {k: v.get("text", "") for k, v in _clips().items()}
+
+
+def _words() -> dict[str, list[list[float]]]:
+    """Each clip's "words" (one [start, end] per word of its text, in s from the clip's first sample), where it has them."""
+    return {k: v["words"] for k, v in _clips().items() if "words" in v}
+
+
+def _leads() -> dict[str, float]:
+    """Each Void clip's "lead": the s that server.tidy_full trims off its front, so it is not played."""
+    return {k: v["lead"] for k, v in _clips().items() if "lead" in v}
+
+
+def _gate():
+    _server()                                                     # (app/ on sys.path)
+    import gate
+    return gate
+
+
+def void_stops(name: str) -> list[tuple[float, float]]:
+    """Each stop phrase of Void's clip `name` as (start, end) in s after his voice starts coming out of the speakers:
+    the clip's "words" less its "lead" (what the player drops), grouped by gate.stop_phrases. [] when the clip has no
+    word times."""
+    clip = _clips()[name]
+    if "words" not in clip:
+        return []
+    gate, lead = _gate(), clip.get("lead", 0.0)
+    timed = [gate.Word(w, s - lead, e - lead) for w, (s, e) in zip(clip["text"].split(), clip["words"])]
+    return [(p.start, p.end) for p in gate.stop_phrases(timed)]
+
+
+def _tokens(text):
+    return re.findall(r"[\w']+", text.lower())
 
 
 class Room:
@@ -153,13 +192,17 @@ class Take:
     absent) and events: the BUS events published during the scene. switched: when the speakers changed mid-sentence
     (play's switch_at), in seconds on the scene's clock: the moment the old speakers fell silent and the new ones took
     over (None: no switch happened). opening_db: how far under how you said them the first OPENING seconds of your
-    voice came through in clean (opening_db; None when you didn't speak)."""
+    voice came through in clean (opening_db; None when you didn't speak). offsets: each stop phrase the hearing judged, with
+    word times, against the nearest stop phrase of his in the record of what he played then (see play), as
+    {"heard": text, "kind", "start", "end"}, the last two heard minus played in seconds. void_from: the scene second the first sample
+    Void's player wrote comes out of the speakers (None when he didn't play): the clip's first sample after the trim."""
 
     def __init__(self):
         empty = np.zeros(0, np.int16)
         self.raw = self.clean = self.echo = self.you = self.music = empty
-        self.void_start = self.void_end = self.you_start = self.you_end = self.opening_db = None
+        self.void_start = self.void_end = self.you_start = self.you_end = self.opening_db = self.void_from = None
         self.events = []
+        self.offsets = []
         self.switched = None
         self.mic_from = 0.0
 
@@ -322,7 +365,9 @@ class Scene:
     """The room as it sounds at the mic: what the speakers really played (from the fake players), through the room,
     plus you, the music and the mic's hiss, captured 20 ms at a time as the clock reaches each chunk's end. `lat` is
     the true output latency of the speakers a new player opens on (play's switch changes it); `players`, every fake
-    player opened, in order; `first`, called once with the scene time (seconds) his voice first comes out."""
+    player opened, in order; `first`, called once with the scene time (seconds) his voice first comes out. `void_from`:
+    the scene sample at which the first sample his player wrote comes out of the speakers (set once; None until he
+    plays), where the clip's own first sample, after the trim, sits; `switched`: the speakers changed mid-sentence."""
 
     def __init__(self, sim, room, n, lat, you, you_at, has_void, first=None):
         self.sim, self.room, self.lat, self.players, self.first = sim, room, lat, [], first
@@ -332,6 +377,7 @@ class Scene:
         self.played = []                                          # where any player put sound: scene sample numbers
         self.you_clip = None if you is None else you.astype(np.float64) * 10 ** (room.you_db / 20)
         self.you_at, self.has_void, self.you_from = you_at, has_void, None
+        self.void_from, self.switched = None, False
         self.music_part = np.zeros(pad)
         if room.music:
             m = clip(room.music).astype(np.float64)[:pad] * 10 ** (room.music_db / 20)
@@ -419,6 +465,8 @@ class FakePlayer:
         else:
             run = [ts, x, math.ceil((ts - RS_HALF / r) * SR), np.zeros(0)]
             self.runs.append(run)
+            if self.scene.void_from is None:                  # (the start of the scene's first run: his clip's first sample)
+                self.scene.void_from = round(ts * SR)
             redo = run[2]
         self.end = start + len(x) / r
         k0, k1 = max(run[2], redo), math.ceil((self.end - T0 + RS_HALF / r) * SR)
@@ -508,9 +556,12 @@ class Events:
     def __init__(self, sim):
         self.sim = sim
         self.got = []
+        self.on_barge = None                                      # (called with each "barge": the page's player stops on it)
 
     def pub(self, **ev):
         self.got.append(dict(ev, scene_at=self.sim.now - T0))
+        if ev.get("t") == "barge" and self.on_barge:
+            self.on_barge()
 
     def sub(self):
         import queue
@@ -560,14 +611,21 @@ def opening_db(read, you, start):
     return 20 * math.log10(g) if g > 0 else -math.inf
 
 
-def _whisper(scene, clean, void_text, you_text):
-    """Stand-ins for Whisper and its speech detector, for fakes.ears: → (hear, speech). hear(pcm) makes out the words of whoever's voice the burst mostly sounds like.
+def _whisper(scene, clean, void_text, you_text, you_words=None, void_words=None, void_lead=0.0):
+    """Stand-ins for Whisper and its speech detector, for fakes.ears: → (hear, speech, words). hear(pcm) makes out the words of whoever's voice the burst mostly sounds like.
     Finds where the burst sits on the scene's clock (it is a stretch of what Wake.session read), then, frame by frame,
     asks whose spectrum the burst's is most like there: your voice, Void's echo, or the music, as they reached the
     mic (spectra, not samples: the canceller's suppressor reshapes what it lets through, and hands it back a little
     late). Each frame votes by its loudness. His words if he wins, nothing if the music does. If you win, your words,
     less your first OPENING_WORDS when your opening came through more than OPENING_LOST_DB under how you said it
-    (opening_db): real Whisper mishears a turned-down opening under his voice as words of its own, or as nothing."""
+    (opening_db): real Whisper mishears a turned-down opening under his voice as words of its own, or as nothing.
+    When the winner's clip has word times (yours: `you_words`, one [start, end] per word you say; his: `void_words`, one
+    per word of `void_text`, from the clip's first sample, less `void_lead`, what the player drops off its front), the
+    winner is heard only as far as the burst holds him: the words that lie wholly inside it, as real Whisper hears only
+    what the burst holds; a clip with none is heard whole. words(pcm, at) times exactly those words, for
+    transcribe_pcm_heard's `at` (the burst's first sample, on server's clock), each a gate.Word at where it sits on the
+    scene's clock. None when the music or no one wins, when the winner's clip has no word times, and for him after the
+    speakers changed."""
     def yours(got):
         if scene.you_from is None:
             return you_text
@@ -586,6 +644,14 @@ def _whisper(scene, clean, void_text, you_text):
                 break
         return got, max(0, e // 2 - len(pcm) // 2), e // 2
 
+    def his(a, b):
+        """His words wholly inside [a, b), each (word, start, end) in scene seconds as they reach the mic; None when
+        his words are not timed here (no word times, he has not played, or the speakers changed)."""
+        if not void_words or scene.void_from is None or scene.switched:
+            return None
+        t = scene.void_from / SR - void_lead + scene.room.delay
+        return [(w, t + s, t + e) for w, (s, e) in zip(void_text.split(), void_words) if a / SR <= t + s and t + e <= b / SR]
+
     def speech(pcm):
         """Stand-in for server.speech_seconds on a burst Wake.session read: its 30 ms frames that are someone
         talking (you, his echo or the music loud enough to be, as they reached the mic) and that came through above
@@ -598,9 +664,21 @@ def _whisper(scene, clean, void_text, you_text):
         talking = (rms(scene.you[a:b]) > VOICED) | (rms(scene.echo[a:b]) > VOICED) | (rms(scene.music[a:b]) > VOICED)
         return float((talking & (rms(np.frombuffer(got[2 * a:2 * b], np.int16)) > HEARD)).sum()) * 0.03
 
-    def hear(pcm, **_kw):
+    def mine(text, a, b):
+        """Your kept words (`text`: what yours() lets through) wholly inside [a, b), each (word, start, end) in scene
+        seconds as they reach the mic; None when your words are not timed here (no word times, or you have not begun)."""
+        if not you_words or scene.you_from is None:
+            return None
+        said = list(zip(you_text.split(), you_words))
+        t = scene.you_from / SR
+        return [(w, t + s, t + e) for w, (s, e) in (said[len(said) - len(text.split()):] if text else [])
+                if a / SR <= t + s and t + e <= b / SR]
+
+    def vote(pcm):
+        """→ (who won the burst: "you", "void", "music" or None, the words heard, a, b: the burst on the scene's clock,
+        the heard words timed as (word, start, end) in scene seconds, or None when they are not timed)."""
         if len(pcm) < SR * 2 * 0.3:
-            return ""
+            return None, "", 0, 0, None
         got, a, b = where(pcm)
         c = _spectra(np.frombuffer(got[2 * a:2 * b], np.int16).astype(np.float64))
         votes = {}
@@ -613,19 +691,83 @@ def _whisper(scene, clean, void_text, you_text):
         sims = np.array([v[0] for v in votes.values()])
         loud = (c ** 4).sum(1)                                    # (each frame's power, near enough)
         won = [float(loud[(sims.argmax(0) == i) & (sims.max(0) > 0)].sum()) for i in range(len(votes))]
-        texts_ = [v[1] for v in votes.values()]
-        return texts_[int(np.argmax(won))] if max(won) > 0 else ""
+        if max(won) <= 0:
+            return None, "", a, b, None
+        who = list(votes)[int(np.argmax(won))]
+        text = votes[who][1]
+        timed = mine(text, a, b) if who == "you" else his(a, b) if who == "void" else None
+        if timed is not None:                                     # (heard only as far as the burst holds them)
+            text = " ".join(w for w, _, _ in timed)
+        return who, text, a, b, timed
 
-    return hear, speech
+    def hear(pcm, **_kw):
+        return vote(pcm)[1]
+
+    def words(pcm, at):
+        _who, _text, a, _b, timed = vote(pcm)
+        if timed is None:
+            return None
+        return tuple(_gate().Word(w, at + (s - a / SR), at + (e - a / SR)) for w, s, e in timed)
+
+    return hear, speech, words
 
 
 # ---------------------------------------------------------------- a scene
 
 THEN = "And here is the rest of what I found."     # the second sentence of a line played with play(then=...)
+PAGE_LEAD = 0.05          # page voice: the page schedules a sentence this long after it is handed over (its `when`)
+
+
+def _page_player(sim, scene, server, text, events):
+    """The page's player, for a scene (room harness beside FakePlayer, not a hearing double): what pump/enqueue in
+    index.html do to the server for one sentence, through the server's own code for `/api/tts` (tts_reply) and
+    `/api/speaking` (speaking_post). Handed the line it posts the owe and has the server make the audio; PAGE_LEAD
+    later it posts the sentence's start (`left`: to its end plus the speakers' latency, with its text, played length
+    and word times) and the trimmed audio comes out of the speakers `scene.lat` after that; when it has played it posts
+    that he is quiet. On a "barge" event the page's shush(): its audio stops (what was already handed to the speakers
+    plays on for `scene.lat`, as a killed FakePlayer's does) and it posts that he is quiet. The page's voice gives the
+    echo canceller no reference, so nothing goes to PlayRef."""
+    server.speaking_post({"owe": 1})
+    reply = server.tts_reply(text)
+    if reply is None:                                             # (nothing to say: it is no longer owed)
+        server.speaking_post({"paid": 1})
+        return
+    audio, rate, _pause, words = reply
+    with wave.open(io.BytesIO(audio)) as w:
+        sr, pcm = w.getframerate(), w.readframes(w.getnframes())
+    x = np.frombuffer(pcm, np.int16).astype(np.float64)
+    r = sr * rate                                                 # (the player's rate: the clip's, sped by the voice's pitch)
+    dur = len(x) / r
+    sim.sleep(PAGE_LEAD)
+    left = dur + scene.lat
+    me, barged = sim.current(), []
+
+    def shush():
+        barged.append(True)
+        sim.wake(me)
+    events.on_barge = shush
+    server.speaking_post({"on": True, "left": left, "paid": 1, "text": text, "dur": dur,
+                          "words": [[a / rate, b / rate] for a, b in words] if words else None})
+    ts = sim.now + scene.lat - T0                                 # (the sound reaches the room then)
+    if scene.void_from is None:
+        scene.void_from = round(ts * SR)                          # (the trimmed audio's first sample)
+    k0, k1 = math.ceil((ts - RS_HALF / r) * SR), math.ceil((ts + (len(x) + RS_HALF) / r) * SR)
+    y = resample(x, r, (np.arange(k0, k1) / SR - ts) * r)
+    scene.put(k0, y)
+    end = sim.now + left
+    while not barged and sim.now < end:
+        sim.park(me, end)
+    if barged:
+        cut = max(k0, scene.index(sim.now + scene.lat))
+        gone = y[cut - k0:]
+        if len(gone):
+            scene.put(cut, np.zeros(len(gone)), gone)
+    events.on_barge = None
+    server.speaking_post({"on": False})
 
 
 def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch_at=None, switch_lat=None,
-         mic_at=None, you_only=None, then=None) -> Take:
+         mic_at=None, you_only=None, then=None, page=False) -> Take:
     """Play a scene on a simulated clock: `void` (a clip name) goes through the real Speaker player path into PlayRef
     and out of the room's speakers; `you` (a clip name) speaks into the room at `you_at` seconds after Void's voice
     starts coming out of the speakers; `you_only`: (words, seconds) to say only the opening of your clip, its first
@@ -646,8 +788,22 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
     0 opens it as his voice starts, more while he is already talking. None (the default) opens it at scene time 0,
     before he is handed his line. The Take's `mic_from` says when it opened.
 
+    `page`: Void speaks through the page's player instead of the native Speaker: a scene actor (_page_player) does to
+    the server what the page does, through the server's own tts_reply and speaking_post, and no fake player is
+    opened. It takes `void`, `you`, `you_at`, `you_only`, `hear` and `seconds`; any other argument raises ValueError.
+
+    The Take's `offsets` are measured by watching gate.judge (a call-through: it changes no verdict, and it is not a
+    hearing double): for each stop phrase in a judged burst's timed words, how far its start and end lie from the
+    nearest stop phrase in the played record that judge was handed, heard minus played.
+
     Scenes played one after another are one run of Void: whatever the app keeps across mic sessions in the process
     (a canceller kept warm) carries from one scene to the next. new_run() starts a fresh run."""
+    if page:
+        given = [k for k, v in (("switch_at", switch_at), ("switch_lat", switch_lat), ("mic_at", mic_at),
+                                ("then", then)) if v is not None]
+        if given or not void:
+            raise ValueError("page voice takes void, you, you_at, you_only, hear and seconds"
+                             + (f", not {', '.join(given)}" if given else ", and needs void"))
     server = _server()
     S, W, P = server.Speaker, server.Wake, server.hearing.PlayRef
     lat, texts = S.LAT, _texts()
@@ -655,11 +811,14 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
     void_pcm = clip(void) if void else None
     you_pcm = clip(you) if you else None
     you_text = texts.get(you, "") if you else ""
+    you_words = _words().get(you) if you else None
     if you_only is not None:
         you_text, n = you_only
         you_pcm = you_pcm[:round(n * SR)]
+        k = len(you_text.split())                     # (its word times, when what you say is the clip's own opening)
+        you_words = you_words[:k] if you_words and _tokens(you_text) == _tokens(texts[you])[:k] else None
     if seconds is None:
-        ref = LEAD_IN + lat if void else LEAD_IN
+        ref = LEAD_IN + (PAGE_LEAD if page else 0.0) + lat if void else LEAD_IN
         ends = [LEAD_IN]
         if void:
             ends.append(ref + len(void_pcm) / SR)
@@ -690,6 +849,7 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
     def change():                                                 # (the speakers change: the old ones fall silent)
         sim.park(sim.current(), math.inf)
         switch.at = sim.now - T0
+        scene.switched = True
         if scene.players:
             scene.players[-1].gone()
         scene.lat = switch_lat
@@ -708,7 +868,7 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
         clean.append(first)
         return RecordedMic(m, clean), name, first
 
-    cfg = dict(SETTINGS, stt_hint=server.DEFAULTS["stt_hint"])
+    cfg = dict(SETTINGS, stt_hint=server.DEFAULTS["stt_hint"], speak_max_chars=server.DEFAULTS["speak_max_chars"])
     with ExitStack() as st:
         def patch(obj, name, value):
             st.enter_context(mock.patch.object(obj, name, value))
@@ -716,7 +876,20 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
         patch(server, "CFG", cfg)
         patch(server, "BUS", events)
         patch(server, "SPOKEN", collections.deque(maxlen=200))
+        patch(server, "PLAYED", collections.deque())            # (every scene's clock starts at T0: none hears another's stop phrases)
         patch(server, "make_player", lambda rate: FakePlayer(scene, rate))
+        gate, judged, real_judge = _gate(), [], _gate().judge
+
+        def judge(b, spoken, cfg, played=()):
+            v = real_judge(b, spoken, cfg, played)
+            for w in gate.stop_phrases(b.words or ()):
+                near = min(played, key=lambda p: abs((p.start + p.end - w.start - w.end) / 2), default=None)
+                if near is not None:
+                    judged.append({"heard": w.text, "kind": b.kind, "start": w.start - near.start, "end": w.end - near.end})
+            return v
+        patch(gate, "judge", judge)
+        if page:
+            patch(server, "tts_engine", lambda: "scene")             # (/api/tts has a voice: synth is the faked one)
         patch(server, "open_mic", open_mic)
         patch(server, "open_clean_mic", open_clean_mic)
         if void:                                                  # (his voice at Kokoro's rate, same duration)
@@ -728,8 +901,10 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
                 return wav, 1.0
             patch(server, "synth", synth)
         if not hear:
-            hear_text, hear_speech = _whisper(scene, clean, texts.get(void, "") if void else "", you_text)
-            st.enter_context(fakes.ears(server, hear_text, hear_speech))
+            hear_text, hear_speech, hear_words = _whisper(scene, clean, texts.get(void, "") if void else "", you_text,
+                                                          you_words, None if then is not None else _words().get(void),
+                                                          _leads().get(void, 0.0))
+            st.enter_context(fakes.ears(server, hear_text, hear_speech, hear_words))
             patch(server, "last_speech_end", last_speech_end)
         for k, v in (("cv", SimCondition(sim)), ("todo", []), ("ready", []), ("making", False), ("gen", 0),
                      ("epoch", 0), ("proc", None), ("prate", None), ("t0", 0.0), ("written", 0), ("threads", []),
@@ -743,7 +918,9 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
 
         try:
             wake.actor = sim.spawn("wake", W.session, T0 if mic_at is None else math.inf)
-            if void:
+            if void and page:
+                sim.spawn("void", lambda: _page_player(sim, scene, server, texts.get(void, ""), events), T0 + LEAD_IN)
+            elif void:
                 maker = sim.spawn("maker", S._maker, T0)
                 player = sim.spawn("player", S._player_loop, T0)
                 S.threads = [maker.thread, player.thread]          # (so say() finds them running and starts none)
@@ -773,9 +950,11 @@ def play(room, void=None, you=None, you_at=0.0, hear=False, seconds=None, switch
     t.mic_from = a / SR
     t.clean = np.concatenate((np.zeros(min(a, k), np.int16), np.frombuffer(b"".join(clean), np.int16)))[:k]
     t.events = events.got
+    t.offsets = judged
     t.switched = switch.at
     if void:
         t.void_start = scene.void_start()
+        t.void_from = None if scene.void_from is None else scene.void_from / SR
         loud = np.flatnonzero(np.abs(scene.out) >= 0.5)
         t.void_end = (loud[-1] + 1) / SR if len(loud) else None
     if scene.you_from is not None and scene.you_from < k:

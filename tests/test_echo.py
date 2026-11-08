@@ -552,6 +552,223 @@ class Echo(unittest.TestCase):
             learn.assert_called_once()
 
 
+@unittest.skipIf(server is None or gate is None, f"server.py or gate.py doesn't import here: {IMPORT_ERR or GATE_ERR}")
+class OwnStop(unittest.TestCase):
+    """Void's own stop phrase, heard back while it plays or in the room's ring after, never stops him; the owner's stop
+    said past ECHO_WORD after his, while he talks, still barges. Whisper's word times are stood in by fakes.ears."""
+
+    TIMER = "Okay, I will stop the timer now."      # "stop" plays 0.7 s to 1.1 s into the line
+    TIMER_WORDS = [[0.0, 0.3], [0.3, 0.5], [0.5, 0.7], [0.7, 1.1], [1.1, 1.3], [1.3, 1.8], [1.8, 2.2]]
+    WHEN = "Tell me when to stop."                  # "stop" is his last word, 1.0 s to 1.6 s into the line
+    WHEN_WORDS = [[0.0, 0.3], [0.3, 0.5], [0.5, 0.8], [0.8, 1.0], [1.0, 1.6]]
+
+    def setUp(self):
+        W = server.Wake
+        for p in (mock.patch.multiple(W, talked=[], cut=None),
+                  mock.patch.object(server, "time", mock.Mock(monotonic=lambda: self.clock[0], time=time.time)),
+                  mock.patch.object(server.MicAuto, "learn", lambda pcm: None),
+                  mock.patch.object(server.BUS, "pub", mock.Mock()),
+                  mock.patch.object(server.Speaker, "idle", classmethod(lambda cls: True)),
+                  mock.patch.object(server.Speaker, "stop", mock.Mock())):
+            p.start()
+            self.addCleanup(p.stop)
+        self.clock = [1000.0]
+        server.SPOKEN.clear()
+        self.addCleanup(server.SPOKEN.clear)
+        server.PLAYED.clear()
+        self.addCleanup(server.PLAYED.clear)
+        self.text, self.timed, self.ats = "", [], []
+
+        def words_for(pcm, at):        # (keeps each `at` the server hands transcribe_pcm_heard)
+            self.ats.append(at)
+            return tuple(gate.Word(w, at + a, at + b) for w, a, b in self.timed)
+
+        ears = fakes.ears(server, lambda pcm: self.text, words_for=words_for)
+        self.addCleanup(ears.close)
+        self.verdicts = []              # each (kind, why) as gate.judge hands it back to server.py
+        real = server.gate.judge
+
+        def judge(*a, **k):
+            v = real(*a, **k)
+            self.verdicts.append(((a[0] if a else k["b"]).kind, v.why))
+            return v
+
+        p = mock.patch.object(server.gate, "judge", judge)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def hear(self, text, timed):        # what the mic catches: `text`, its words timed from the clip's first sample
+        self.text, self.timed = text, timed
+
+    def events(self):
+        return [c.kwargs.get("t") for c in server.BUS.pub.call_args_list if c.kwargs.get("t") != "voice"]   # (not the record's copies)
+
+    def assertNotStopped(self, msg, kinds):
+        # gate.judge step 2: his own stop phrase heard back is dropped as "echo", whichever kind it was heard as
+        self.assertNotIn("barge", self.events(), msg)
+        self.assertNotIn("wake", self.events(), msg)
+        server.Speaker.stop.assert_not_called()
+        self.assertEqual(self.verdicts[-len(kinds):], [(k, "echo") for k in kinds], f"{msg}: not dropped as echo")
+
+    def test_his_stop_heard_back_while_it_plays_never_stops_him(self):
+        server.Wake.talking_until(1005.0)                                # he talks from 1000 s to 1005 s
+        server.note_played(self.TIMER, 1000.0, 2.2, self.TIMER_WORDS)   # his "stop" plays 1000.7 s to 1001.1 s
+        self.hear("Stop.", [("Stop.", 0.1, 0.4)])                        # heard back 1000.9 s to 1001.2 s
+        self.clock[0] = 1001.5
+        self.assertFalse(server.Wake.stop_in(PCM, 1000.8, 1000.8), "his own stop, heard as it played, stopped him")
+        self.assertNotStopped("his own stop, heard as it played, stopped him mid-burst", ["peek"])
+        self.assertTrue(server.Wake.speaking())
+        self.clock[0] = 1001.9
+        server.Wake.check(PCM, 1000.8, ended=1001.8, at=1000.8)
+        self.assertNotStopped("his own stop, heard as it played, stopped him once heard out", ["peek", "over"])
+        self.assertEqual(self.ats, [1000.8, 1000.8], "the stop check and the burst heard out weren't timed from `at`")
+        self.assertTrue(server.Wake.speaking())
+
+    def test_his_stop_heard_back_in_the_ring_after_never_stops_him_or_wakes_anything(self):
+        for follow_up, kind in ((0, "follow"), (30, "follow")):         # (his ring is a window, however long the follow-up one)
+            with self.subTest(follow_up=follow_up), mock.patch.dict(server.CFG, {"follow_up": follow_up}):
+                server.Wake.talked = []
+                server.BUS.pub.reset_mock()
+                server.Wake.talking(1000.0, 1001.6)                     # his line ends on "stop", 1001.0 s to 1001.6 s
+                server.note_played(self.WHEN, 1000.0, 1.6, self.WHEN_WORDS)
+                self.hear("Stop.", [("Stop.", 0.1 + gate.ECHO_WORD / 2, 0.4 + gate.ECHO_WORD / 2)])   # (the room rings it)
+                self.clock[0] = 1002.8
+                server.Wake.check(PCM, 1001.7, ended=1002.7, at=1001.7)
+                self.assertNotStopped("his own stop, rung back by the room, was taken", [kind])
+
+    def test_his_stop_heard_back_while_he_talks_and_heard_out_after_is_echo_as_over(self):
+        server.Wake.talking(1000.0, 1001.6)
+        server.note_played(self.WHEN, 1000.0, 1.6, self.WHEN_WORDS)
+        self.hear("Stop.", [("Stop.", 0.1, 0.4)])
+        self.clock[0] = 1002.3
+        server.Wake.check(PCM, 1001.3, ended=1002.2, at=1001.3)          # (begun in his sound, ended in the ring)
+        self.assertNotStopped("his own stop, heard out after he stopped, was taken", ["over"])
+
+    def owners_stop(self):
+        """The owner's "Stop." said 0.1 s after ECHO_WORD past the end of his played stop (1001.1 s). → the clip's `at`."""
+        server.Wake.talking_until(1005.0)
+        server.note_played(self.TIMER, 1000.0, 2.2, self.TIMER_WORDS)
+        at = 1001.1 + gate.ECHO_WORD
+        self.hear("Stop.", [("Stop.", 0.1, 0.4)])
+        self.clock[0] = at + 0.7
+        return at
+
+    def test_owner_stop_past_echo_word_after_his_own_stops_him_mid_burst(self):
+        at = self.owners_stop()
+        self.assertTrue(server.Wake.stop_in(PCM, at, at), "the owner's stop past ECHO_WORD after his own didn't stop him")
+        self.assertEqual(self.events(), ["barge"])
+        self.assertFalse(server.Wake.speaking())                        # hushed
+
+    def test_owner_stop_past_echo_word_after_his_own_stops_him_once_heard_out(self):
+        at = self.owners_stop()
+        self.clock[0] = at + 1.1
+        server.Wake.check(PCM, at, ended=at + 1.0, at=at)
+        self.assertEqual(self.events(), ["barge"])
+        self.assertFalse(server.Wake.speaking())
+
+    def test_owner_stop_in_the_same_burst_as_his_own_echo_stops_him(self):
+        # one burst catches his "stop" played back and then the owner's "Stop, stop.": the owner's is not his own
+        server.Wake.talking_until(1005.0)
+        server.note_played(self.TIMER, 1000.0, 2.2, self.TIMER_WORDS)
+        late = 0.4 + gate.ECHO_WORD                                      # (past ECHO_WORD after his stop ended at 1001.1)
+        self.hear("Stop. Stop, stop.", [("Stop.", 0.1, 0.4), ("Stop,", late, late + 0.3), ("stop.", late + 0.3, late + 0.6)])
+        self.clock[0] = 1003.0 + gate.ECHO_WORD
+        server.Wake.check(bytes(64000), 1000.8, ended=1002.8 + gate.ECHO_WORD, at=1000.8)
+        self.assertEqual(self.events(), ["barge"])
+        self.assertFalse(server.Wake.speaking())
+
+    def test_a_burst_cut_free_of_his_voice_is_timed_from_the_clip_after_the_cut(self):
+        # Wake.check cuts the front off a burst that ran on past his sound: the cut bytes' length moves `at`
+        with mock.patch.dict(server.CFG, {"follow_up": 30}):
+            server.Wake.talking(1000.0, 1003.0)
+        self.hear("Yes, do it", [])
+        self.clock[0] = 1011.5
+        server.Wake.check(bytes(server.RATE * 2 * 9), 1002.0, ended=1011.0, at=1001.9)
+        self.assertEqual(len(self.ats), 1, self.ats)
+        self.assertAlmostEqual(self.ats[0], 1003.0, places=6, msg="not timed from where the cut clip begins")
+        self.ats.clear()
+        server.Wake.talked = []
+        server.Wake.check(bytes(server.RATE * 2 * 3), 1020.0, ended=1023.0, at=1019.9)
+        self.assertEqual(self.ats, [1019.9], "an uncut burst wasn't timed from `at`")
+
+
+@unittest.skipIf(server is None or gate is None, f"server.py or gate.py doesn't import here: {IMPORT_ERR or GATE_ERR}")
+class Callers(unittest.TestCase):
+    """Each caller builds its Burst with the Heard's words and calls gate.judge(burst, said_lately(), CFG,
+    played_lately())."""
+
+    def setUp(self):
+        for p in (mock.patch.multiple(server.Wake, talked=[], cut=None),
+                  mock.patch.object(server, "time", mock.Mock(monotonic=lambda: 1001.5, time=time.time)),
+                  mock.patch.object(server.MicAuto, "learn", lambda pcm: None),
+                  mock.patch.object(server.BUS, "pub", mock.Mock()),
+                  mock.patch.object(server.Speaker, "idle", classmethod(lambda cls: True)),
+                  mock.patch.object(server.Speaker, "stop", mock.Mock())):
+            p.start()
+            self.addCleanup(p.stop)
+        server.SPOKEN.clear()
+        self.addCleanup(server.SPOKEN.clear)
+        server.PLAYED.clear()
+        self.addCleanup(server.PLAYED.clear)
+        server.note_spoken("Okay, I will stop the timer now.")
+        server.note_played("Okay, I will stop the timer now.", 1000.0, 2.2,
+                           [[0.0, 0.3], [0.3, 0.5], [0.5, 0.7], [0.7, 1.1], [1.1, 1.3], [1.3, 1.8], [1.8, 2.2]])
+        self.words = (gate.Word("Hey", 1000.9, 1001.1), gate.Word("Void,", 1001.1, 1001.4))
+        ears = fakes.ears(server, lambda pcm: "Hey Void, what is the weather like", words_for=lambda pcm, at: self.words)
+        self.addCleanup(ears.close)
+        self.calls = []
+        real = gate.judge
+        sig = inspect.signature(real)
+
+        def judge(*a, **k):
+            self.calls.append(sig.bind(*a, **k).arguments)
+            return real(*a, **k)
+
+        p = mock.patch.object(server.gate, "judge", judge)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def assertJudgedAsDesigned(self, caller):
+        self.assertEqual(len(self.calls), 1, f"{caller}: gate.judge called {len(self.calls)}x on one burst")
+        got = self.calls[0]
+        self.assertEqual(got["b"].words, self.words, f"{caller}: the Burst not built with the Heard's words")
+        self.assertEqual(got["spoken"], server.said_lately(), f"{caller}: not judged against said_lately()")
+        self.assertIs(got["cfg"], server.CFG, f"{caller}: not judged with CFG")
+        self.assertEqual(tuple(got.get("played", ())), server.played_lately(),
+                         f"{caller}: not judged against played_lately()")
+        self.assertTrue(server.played_lately(), "(the played stop phrase this test needs was not kept)")
+
+    def test_the_quick_listen_judges_its_heard_words_against_what_he_said_and_played(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            server.Wake.heard(PCM, 1000.9, 1000.9)
+        self.assertJudgedAsDesigned("Wake.heard")
+
+    def test_the_peek_judges_its_heard_words_against_what_he_said_and_played(self):
+        server.Wake.talking_until(1005.0)
+        with contextlib.redirect_stderr(io.StringIO()):
+            server.Wake.stop_in(PCM, 1000.9, 1000.9)
+        self.assertJudgedAsDesigned("Wake.stop_in")
+
+    def test_check_judges_its_heard_words_against_what_he_said_and_played(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            server.Wake.check(PCM, 1000.9, ended=1001.4, at=1000.9)
+        self.assertJudgedAsDesigned("Wake.check")
+
+    def test_a_follow_up_burst_carries_its_heard_and_the_others_do_not(self):
+        with mock.patch.dict(server.CFG, {"follow_up": 30}):
+            server.Wake.talking(1000.0, 1000.3)          # (his sound over: the burst below begins inside the window)
+        with contextlib.redirect_stderr(io.StringIO()):
+            server.Wake.check(PCM, 1000.9, ended=1001.4, at=1000.9)
+        b = self.calls[0]["b"]
+        self.assertEqual(b.kind, "follow")
+        self.assertIsNotNone(b.heard, "a follow-up burst lost its Heard")
+        self.calls.clear()
+        server.Wake.talked = []
+        with contextlib.redirect_stderr(io.StringIO()):
+            server.Wake.check(PCM, 1000.9, ended=1001.4, at=1000.9)
+        self.assertIsNone(self.calls[0]["b"].heard, "a burst that is not a follow-up carries a Heard")
+
+
 class Mic:
     """Plays a script of (seconds, loud?) to Wake.session, 0.2 s per read, moving the clock on as it goes."""
 
@@ -573,6 +790,7 @@ class Mic:
 
 
 QUIET = [(2, False)]
+PREROLL = 8 * 0.04                              # s of mic kept ahead of a burst's detection (Wake.session: 8 frames of 40 ms)
 
 
 def talk(sec, pause=0.0):                       # words (0.2 s on, 0.2 s off), then that much more quiet
@@ -594,13 +812,13 @@ class Burst(unittest.TestCase):
                 mock.patch.object(server.Speaker, "idle", classmethod(lambda cls: True)), \
                 mock.patch.object(W, "should_run", classmethod(lambda cls: True)), \
                 mock.patch.object(W, "window_open", classmethod(lambda cls: window)), \
-                mock.patch.object(W, "heard", staticmethod(lambda pcm, started: "")), \
-                mock.patch.object(W, "check", classmethod(lambda cls, pcm, started, text=None, **kw:
-                    ended.append((round(len(pcm) / (server.RATE * 2), 1), round(clock[0] - 1000.0, 1), text)))), \
+                mock.patch.object(W, "heard", staticmethod(lambda pcm, started, at=None: None)), \
+                mock.patch.object(W, "check", classmethod(lambda cls, pcm, started, heard=None, **kw:
+                    ended.append((round(len(pcm) / (server.RATE * 2), 1), round(clock[0] - 1000.0, 1), heard)))), \
                 mock.patch.multiple(W, talked=[[1000.0, talk_till, talk_till + server.ECHO_TAIL + 60]] if talk_till
                                     else [], cut=None):
             W.session()
-        return ended                            # (seconds heard, when it ended, text it was given) per burst
+        return ended                            # (seconds heard, when it ended, the Heard it was given) per burst
 
     def test_long_turn_with_pauses_is_one_burst(self):
         turn = QUIET + sum((talk(4, 0.6) for _ in range(5)), []) + talk(3.4) + [(4, False)]
@@ -609,6 +827,51 @@ class Burst(unittest.TestCase):
                 bursts = self.run_mic(turn, window)
                 self.assertEqual(len(bursts), 1, bursts)
                 self.assertGreater(bursts[0][0], 25)
+
+    def run_mic_at(self, script, talk_till):
+        """Wake.session on `script`, he talking its first `talk_till` s, Wake.heard, Wake.stop_in and Wake.check stood
+        in for. → (started, at) each was handed, as three lists of tuples."""
+        clock, got = [1000.0], {"heard": [], "stop_in": [], "check": []}
+        W = server.Wake
+        with mock.patch.object(server, "time", mock.Mock(monotonic=lambda: clock[0])), \
+                mock.patch.object(server, "open_mic", lambda: (Mic(clock, script), "fake", b"")), \
+                mock.patch.object(server, "last_speech_end", lambda pcm: False), \
+                mock.patch.object(server.BUS, "pub", mock.Mock()), \
+                mock.patch.object(server.Speaker, "idle", classmethod(lambda cls: True)), \
+                mock.patch.object(W, "should_run", classmethod(lambda cls: True)), \
+                mock.patch.object(W, "window_open", classmethod(lambda cls: False)), \
+                mock.patch.object(W, "heard", staticmethod(
+                    lambda pcm, started, at=None: got["heard"].append((started, at)))), \
+                mock.patch.object(W, "stop_in", classmethod(
+                    lambda cls, pcm, started, at=None: got["stop_in"].append((started, at)) or False)), \
+                mock.patch.object(W, "check", classmethod(
+                    lambda cls, pcm, started, heard=None, ended=None, at=None: got["check"].append((started, at)))), \
+                mock.patch.multiple(W, talked=[[1000.0, 1000.0 + talk_till, 1000.0 + talk_till + server.ECHO_TAIL + 60]]
+                                    if talk_till else [], cut=None):
+            W.session()
+        return got
+
+    def test_every_caller_session_hands_a_burst_to_is_given_when_its_first_sample_was_caught(self):
+        # started is when the burst was detected, after the pre-roll; `at` is the clip's first sample, before it
+        got = self.run_mic_at(QUIET + talk(11) + [(4, False)], talk_till=20)      # (he talks all through it: a peek)
+        self.assertTrue(got["stop_in"], "the burst begun over him was never peeked at")
+        self.assertTrue(got["check"], "the burst was never heard out")
+        for name in ("stop_in", "check"):
+            for started, at in got[name]:
+                self.assertIsNotNone(at, f"Wake.{name} was not handed when the clip's first sample was caught")
+                self.assertLess(at, started, f"Wake.{name}: `at` is not before the burst was detected")
+                self.assertLessEqual(started - at, PREROLL + 0.2 + 1e-6,
+                                     f"Wake.{name}: `at` is further back than the pre-roll and one read")
+        self.assertEqual({at for _, at in got["stop_in"]} | {at for _, at in got["check"]},
+                         {got["check"][0][1]}, "the peeks and the check were handed different `at`s for one burst")
+
+    def test_the_quick_listen_is_given_when_the_burst_first_sample_was_caught_too(self):
+        got = self.run_mic_at(QUIET + talk(2.5) + [(4, False)], talk_till=0)   # (he is quiet: a wake listen)
+        self.assertTrue(got["heard"], "Wake.heard was never called")
+        started, at = got["heard"][0]
+        self.assertIsNotNone(at)
+        self.assertLess(at, started)
+        self.assertEqual(got["check"][0][1], at, "Wake.heard and Wake.check were handed different `at`s")
 
     def test_answer_begun_as_he_finished_heard_out(self):     # his last second, then 10 s more: one whole burst
         bursts = self.run_mic(QUIET + talk(11) + [(4, False)], talk_till=3)
@@ -690,6 +953,123 @@ class Sure(unittest.TestCase):
     def test_push_to_talk_keeps_everything(self):
         self.assertEqual(self.run_on([Seg("Please add milk."), Seg("to the list", avg_logprob=-1.4)]),
                          "Please add milk. to the list")
+
+
+class TimedWord:
+    """A word Whisper timed, as faster-whisper hands it back with word_timestamps: seconds into the clip."""
+
+    def __init__(self, word, start, end, probability=0.9):
+        self.word, self.start, self.end, self.probability = word, start, end, probability
+
+
+class TimedSeg(Seg):
+    def __init__(self, text, words, **kw):
+        super().__init__(text, **kw)
+        self.words = words
+
+
+@unittest.skipIf(server is None or gate is None, f"server.py or gate.py doesn't import here: {IMPORT_ERR or GATE_ERR}")
+class HeardWordTimes(unittest.TestCase):
+    """transcribe_pcm_heard given `at`, with a stop phrase of his played near the clip, runs Whisper with word
+    timestamps, and Heard.words holds the kept segments' words at `at` plus each word's time; otherwise Heard.words is
+    None and Whisper runs untimed. run_whisper_heard passes `words` to Whisper as word_timestamps."""
+
+    SEGS = [TimedSeg(" Okay, stop.", [TimedWord(" Okay,", 0.1, 0.4), TimedWord(" stop.", 0.5, 0.8)]),
+            TimedSeg(" Oh my god.", [TimedWord(" Oh", 0.9, 1.0), TimedWord(" my", 1.0, 1.1),
+                                     TimedWord(" god.", 1.1, 1.3)], avg_logprob=-1.4)]
+    SECS = len(PCM) / (server.RATE * 2) if server else 0.0           # the clip PCM is this long
+
+    def setUp(self):
+        server.PLAYED.clear()
+        self.addCleanup(server.PLAYED.clear)
+        self.model = mock.Mock()
+        self.model.transcribe.side_effect = lambda *a, **k: (iter(self.SEGS), None)
+        p = mock.patch.object(server, "whisper", lambda: self.model)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def asked_for_word_times(self):
+        return [bool(c.kwargs.get("word_timestamps", False)) for c in self.model.transcribe.call_args_list]
+
+    def times(self, words):
+        return [(w.text.strip(), round(w.start, 6), round(w.end, 6)) for w in words]
+
+    def test_a_burst_overlapping_a_played_stop_gets_its_kept_words_at_monotonic_times(self):
+        at = time.monotonic()
+        server.note_played("Stop.", at + 0.2, 0.4, [[0.0, 0.4]])     # his "stop" plays at+0.2 s to at+0.6 s
+        heard = server.transcribe_pcm_heard(PCM, at=at, sure=True)
+        self.assertEqual(self.asked_for_word_times(), [True], "Whisper not asked for word times near his stop")
+        self.assertIsNotNone(heard.words, "a burst near his played stop came back untimed")
+        self.assertEqual(self.times(heard.words),                    # (the segment gate.sure dropped is not in it)
+                         [("Okay,", round(at + 0.1, 6), round(at + 0.4, 6)),
+                          ("stop.", round(at + 0.5, 6), round(at + 0.8, 6))])
+        for w in heard.words:
+            self.assertIsInstance(w, gate.Word)
+        self.assertEqual(heard.text, "Okay, stop.")
+
+    def test_a_burst_ending_within_echo_word_of_a_played_stop_is_timed(self):
+        at = time.monotonic()
+        server.note_played("Stop.", at + self.SECS + gate.ECHO_WORD / 2, 0.4, [[0.0, 0.4]])
+        heard = server.transcribe_pcm_heard(PCM, at=at, sure=True)
+        self.assertEqual(self.asked_for_word_times(), [True])
+        self.assertIsNotNone(heard.words)
+
+    def test_a_burst_begun_within_echo_word_after_a_played_stop_is_timed(self):
+        at = time.monotonic()
+        server.note_played("Stop.", at - gate.ECHO_WORD / 2 - 0.4, 0.4, [[0.0, 0.4]])
+        heard = server.transcribe_pcm_heard(PCM, at=at, sure=True)
+        self.assertEqual(self.asked_for_word_times(), [True])
+        self.assertIsNotNone(heard.words)
+
+    def test_a_played_stop_at_the_end_of_a_long_clip_makes_it_timed(self):
+        # "near" spans the clip's whole length, from `at` to `at` plus len(pcm) / (16 kHz * 2 bytes)
+        seconds = gate.ECHO_WORD + 6.0
+        pcm = bytes(int(seconds * 16000) * 2)
+        at = time.monotonic() - seconds
+        server.note_played("Stop.", at + seconds - 0.6, 0.4, [[0.0, 0.4]])
+        heard = server.transcribe_pcm_heard(pcm, at=at, sure=True)
+        self.assertEqual(self.asked_for_word_times(), [True], "Whisper not asked for word times near the clip's end")
+        self.assertIsNotNone(heard.words)
+
+    def test_a_burst_near_no_played_stop_is_untimed(self):
+        # one stop he played past ECHO_WORD after the clip ends, one that ended past ECHO_WORD before it began (both
+        # kept, inside ECHO_KEEP): the burst is untimed because neither is near it, not because one expired
+        at = time.monotonic()
+        server.note_played("Stop.", at + self.SECS + gate.ECHO_WORD + 0.1, 0.4, [[0.0, 0.4]])
+        server.note_played("Stop.", at - gate.ECHO_WORD - 0.1 - 0.4, 0.4, [[0.0, 0.4]])
+        self.assertEqual(len(server.played_lately()), 2, "(the played stops this test needs were not kept)")
+        heard = server.transcribe_pcm_heard(PCM, at=at, sure=True)
+        self.assertIsNone(heard.words)
+        self.assertEqual(self.asked_for_word_times(), [False])
+        self.assertEqual(heard.text, "Okay, stop.")                  # (heard as before)
+
+    def test_a_burst_with_nothing_played_is_untimed(self):
+        heard = server.transcribe_pcm_heard(PCM, at=time.monotonic(), sure=True)
+        self.assertIsNone(heard.words)
+        self.assertEqual(self.asked_for_word_times(), [False])
+
+    def test_a_burst_without_at_is_untimed(self):
+        server.note_played("Stop.", time.monotonic(), 0.4, [[0.0, 0.4]])
+        heard = server.transcribe_pcm_heard(PCM, sure=True)
+        self.assertIsNone(heard.words)
+        self.assertEqual(self.asked_for_word_times(), [False])
+
+    def test_a_clip_too_short_to_send_keeps_words_none(self):
+        at = time.monotonic()
+        server.note_played("Stop.", at, 0.4, [[0.0, 0.4]])
+        heard = server.transcribe_pcm_heard(bytes(1000), at=at, sure=True)
+        self.assertIsNone(heard.words)
+        self.assertEqual(self.model.transcribe.call_count, 0)
+
+    def test_run_whisper_heard_passes_words_as_word_timestamps(self):
+        audio = server.pcm_audio(PCM)
+        timed = server.run_whisper_heard(audio, sure=True, words=True)
+        untimed = server.run_whisper_heard(audio, sure=True)
+        server.run_whisper_heard(audio, sure=True, words=False)
+        self.assertEqual(self.asked_for_word_times(), [True, False, False])
+        self.assertEqual(self.times(timed.words), [("Okay,", 0.1, 0.4), ("stop.", 0.5, 0.8)],
+                         "run_whisper_heard's word times are not the clip's own")
+        self.assertIsNone(untimed.words)
 
 
 @unittest.skipIf(gate is None, f"app/gate.py doesn't import here: {GATE_ERR}")
