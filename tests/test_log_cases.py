@@ -38,10 +38,8 @@ HIS_PROMPT = ("No, I'm not fixing it myself. I only read today's voice log so th
               "not the same generic instructions again. The new prompt is on your clipboard.")
 
 
-# the phases meant to fix what the gate gets wrong today
-AFTER_QUIET = "Phase 4: a reply of his after Void went quiet is dropped as echo (HEAR-01)"
-AFTER_SPOKE = "Phase 4: a reply right after Void spoke is dropped for no wake word (HEAR-01)"
-WHILE_TALKING = "Phase 4: a reply made while Void was still talking is dropped, where it should wait (HEAR-02)"
+# the phases meant to fix what the gate gets wrong today (Phase 4's three marks came off in Phase 4: its rows are
+# re-stated below, as the Burst `Wake.check` builds for the timing the log shows)
 NO_WAKE = dict(keep=False, why="no wake word", act="drop")    # right by design: outside the follow-up window
 
 
@@ -49,12 +47,16 @@ class Row(NamedTuple):
     """One thing the owner said, as logged, and the verdict it should get."""
     text: str                     # what was heard (the log keeps the first 80 characters)
     kind: str = "follow"          # "listen" | "wake" | "follow" | "over" | "peek"
-    talking: bool = False         # he was talking when it was heard
+    talking: bool = False         # his sound was coming out at some moment of the burst
+    rang: bool = True             # his sound, or its ring (ECHO_TAIL), was in the air at some moment of it (False: only
+                                  # where the log shows it began clear of him; True runs the echo check, the stricter)
     recent: tuple = ()            # what he had just said (history.jsonl), oldest first
     keep: bool = True             # the verdict it should get: kept or dropped…
     why: str = "kept"             # …and which of gate.WHY
     act: str = "follow"           # …and what is done with it ("drop" for a drop)
     phase: str = ""               # empty: today's gate gets it right; else "Phase N: …", the phase meant to fix it
+    logged: str = ""              # the kind the log named, where Phase 4's window re-states it (the old guess of "over"
+                                  # or "wake" for a reply that began after his sound)
 
     @property
     def rest(self):
@@ -84,36 +86,40 @@ YOURS = [  # the owner's follow-ups the voiceprint (or the one-word rule) droppe
     Row("Changes sound like bullshit that doesn't solve the fucking problem", "wake", **NO_WAKE),
     Row("I'm gonna shut up", "wake", True, **NO_WAKE),
     Row("I'm afraid to stop, fix up the fix. I'm not afraid to stop, fix up the fix. Cont", "wake", True, **NO_WAKE),
-    # a reply of his after Void went quiet, dropped as echo
-    Row("I don't...", "wake", recent=("Should I leave it? I don't think it matters either way.",), act="request",
-        phase=AFTER_QUIET),
-    Row("That's retarded!", recent=("The test is failing again. That's what I found.",), phase=AFTER_QUIET),
-    Row("Yes, commit it", recent=("Want me to commit it? Say yes and I'll commit it.",), phase=AFTER_QUIET),
-    Row("Yes, do it", recent=("Shall I merge it? Say yes, do it, or no.",), phase=AFTER_QUIET),
-    Row("Yes, merge it", recent=("Ready to merge? Say yes, merge it, and I will.",), phase=AFTER_QUIET),
-    Row("Yes, please put that on my clipboard", recent=("Want me to put that on your clipboard? Say yes, please.",),
-        phase=AFTER_QUIET),
-    # a reply right after Void spoke, with no wake word: dropped for it
-    Row("Fuck it retard", "wake", act="request", phase=AFTER_SPOKE),
-    Row("Yes, do it", "wake", act="request", phase=AFTER_SPOKE),
-    Row("Go ahead. Yeah, that's fine", "wake", act="request", phase=AFTER_SPOKE),
-    Row("Yes, what the fuck? God damn it. I'm getting sick of this shit", "wake", act="request", phase=AFTER_SPOKE),
-    Row("Cool, so you're just going to keep fucking up and I have to deal with it. Not ev", "wake", act="request",
-        phase=AFTER_SPOKE),
-    Row("Yes, give me that prompt. Are you even listening to your little cunt? Yes, do it", "wake", act="request",
-        phase=AFTER_SPOKE),
-    Row("Cool, good talk. Super useful", "wake", True, act="request", phase=AFTER_SPOKE),
-    Row("Jesus Christ you are fucking worthy", "wake", True, act="request", phase=AFTER_SPOKE),
-    # a reply made while Void was still talking: dropped as "while talking", where it should wait and be answered
-    Row("Yeah, that's fine. Go ahead", "over", phase=WHILE_TALKING),
-    Row("It's good", "over", True, phase=WHILE_TALKING),
-    Row("Yes, that's fine", "over", True, phase=WHILE_TALKING),
-    Row("Yes and yes", "over", phase=WHILE_TALKING),
-    Row("Just send the message to the lead itself", "over", phase=WHILE_TALKING),
-    Row("Yes, go ahead", "over", phase=WHILE_TALKING),
-    Row("So you're gonna keep fucking up", "over", phase=WHILE_TALKING),
-    Row("Cool, good talk", "over", phase=WHILE_TALKING),
-    Row("How about any fucking where else", "over", phase=WHILE_TALKING),
+    # Phase 4 re-stated these 23 rows: the Burst the ported Wake.check builds for the timing the log shows. A reply that
+    # began after his sound ended and inside the window is `follow` (the log's "over" and "wake" were the old guesses of
+    # where his sound was, and a kept follow-up is "answered": act follow, where a wake-kind row held "request"). The
+    # flags are read as `void drops` reads them (drops.rang): "while talking" is `talking` and `rang`; a heard line with
+    # "follow-up" and no such flag began past the old ring (`rang` False); an unflagged "over" began in the ring (`rang`
+    # True, his sound not in the burst); an unflagged "wake" is `rang` False. The Void lines stay as before
+    # a reply of his after Void went quiet, dropped as echo (a "follow-up" heard line: it began past the ring)
+    Row("I don't...", rang=False, logged="wake", recent=("Should I leave it? I don't think it matters either way.",)),
+    Row("That's retarded!", rang=False, recent=("The test is failing again. That's what I found.",)),
+    Row("Yes, commit it", rang=False, recent=("Want me to commit it? Say yes and I'll commit it.",)),
+    Row("Yes, do it", rang=False, recent=("Shall I merge it? Say yes, do it, or no.",)),
+    Row("Yes, merge it", rang=False, recent=("Ready to merge? Say yes, merge it, and I will.",)),
+    Row("Yes, please put that on my clipboard", rang=False,
+        recent=("Want me to put that on your clipboard? Say yes, please.",)),
+    # a reply right after Void spoke, with no wake word: dropped for it (logged "wake", his sound not in the burst)
+    Row("Fuck it retard", rang=False, logged="wake"),
+    Row("Yes, do it", rang=False, logged="wake"),
+    Row("Go ahead. Yeah, that's fine", rang=False, logged="wake"),
+    Row("Yes, what the fuck? God damn it. I'm getting sick of this shit", rang=False, logged="wake"),
+    Row("Cool, so you're just going to keep fucking up and I have to deal with it. Not ev", rang=False, logged="wake"),
+    Row("Yes, give me that prompt. Are you even listening to your little cunt? Yes, do it", rang=False, logged="wake"),
+    Row("Cool, good talk. Super useful", talking=True, logged="wake"),
+    Row("Jesus Christ you are fucking worthy", talking=True, logged="wake"),
+    # a reply logged "while talking" (over): it began in his ring (his sound not in the burst) or his next sentence began
+    # during it (`talking`), and is kept and answered
+    Row("Yeah, that's fine. Go ahead", logged="over"),
+    Row("It's good", talking=True, logged="over"),
+    Row("Yes, that's fine", talking=True, logged="over"),
+    Row("Yes and yes", logged="over"),
+    Row("Just send the message to the lead itself", logged="over"),
+    Row("Yes, go ahead", logged="over"),
+    Row("So you're gonna keep fucking up", logged="over"),
+    Row("Cool, good talk", logged="over"),
+    Row("How about any fucking where else", logged="over"),
 ]
 
 
@@ -122,21 +128,21 @@ def heard(text, logprob=-0.3, no_speech=0.05):
     return SimpleNamespace(text=text, logprob=logprob, no_speech=no_speech, seconds=2.0)
 
 
-def burst(text, kind="follow", talking=False):
+def burst(text, kind="follow", talking=False, rang=True):
     return gate.Burst(text=text, heard=heard(text) if kind == "follow" else None, speech=1.5, seconds=2.5, kind=kind,
-                      talking=talking, rang=True)
+                      talking=talking, rang=rang)
 
 
 def row(r):
     """A table row as a test case: one with a phase is a strict expected failure naming it, so a fix that makes it pass
     turns the suite red until that phase removes the mark. Only a wrong verdict counts (`raises`): a crash fails."""
     marks = [pytest.mark.xfail(strict=True, raises=AssertionError, reason=r.phase)] if r.phase else []
-    return pytest.param(r, id=f"{r.text} ({r.kind})", marks=marks)
+    return pytest.param(r, id=f"{r.text} ({r.kind}{f', logged {r.logged}' if r.logged else ''})", marks=marks)
 
 
 @pytest.mark.parametrize("r", [row(r) for r in YOURS])
 def test_the_row_gets_the_verdict_the_owner_expects(r):
-    v = gate.judge(burst(r.text, r.kind, r.talking), list(r.recent), CFG)
+    v = gate.judge(burst(r.text, r.kind, r.talking, r.rang), list(r.recent), CFG)
     assert (v.keep, v.why, v.act, v.rest) == (r.keep, r.why, r.act, r.rest), f"got {v}"
 
 
