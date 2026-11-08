@@ -64,7 +64,7 @@ class Echo(unittest.TestCase):
     def burst(self, text, started=None, ended=None):
         self.text = text
         server.Wake.check(PCM, time.monotonic() if started is None else started, ended=ended)
-        return [c.kwargs for c in self.pub.call_args_list]
+        return [c.kwargs for c in self.pub.call_args_list if c.kwargs.get("t") != "voice"]   # (voice: the record's copies)
 
     def after_speech(self, ago):             # he finished talking `ago` seconds ago, follow window open
         now = time.monotonic()
@@ -350,7 +350,7 @@ class Echo(unittest.TestCase):
             server.Wake.check(bytes(int(server.RATE * 2 * 3.0)), began, ended=began + 3.0)
         stamp = re.compile(r"^\[void\] \d{4}-\d\d-\d\d \d\d:\d\d:\d\d ")
         log = [stamp.sub("", ln) for ln in err.getvalue().splitlines() if stamp.match(ln)]
-        return [c.kwargs for c in self.pub.call_args_list], log
+        return [c.kwargs for c in self.pub.call_args_list if c.kwargs.get("t") != "voice"], log
 
     def test_yes_do_it_said_after_he_went_quiet_is_sent_on_as_a_follow_up(self):
         ev, _ = self.yes_do_it()
@@ -457,7 +457,7 @@ class Echo(unittest.TestCase):
                 server.Wake.talking_until(time.monotonic() + 5)
                 self.text = said
                 self.assertTrue(server.Wake.stop_in(PCM, time.monotonic()), f"{said!r} over him didn't stop him mid-burst")
-                self.assertEqual([c.kwargs.get("t") for c in self.pub.call_args_list], ["barge"])
+                self.assertEqual([c.kwargs.get("t") for c in self.pub.call_args_list if c.kwargs.get("t") != "voice"], ["barge"])
                 self.assertFalse(server.Wake.speaking())          # hushed
 
     def test_stop_word_buried_in_his_own_speech_heard_over_him_never_stops_him(self):
@@ -812,7 +812,8 @@ class HisSound(unittest.TestCase):
                 with mock.patch.object(server.gate, "judge", lambda b, *a: judged.append(b) or real(b, *a)), \
                         contextlib.redirect_stderr(err):
                     server.Wake.check(burst, began, ended=began + 1.9)
-            events = [(c.kwargs.get("t"), c.kwargs.get("text"), c.kwargs.get("follow")) for c in self.pub.call_args_list]
+            events = [(c.kwargs.get("t"), c.kwargs.get("text"), c.kwargs.get("follow")) for c in self.pub.call_args_list
+                      if c.kwargs.get("t") != "voice"]
             log = [ln for ln in err.getvalue().splitlines() if ln.startswith("[void]")]
             got.append((round(after, 1), events, [b.kind for b in judged],
                         any("while talking" in ln for ln in log)))

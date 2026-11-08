@@ -649,14 +649,23 @@ class PageSpeaking(unittest.TestCase):
         self.addCleanup(self.srv.server_close)
         self.addCleanup(self.srv.shutdown)
 
-    def speaking(self, body):
+    def call(self, path, body):
+        """POST `body` to `path`. → the JSON reply."""
         c = http.client.HTTPConnection("127.0.0.1", self.srv.server_address[1], timeout=10)
-        c.request("POST", "/api/speaking", body=json.dumps(body),
+        c.request("POST", path, body=json.dumps(body),
                   headers={"X-Void-Token": server.TOKEN, "Content-Type": "application/json"})
         r = c.getresponse()
         data = r.read()
         c.close()
         self.assertEqual(r.status, 200, data)
+        return json.loads(data)
+
+    def speaking(self, body):
+        return self.call("/api/speaking", body)
+
+    def told(self):
+        """The copies of the record published so far (BUS, t="voice")."""
+        return [c.kwargs for c in self.pub.call_args_list if c.kwargs.get("t") == "voice"]
 
     def test_speaking_on_records_talking_until_now_plus_left(self):
         calls, real = [], server.Wake.__dict__["talking_until"].__func__
@@ -689,6 +698,41 @@ class PageSpeaking(unittest.TestCase):
         self.assertEqual((W.owed, len(W.talked)), (0, 1), "a pay alone moved the span, or didn't count")
         self.speaking({"paid": 1})
         self.assertEqual(W.owed, 0, "a pay with nothing owed went below 0")
+
+    def test_a_post_with_left_publishes_where_his_sound_ends_and_the_replies_carry_the_record(self):
+        for body in ({"owe": 1}, {"on": True, "left": 1.5, "paid": 1}, {"paid": 1}, {"on": False}):
+            reply = self.speaking(body)
+            self.assertEqual(sorted(k for k in reply if k != "ok"), ["left", "n", "owed"], f"{body}: reply {reply}")
+        events = self.told()
+        self.assertEqual([(e["left"], e["owed"]) for e in events], [(0.0, 1), (1.5, 0), (1.5, 0), (0.0, 0)],
+                         "a change of the record wasn't published once, with its new left and owed")
+
+    def test_n_rises_strictly_across_the_events_and_the_replies(self):
+        order = []
+        for body in ({"owe": 1}, {"on": True, "left": 1.5, "paid": 1}, {"on": False}):
+            before = len(self.told())
+            reply = self.speaking(body)
+            order += [e["n"] for e in self.told()[before:]] + [reply["n"]]
+        self.assertEqual(order, sorted(set(order)), f"n didn't rise strictly: {order}")
+        self.assertGreater(len(order), 3)
+
+    def test_say_and_say_stop_reply_with_the_record(self):
+        S = server.Speaker
+        for k in ("todo", "ready", "epoch"):
+            p = mock.patch.object(S, k, [] if k != "epoch" else 0)
+            p.start()
+            self.addCleanup(p.stop)
+        for p in (mock.patch.object(S, "_start", classmethod(lambda cls: None)),
+                  mock.patch.object(S, "stop", classmethod(lambda cls, epoch=None: None)),
+                  mock.patch.object(server, "tts_engine", lambda: True)):
+            p.start()
+            self.addCleanup(p.stop)
+        reply = self.call("/api/say", {"text": "Hello there.", "id": 1})
+        self.assertEqual((reply["owed"], reply["left"]), (1, 0.0), f"/api/say reply: {reply}")
+        self.assertIn("n", reply)
+        stop = self.call("/api/say/stop", {})                 # (Speaker.stop is stubbed: the reply only reports the record)
+        self.assertEqual(sorted(k for k in stop if k != "ok"), ["left", "n", "owed"])
+        self.assertGreater(stop["n"], reply["n"])
 
     def test_off_ends_his_sound_now_and_clears_what_he_owed(self):
         W = server.Wake
@@ -730,6 +774,9 @@ class PageSpeaking(unittest.TestCase):
                                for after in (0.1, server.ECHO_TAIL + 0.2)])
 
 
+SPK_STEP_BYTES = 640                    # (two 20 ms chunks at SPK_RATE)
+
+
 class _Done(BaseException):
     """Ends a Speaker worker after it has handled what it was given (raised by its Condition when it would wait)."""
 
@@ -752,7 +799,8 @@ class NativeOwed(unittest.TestCase):
         W.talked, W.owed = [], 0
         self.clock = [100.0]
         self.player = FakePlayer(self.clock)
-        self.pub = mock.Mock()
+        self.q = server.BUS.sub()
+        self.addCleanup(server.BUS.unsub, self.q)
         for k, v in (("gen", 7), ("epoch", 0), ("proc", self.player), ("prate", SPK_RATE), ("written", 1000),
                      ("t0", 100.0), ("filled", False), ("stats", {}), ("todo", []), ("ready", []), ("making", False),
                      ("cv", _OneRound())):
@@ -761,9 +809,15 @@ class NativeOwed(unittest.TestCase):
         self.patch(server, "time", mock.Mock(wraps=time, monotonic=lambda: self.clock[0],
                                              sleep=lambda s: self.clock.__setitem__(0, self.clock[0] + s)))
         self.patch(server.hearing, "PlayRef", FakeRef())
-        self.patch(server.BUS, "pub", self.pub)
         self.patch(server, "SPOKEN", type(server.SPOKEN)())
         self.patch(W, "nudge", classmethod(lambda cls: None))
+
+    def events(self, kind="voice"):
+        """The BUS events of `kind` published since the last call."""
+        got = []
+        while not self.q.empty():
+            got.append(self.q.get_nowait())
+        return [e for e in got if e.get("t") == kind]
 
     def patch(self, obj, name, value):
         p = mock.patch.object(obj, name, value)
@@ -826,14 +880,14 @@ class NativeOwed(unittest.TestCase):
                 contextlib.redirect_stderr(io.StringIO()):
             self.work(server.Speaker._player_loop)
         self.assertEqual(server.Wake.owed, 0)
-        self.pub.assert_any_call(t="spk_skip", id=1)
+        self.assertEqual([e["id"] for e in self.events("spk_skip")], [1])
 
     def test_a_failing_synth_pays(self):
         server.Speaker.say("Hello there.", 1)
         with mock.patch.object(server, "synth", lambda text: 1 / 0), contextlib.redirect_stderr(io.StringIO()):
             self.work(server.Speaker._maker)
         self.assertEqual(server.Wake.owed, 0)
-        self.pub.assert_any_call(t="spk_skip", id=1)
+        self.assertEqual([e["id"] for e in self.events("spk_skip")], [1])
 
     def test_a_sentence_dropped_as_stale_leaves_the_next_ones_owe(self):
         server.Speaker.say("First one.", 1)
@@ -850,6 +904,36 @@ class NativeOwed(unittest.TestCase):
         server.Wake.owe()
         server.Wake.hush()
         self.assertEqual(server.Wake.owed, 0)
+
+    # ---- the copies of the record the page is told
+    def test_two_seconds_of_sound_are_told_at_a_bounded_rate_and_the_last_copy_has_the_true_end(self):
+        data = bytes(SPK_RATE * 2 * 2)                              # 2 s, written in 20 ms chunks
+        self.assertTrue(server.Speaker._write(data, 7))
+        events = self.events()
+        self.assertGreater(len(events), 1, "the page was told once for two seconds of sound")
+        self.assertLessEqual(len(events), 2 * 10 + 2, f"{len(events)} copies for two seconds of sound")
+        self.assertTrue(all(e["left"] > 0 for e in events), f"the page was told he'd gone quiet mid-sound: {events}")
+        self.assertAlmostEqual(self.clock[0] + events[-1]["left"], server.Wake.talked[-1][1], delta=0.05,
+                               msg="the last copy doesn't put his end where the record has it")
+        ns = [e["n"] for e in events]
+        self.assertEqual(ns, sorted(set(ns)), "n didn't rise strictly")
+
+    def test_an_owe_a_pay_and_a_cut_off_each_publish_at_once(self):
+        W = server.Wake
+        W.owe()
+        W.owe()
+        W.pay()
+        W.talking(self.clock[0], self.clock[0] + 5)
+        W.hush(self.clock[0])
+        self.assertEqual([(e["left"], e["owed"]) for e in self.events()],
+                         [(0.0, 1), (0.0, 2), (0.0, 1), (5.0, 1), (0.0, 0)])
+
+    def test_the_first_chunk_pays_and_tells_in_one_copy(self):
+        server.Wake.owe()
+        self.events()                                               # (the owe's own copy)
+        server.Speaker._write(bytes(SPK_STEP_BYTES), 7, owe=[True])
+        first = self.events()[0]
+        self.assertEqual((first["owed"], first["left"] > 0), (0, True), f"the copy showed the sentence neither owed nor sounding: {first}")
 
 
 if __name__ == "__main__":
